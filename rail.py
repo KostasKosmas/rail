@@ -84,7 +84,7 @@ entry, stop, profit = calculate_trade_levels(df)
 # 📌 Πρόβλεψη με Prophet (Facebook AI Time-Series Model)
 
 
-future_dates, forecast = df.index[-10:], df["Close"].values[-10:]
+future_dates, forecast = list(df.index[-10:]), df["Close"].values[-10:].flatten()
 
 fig = go.Figure()
 fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="Τιμή", line=dict(color="blue")))

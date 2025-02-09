@@ -87,7 +87,7 @@ entry, stop, profit = calculate_trade_levels(df)
 future_dates, forecast = list(df.index[-10:]), df["Close"].values[-10:].ravel()
 
 fig = go.Figure()
-fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="Τιμή", line=dict(color="blue")))
+fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="Τιμή", line=dict(color="blue"))
 )
 fig.add_trace(go.Scatter(x=df.index, y=df["ATR_Lower"], name="ATR Lower Band", line=dict(color="green", dash="dot"))))
 fig.add_trace(go.Scatter(x=future_dates, y=forecast, name="Forecasted Price", line=dict(color="orange", dash="dot")))

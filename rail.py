@@ -1,3 +1,4 @@
+
 import streamlit as st
 import os
 import yfinance as yf
@@ -32,11 +33,11 @@ def load_data(symbol, period="6mo", interval="1h"):
         df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
         df.dropna(inplace=True)
         
-        df["SMA_50"] = SMAIndicator(df["Close"], window=50).sma_indicator().values.ravel()
-        df["SMA_200"] = SMAIndicator(df["Close"], window=200).sma_indicator().values.ravel()
-        df["EMA_21"] = EMAIndicator(df["Close"], window=21).ema_indicator().values.ravel()
-        df["RSI"] = RSIIndicator(df["Close"], window=14).rsi().values.flatten().squeeze()
-        df["MACD"] = MACD(df["Close"]).macd().values.flatten().squeeze()
+        df["SMA_50"] = SMAIndicator(df["Close"], window=50).sma_indicator().astype(float)
+        df["SMA_200"] = SMAIndicator(df["Close"], window=200).sma_indicator().astype(float)
+        df["EMA_21"] = EMAIndicator(df["Close"], window=21).ema_indicator().astype(float)
+        df["RSI"] = RSIIndicator(df["Close"], window=14).rsi().astype(float)
+        df["MACD"] = MACD(df["Close"]).macd().astype(float)
         df["ATR_Upper"] = df["Close"] + (AverageTrueRange(df["High"], df["Low"], df["Close"], window=14).average_true_range() * 1.5)
         df["ATR_Lower"] = df["Close"] - (AverageTrueRange(df["High"], df["Low"], df["Close"], window=14).average_true_range() * 1.5)
         
@@ -54,7 +55,7 @@ if df.empty:
     st.stop()
 
 def train_model(df):
-    X = df[["SMA_50", "SMA_200", "EMA_21", "MACD", "RSI", "Bollinger_High", "Bollinger_Low", "ATR", "OBV", "VWAP"]]
+    X = df[["SMA_50", "SMA_200", "EMA_21", "MACD", "RSI", "ATR", "OBV", "Volume_MA"]]
     y = np.where(df["Close"].shift(-1) > df["Close"], 1, 0)
     
     model_rf = RandomForestClassifier(n_estimators=100)

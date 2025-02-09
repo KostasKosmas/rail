@@ -12,7 +12,7 @@ from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 
 # 📌 Εγκατάσταση απαιτούμενων πακέτων αν δεν υπάρχουν
 os.system("pip install --upgrade pip")
-os.system("pip install yfinance plotly ta scikit-learn prophet cmdstanpy")
+os.system("pip install pystan prophet")
 
 from prophet import Prophet
 from datetime import datetime, timedelta
@@ -116,4 +116,3 @@ st.subheader("📌 Trade Setup")
 st.write(f"✅ Entry Point: {entry:.2f}")
 st.write(f"🚨 Stop Loss: {stop:.2f}")
 st.write(f"🎯 Take Profit: {profit:.2f}")
-

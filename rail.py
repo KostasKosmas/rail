@@ -3,9 +3,10 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from ta.trend import SMAIndicator, MACD, IchimokuIndicator
+from ta.trend import SMAIndicator, EMAIndicator, MACD, IchimokuIndicator
 from ta.momentum import RSIIndicator, StochasticOscillator
-from ta.volatility import BollingerBands
+from ta.volatility import BollingerBands, AverageTrueRange
+from ta.volume import OnBalanceVolumeIndicator, VolumeWeightedAveragePrice
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from statsmodels.tsa.arima.model import ARIMA
 from datetime import datetime, timedelta
@@ -16,21 +17,35 @@ st.sidebar.header("⚙ Επιλογές")
 crypto_symbol = st.sidebar.text_input("Εισάγετε Crypto Symbol", "BTC-USD")
 
 def load_data(symbol, period="6mo", interval="1h"):
-    df = yf.download(symbol, period=period, interval=interval)
-    df["SMA_50"] = SMAIndicator(df["Close"], window=50).sma_indicator()
-    df["SMA_200"] = SMAIndicator(df["Close"], window=200).sma_indicator()
-    df["RSI"] = RSIIndicator(df["Close"], window=14).rsi()
-    df["MACD"] = MACD(df["Close"]).macd()
-    df["Bollinger_High"] = BollingerBands(df["Close"]).bollinger_hband()
-    df["Bollinger_Low"] = BollingerBands(df["Close"]).bollinger_lband()
-    df["Ichimoku"] = IchimokuIndicator(df["High"], df["Low"]).ichimoku_a()
-    df.dropna(inplace=True)
+    try:
+        df = yf.download(symbol, period=period, interval=interval)
+        if df.empty:
+            st.error("⚠️ Τα δεδομένα δεν είναι διαθέσιμα. Δοκιμάστε διαφορετικό σύμβολο.")
+            return pd.DataFrame()
+        
+        df["SMA_50"] = SMAIndicator(df["Close"], window=50).sma_indicator()
+        df["SMA_200"] = SMAIndicator(df["Close"], window=200).sma_indicator()
+        df["EMA_21"] = EMAIndicator(df["Close"], window=21).ema_indicator()
+        df["RSI"] = RSIIndicator(df["Close"], window=14).rsi()
+        df["MACD"] = MACD(df["Close"]).macd()
+        df["Bollinger_High"] = BollingerBands(df["Close"]).bollinger_hband()
+        df["Bollinger_Low"] = BollingerBands(df["Close"]).bollinger_lband()
+        df["Ichimoku"] = IchimokuIndicator(df["High"], df["Low"]).ichimoku_a()
+        df["ATR"] = AverageTrueRange(df["High"], df["Low"], df["Close"], window=14).average_true_range()
+        df["OBV"] = OnBalanceVolumeIndicator(df["Close"], df["Volume"]).on_balance_volume()
+        df["VWAP"] = VolumeWeightedAveragePrice(df["High"], df["Low"], df["Close"], df["Volume"]).volume_weighted_average_price()
+        df.dropna(inplace=True)
+    except Exception as e:
+        st.error(f"❌ Σφάλμα φόρτωσης δεδομένων: {e}")
+        return pd.DataFrame()
     return df
 
 df = load_data(crypto_symbol)
+if df.empty:
+    st.stop()
 
 def train_model(df):
-    X = df[["SMA_50", "SMA_200", "MACD", "RSI", "Bollinger_High", "Bollinger_Low"]]
+    X = df[["SMA_50", "SMA_200", "EMA_21", "MACD", "RSI", "Bollinger_High", "Bollinger_Low", "ATR", "OBV", "VWAP"]]
     y = np.where(df["Close"].shift(-1) > df["Close"], 1, 0)
     
     model_rf = RandomForestClassifier(n_estimators=100)
@@ -49,7 +64,7 @@ df = train_model(df)
 # 📌 Υπολογισμός Entry Point, Stop Loss, Take Profit
 def calculate_trade_levels(df):
     latest_close = df["Close"].iloc[-1]
-    atr = df["Close"].diff().abs().mean() * 1.5
+    atr = df["ATR"].iloc[-1] * 1.5
     entry_point = latest_close
     stop_loss = latest_close - atr
     take_profit = latest_close + atr * 2
@@ -57,12 +72,12 @@ def calculate_trade_levels(df):
 
 entry, stop, profit = calculate_trade_levels(df)
 
-# 📌 Προβλεπτικό Μοντέλο ARIMA για τιμή σε 12 ώρες
-def arima_forecast(df):
+# 📌 Προβλεπτικό Μοντέλο ARIMA για τιμή σε 48 ώρες
+def arima_forecast(df, steps=48):
     model = ARIMA(df["Close"], order=(5,1,0))
     model_fit = model.fit()
-    forecast = model_fit.forecast(steps=12)
-    future_dates = [df.index[-1] + timedelta(hours=i) for i in range(1, 13)]
+    forecast = model_fit.forecast(steps=steps)
+    future_dates = [df.index[-1] + timedelta(hours=i) for i in range(1, steps+1)]
     return future_dates, forecast
 
 future_dates, forecast = arima_forecast(df)
@@ -88,4 +103,3 @@ st.subheader("📌 Trade Setup")
 st.write(f"✅ Entry Point: {entry:.2f}")
 st.write(f"🚨 Stop Loss: {stop:.2f}")
 st.write(f"🎯 Take Profit: {profit:.2f}")
-

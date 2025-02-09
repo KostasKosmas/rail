@@ -12,15 +12,9 @@ from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 
 # 📌 Εγκατάσταση απαιτούμενων πακέτων αν δεν υπάρχουν
 os.system("pip install --upgrade pip")
-os.system("pip install --no-cache-dir prophet")
 
-try:
-    from prophet import Prophet
-except ImportError as e:
-    st.error(f'❌ Σφάλμα φόρτωσης του Prophet: {e}')
-    from prophet import Prophet
-except ImportError as e:
-    st.error(f'❌ Σφάλμα φόρτωσης του Prophet: {e}')
+
+
 from datetime import datetime, timedelta
 
 # 📌 Streamlit UI
@@ -88,18 +82,9 @@ def calculate_trade_levels(df):
 entry, stop, profit = calculate_trade_levels(df)
 
 # 📌 Πρόβλεψη με Prophet (Facebook AI Time-Series Model)
-def prophet_forecast(df, steps=48):
-    df_prophet = df.reset_index()[["Date", "Close"]]
-    df_prophet.columns = ["ds", "y"]
-    model = Prophet()
-    model.fit(df_prophet)
-    future = model.make_future_dataframe(periods=steps, freq='H')
-    forecast = model.predict(future)
-    future_dates = forecast['ds'].iloc[-steps:]
-    predicted_values = forecast['yhat'].iloc[-steps:]
-    return future_dates, predicted_values
 
-future_dates, forecast = prophet_forecast(df)
+
+future_dates, forecast = arima_forecast(df)
 
 fig = go.Figure()
 fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="Τιμή", line=dict(color="blue")))

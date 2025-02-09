@@ -1,4 +1,3 @@
-
 import streamlit as st
 import os
 import yfinance as yf
@@ -27,18 +26,18 @@ def load_data(symbol, period="6mo", interval="1h"):
         df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
         df.dropna(inplace=True)
         
-        df["SMA_50"] = SMAIndicator(df["Close"], window=50).sma_indicator().squeeze()
-        df["SMA_200"] = SMAIndicator(df["Close"], window=200).sma_indicator().squeeze()
-        df["EMA_21"] = EMAIndicator(df["Close"], window=21).ema_indicator().squeeze()
-        df["RSI"] = RSIIndicator(df["Close"], window=14).rsi().squeeze()
-        df["MACD"] = MACD(df["Close"]).macd().squeeze()
+        df["SMA_50"] = SMAIndicator(df["Close"], window=50).sma_indicator()
+        df["SMA_200"] = SMAIndicator(df["Close"], window=200).sma_indicator()
+        df["EMA_21"] = EMAIndicator(df["Close"], window=21).ema_indicator()
+        df["RSI"] = RSIIndicator(df["Close"], window=14).rsi()
+        df["MACD"] = MACD(df["Close"]).macd()
         
-        atr = AverageTrueRange(df["High"], df["Low"], df["Close"], window=14).average_true_range().squeeze()
+        atr = AverageTrueRange(df["High"], df["Low"], df["Close"], window=14).average_true_range()
         df["ATR"] = atr
         df["ATR_Upper"] = df["Close"] + (atr * 1.5)
         df["ATR_Lower"] = df["Close"] - (atr * 1.5)
         
-        df["OBV"] = OnBalanceVolumeIndicator(df["Close"], df["Volume"]).on_balance_volume().squeeze()
+        df["OBV"] = OnBalanceVolumeIndicator(df["Close"], df["Volume"]).on_balance_volume()
         df["Volume_MA"] = df["Volume"].rolling(window=20).mean()
         df.dropna(inplace=True)
     except Exception as e:
@@ -51,8 +50,8 @@ if df.empty:
     st.stop()
 
 def train_model(df):
-    X = df[["SMA_50", "SMA_200", "EMA_21", "MACD", "RSI", "ATR", "OBV", "Volume_MA"]]
-    y = np.where(df["Close"].shift(-1).values.ravel() > df["Close"].values.ravel(), 1, 0)
+    X = df[["SMA_50", "SMA_200", "EMA_21", "MACD", "RSI", "ATR", "OBV", "Volume_MA"]].values
+    y = np.where(df["Close"].shift(-1) > df["Close"], 1, 0)
     
     model_rf = RandomForestClassifier(n_estimators=100)
     model_rf.fit(X, y)
@@ -77,7 +76,7 @@ def calculate_trade_levels(df):
 
 entry, stop, profit = calculate_trade_levels(df)
 
-future_dates, forecast = list(df.index[-10:]), df["Close"].values[-10:].ravel().tolist()
+future_dates, forecast = list(df.index[-10:]), df["Close"].values[-10:].tolist()
 
 fig = go.Figure()
 fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="Τιμή", line=dict(color="blue")))
@@ -99,3 +98,4 @@ st.subheader("📌 Trade Setup")
 st.write(f"✅ Entry Point: {entry:.2f}")
 st.write(f"🚨 Stop Loss: {stop:.2f}")
 st.write(f"🎯 Take Profit: {profit:.2f}")
+

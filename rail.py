@@ -77,7 +77,7 @@ entry, stop, profit = calculate_trade_levels(df)
 
 # 📌 Προβλεπτικό Μοντέλο ARIMA για τιμή σε 48 ώρες
 def arima_forecast(df, steps=48):
-    model = ARIMA(df["Close"].values.reshape(-1), order=(5,1,0))
+    model = ARIMA(df["Close"].values.reshape(-1,), order=(5,1,0))
     model_fit = model.fit()
     forecast = model_fit.forecast(steps=steps)
     future_dates = [df.index[-1] + timedelta(hours=i) for i in range(1, steps+1)]

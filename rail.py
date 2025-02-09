@@ -81,7 +81,7 @@ def arima_forecast(df, steps=48):
     model_fit = model.fit()
     forecast = model_fit.forecast(steps=steps)
     future_dates = [df.index[-1] + timedelta(hours=i) for i in range(1, steps+1)]
-    return future_dates, forecast
+    return future_dates, forecast.flatten()
 
 future_dates, forecast = arima_forecast(df)
 

@@ -12,9 +12,12 @@ from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 
 # 📌 Εγκατάσταση απαιτούμενων πακέτων αν δεν υπάρχουν
 os.system("pip install --upgrade pip")
-os.system("pip install pystan prophet")
+os.system("pip install pystan fbprophet")
 
-from prophet import Prophet
+try:
+    from prophet import Prophet
+except ImportError:
+    from fbprophet import Prophet
 from datetime import datetime, timedelta
 
 # 📌 Streamlit UI

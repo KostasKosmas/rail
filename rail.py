@@ -8,7 +8,7 @@ from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.volatility import BollingerBands, AverageTrueRange
 from ta.volume import OnBalanceVolumeIndicator, VolumeWeightedAveragePrice
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from statsmodels.tsa.arima.model import ARIMA
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from datetime import datetime, timedelta
 
 # 📌 Streamlit UI
@@ -75,16 +75,15 @@ def calculate_trade_levels(df):
 
 entry, stop, profit = calculate_trade_levels(df)
 
-# 📌 Προβλεπτικό Μοντέλο ARIMA για τιμή σε 48 ώρες
-def arima_forecast(df, steps=48):
-    close_prices = df["Close"].values.reshape(-1)  # Εξασφάλιση ότι είναι μονοδιάστατο
-    model = ARIMA(close_prices, order=(5,1,0))
+# 📌 Προβλεπτικό Μοντέλο Exponential Smoothing (Holt-Winters) για τιμή σε 48 ώρες
+def exponential_smoothing_forecast(df, steps=48):
+    model = ExponentialSmoothing(df["Close"], trend="add", seasonal="add", seasonal_periods=24)
     model_fit = model.fit()
-    forecast = np.ravel(model_fit.forecast(steps=steps))  # Μετατροπή σε μονοδιάστατο array
+    forecast = model_fit.forecast(steps=steps)
     future_dates = [df.index[-1] + timedelta(hours=i) for i in range(1, steps+1)]
     return future_dates, forecast
 
-future_dates, forecast = arima_forecast(df)
+future_dates, forecast = exponential_smoothing_forecast(df)
 
 fig = go.Figure()
 fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="Τιμή", line=dict(color="blue")))

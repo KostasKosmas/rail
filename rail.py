@@ -12,12 +12,15 @@ from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 
 # 📌 Εγκατάσταση απαιτούμενων πακέτων αν δεν υπάρχουν
 os.system("pip install --upgrade pip")
-os.system("pip install pystan fbprophet")
+os.system("pip install --no-cache-dir prophet")
 
 try:
     from prophet import Prophet
 except ImportError:
-    from fbprophet import Prophet
+    try:
+    from prophet import Prophet
+except ImportError as e:
+    st.error(f'❌ Σφάλμα φόρτωσης του Prophet: {e}')
 from datetime import datetime, timedelta
 
 # 📌 Streamlit UI

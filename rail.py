@@ -1,3 +1,4 @@
+
 import streamlit as st
 import os
 import yfinance as yf
@@ -51,7 +52,7 @@ if df.empty:
 
 def train_model(df):
     X = df[["SMA_50", "SMA_200", "EMA_21", "MACD", "RSI", "ATR", "OBV", "Volume_MA"]]
-    y = np.where(df["Close"].shift(-1).squeeze() > df["Close"].squeeze(), 1, 0)
+    y = np.where(df["Close"].shift(-1).values.ravel() > df["Close"].values.ravel(), 1, 0)
     
     model_rf = RandomForestClassifier(n_estimators=100)
     model_rf.fit(X, y)
@@ -76,7 +77,7 @@ def calculate_trade_levels(df):
 
 entry, stop, profit = calculate_trade_levels(df)
 
-future_dates, forecast = list(df.index[-10:]), df["Close"].values[-10:].flatten().tolist()
+future_dates, forecast = list(df.index[-10:]), df["Close"].values[-10:].ravel().tolist()
 
 fig = go.Figure()
 fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="Τιμή", line=dict(color="blue")))

@@ -38,11 +38,11 @@ def load_data(symbol, period="6mo", interval="1h"):
         df["RSI"] = RSIIndicator(df["Close"], window=14).rsi().values.flatten().squeeze()
         df["MACD"] = MACD(df["Close"]).macd().values.flatten().squeeze()
         df["ATR_Upper"] = df["Close"] + (AverageTrueRange(df["High"], df["Low"], df["Close"], window=14).average_true_range() * 1.5)
-        df["Bollinger_Low"] = BollingerBands(df["Close"]).bollinger_lband().values.flatten().squeeze()
+        df["ATR_Lower"] = df["Close"] - (AverageTrueRange(df["High"], df["Low"], df["Close"], window=14).average_true_range() * 1.5)
         
         df["ATR"] = AverageTrueRange(df["High"], df["Low"], df["Close"], window=14).average_true_range()
         df["OBV"] = OnBalanceVolumeIndicator(df["Close"], df["Volume"]).on_balance_volume()
-        df["VWAP"] = VolumeWeightedAveragePrice(df["High"], df["Low"], df["Close"], df["Volume"]).volume_weighted_average_price()
+        df["Volume_MA"] = df["Volume"].rolling(window=20).mean()
         df.dropna(inplace=True)
     except Exception as e:
         st.error(f"❌ Σφάλμα φόρτωσης δεδομένων: {e}")
@@ -88,8 +88,8 @@ future_dates, forecast = list(df.index[-10:]), df["Close"].values[-10:].ravel()
 
 fig = go.Figure()
 fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="Τιμή", line=dict(color="blue")))
-fig.add_trace(go.Scatter(x=df.index, y=df["Bollinger_High"], name="Bollinger High", line=dict(color="red", dash="dot")))
-fig.add_trace(go.Scatter(x=df.index, y=df["Bollinger_Low"], name="Bollinger Low", line=dict(color="green", dash="dot")))
+)
+fig.add_trace(go.Scatter(x=df.index, y=df["ATR_Lower"], name="ATR Lower Band", line=dict(color="green", dash="dot"))))
 fig.add_trace(go.Scatter(x=future_dates, y=forecast, name="Forecasted Price", line=dict(color="orange", dash="dot")))
 
 st.plotly_chart(fig)

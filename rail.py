@@ -37,9 +37,9 @@ def load_data(symbol, period="6mo", interval="1h"):
         df["EMA_21"] = EMAIndicator(df["Close"], window=21).ema_indicator().values.ravel()
         df["RSI"] = RSIIndicator(df["Close"], window=14).rsi().values.flatten().squeeze()
         df["MACD"] = MACD(df["Close"]).macd().values.flatten().squeeze()
-        df["Bollinger_High"] = BollingerBands(df["Close"]).bollinger_hband().values.flatten().squeeze()
+        df["ATR_Upper"] = df["Close"] + (AverageTrueRange(df["High"], df["Low"], df["Close"], window=14).average_true_range() * 1.5)
         df["Bollinger_Low"] = BollingerBands(df["Close"]).bollinger_lband().values.flatten().squeeze()
-        df["Ichimoku"] = IchimokuIndicator(df["High"], df["Low"]).ichimoku_a().values.ravel()
+        
         df["ATR"] = AverageTrueRange(df["High"], df["Low"], df["Close"], window=14).average_true_range()
         df["OBV"] = OnBalanceVolumeIndicator(df["Close"], df["Volume"]).on_balance_volume()
         df["VWAP"] = VolumeWeightedAveragePrice(df["High"], df["Low"], df["Close"], df["Volume"]).volume_weighted_average_price()

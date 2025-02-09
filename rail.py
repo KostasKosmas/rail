@@ -16,8 +16,8 @@ os.system("pip install --no-cache-dir prophet")
 
 try:
     from prophet import Prophet
-except ImportError:
-    try:
+except ImportError as e:
+    st.error(f'❌ Σφάλμα φόρτωσης του Prophet: {e}')
     from prophet import Prophet
 except ImportError as e:
     st.error(f'❌ Σφάλμα φόρτωσης του Prophet: {e}')

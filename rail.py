@@ -8,7 +8,7 @@ from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.volatility import BollingerBands, AverageTrueRange
 from ta.volume import OnBalanceVolumeIndicator, VolumeWeightedAveragePrice
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from statsmodels.tsa.holtwinters import ExponentialSmoothing
+from fbprophet import Prophet
 from datetime import datetime, timedelta
 
 # 📌 Streamlit UI
@@ -75,15 +75,19 @@ def calculate_trade_levels(df):
 
 entry, stop, profit = calculate_trade_levels(df)
 
-# 📌 Προβλεπτικό Μοντέλο Exponential Smoothing (Holt-Winters) για τιμή σε 48 ώρες
-def exponential_smoothing_forecast(df, steps=48):
-    model = ExponentialSmoothing(df["Close"], trend="add", seasonal="add", seasonal_periods=24)
-    model_fit = model.fit()
-    forecast = model_fit.forecast(steps=steps)
-    future_dates = [df.index[-1] + timedelta(hours=i) for i in range(1, steps+1)]
-    return future_dates, forecast
+# 📌 Πρόβλεψη με Prophet (Facebook AI Time-Series Model)
+def prophet_forecast(df, steps=48):
+    df_prophet = df.reset_index()[["Date", "Close"]]
+    df_prophet.columns = ["ds", "y"]
+    model = Prophet()
+    model.fit(df_prophet)
+    future = model.make_future_dataframe(periods=steps, freq='H')
+    forecast = model.predict(future)
+    future_dates = forecast['ds'].iloc[-steps:]
+    predicted_values = forecast['yhat'].iloc[-steps:]
+    return future_dates, predicted_values
 
-future_dates, forecast = exponential_smoothing_forecast(df)
+future_dates, forecast = prophet_forecast(df)
 
 fig = go.Figure()
 fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="Τιμή", line=dict(color="blue")))
@@ -106,3 +110,4 @@ st.subheader("📌 Trade Setup")
 st.write(f"✅ Entry Point: {entry:.2f}")
 st.write(f"🚨 Stop Loss: {stop:.2f}")
 st.write(f"🎯 Take Profit: {profit:.2f}")
+

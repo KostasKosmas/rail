@@ -1,9 +1,8 @@
-fastapi
-uvicorn
-numpy
-pandas
-scikit-learn
-tensorflow
+streamlit
 yfinance
+pandas
+numpy
+plotly
+scikit-learn
+statsmodels
 ta
-firebase-admin

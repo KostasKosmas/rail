@@ -9,12 +9,13 @@ from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.volatility import BollingerBands, AverageTrueRange
 from ta.volume import OnBalanceVolumeIndicator, VolumeWeightedAveragePrice
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from prophet import Prophet
-from datetime import datetime, timedelta
 
 # 📌 Εγκατάσταση απαιτούμενων πακέτων αν δεν υπάρχουν
 os.system("pip install --upgrade pip")
-os.system("pip install yfinance plotly ta scikit-learn prophet")
+os.system("pip install yfinance plotly ta scikit-learn prophet cmdstanpy")
+
+from prophet import Prophet
+from datetime import datetime, timedelta
 
 # 📌 Streamlit UI
 st.title("📈 AI Crypto Market Analysis Bot")
@@ -115,3 +116,4 @@ st.subheader("📌 Trade Setup")
 st.write(f"✅ Entry Point: {entry:.2f}")
 st.write(f"🚨 Stop Loss: {stop:.2f}")
 st.write(f"🎯 Take Profit: {profit:.2f}")
+

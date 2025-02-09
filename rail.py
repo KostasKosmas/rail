@@ -23,6 +23,9 @@ def load_data(symbol, period="6mo", interval="1h"):
             st.error("⚠️ Τα δεδομένα δεν είναι διαθέσιμα. Δοκιμάστε διαφορετικό σύμβολο.")
             return pd.DataFrame()
         
+        df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
+        df.dropna(inplace=True)
+        
         df["SMA_50"] = SMAIndicator(df["Close"], window=50).sma_indicator()
         df["SMA_200"] = SMAIndicator(df["Close"], window=200).sma_indicator()
         df["EMA_21"] = EMAIndicator(df["Close"], window=21).ema_indicator()
@@ -74,7 +77,7 @@ entry, stop, profit = calculate_trade_levels(df)
 
 # 📌 Προβλεπτικό Μοντέλο ARIMA για τιμή σε 48 ώρες
 def arima_forecast(df, steps=48):
-    model = ARIMA(df["Close"], order=(5,1,0))
+    model = ARIMA(df["Close"].values.flatten(), order=(5,1,0))
     model_fit = model.fit()
     forecast = model_fit.forecast(steps=steps)
     future_dates = [df.index[-1] + timedelta(hours=i) for i in range(1, steps+1)]
@@ -103,3 +106,4 @@ st.subheader("📌 Trade Setup")
 st.write(f"✅ Entry Point: {entry:.2f}")
 st.write(f"🚨 Stop Loss: {stop:.2f}")
 st.write(f"🎯 Take Profit: {profit:.2f}")
+

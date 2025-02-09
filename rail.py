@@ -4,18 +4,12 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from ta.trend import SMAIndicator, EMAIndicator, MACD, IchimokuIndicator
-from ta.momentum import RSIIndicator, StochasticOscillator
-from ta.volatility import BollingerBands, AverageTrueRange
-from ta.volume import OnBalanceVolumeIndicator, VolumeWeightedAveragePrice
+from ta.trend import SMAIndicator, EMAIndicator, MACD
+from ta.momentum import RSIIndicator
+from ta.volatility import AverageTrueRange
+from ta.volume import OnBalanceVolumeIndicator
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-
-# 📌 Εγκατάσταση απαιτούμενων πακέτων αν δεν υπάρχουν
-os.system("pip install --upgrade pip")
-
-
-
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # 📌 Streamlit UI
 st.title("📈 AI Crypto Market Analysis Bot")
@@ -32,16 +26,18 @@ def load_data(symbol, period="6mo", interval="1h"):
         df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
         df.dropna(inplace=True)
         
-        df["SMA_50"] = SMAIndicator(df["Close"], window=50).sma_indicator().astype(float)
-        df["SMA_200"] = SMAIndicator(df["Close"], window=200).sma_indicator().astype(float)
-        df["EMA_21"] = EMAIndicator(df["Close"], window=21).ema_indicator().astype(float)
-        df["RSI"] = RSIIndicator(df["Close"], window=14).rsi().astype(float)
-        df["MACD"] = MACD(df["Close"]).macd().astype(float)
-        df["ATR_Upper"] = df["Close"] + (AverageTrueRange(df["High"], df["Low"], df["Close"], window=14).average_true_range() * 1.5)
-        df["ATR_Lower"] = df["Close"] - (AverageTrueRange(df["High"], df["Low"], df["Close"], window=14).average_true_range() * 1.5)
+        df["SMA_50"] = SMAIndicator(df["Close"], window=50).sma_indicator().squeeze().astype(float)
+        df["SMA_200"] = SMAIndicator(df["Close"], window=200).sma_indicator().squeeze().astype(float)
+        df["EMA_21"] = EMAIndicator(df["Close"], window=21).ema_indicator().squeeze().astype(float)
+        df["RSI"] = RSIIndicator(df["Close"], window=14).rsi().squeeze().astype(float)
+        df["MACD"] = MACD(df["Close"]).macd().squeeze().astype(float)
         
-        df["ATR"] = AverageTrueRange(df["High"], df["Low"], df["Close"], window=14).average_true_range()
-        df["OBV"] = OnBalanceVolumeIndicator(df["Close"], df["Volume"]).on_balance_volume()
+        atr = AverageTrueRange(df["High"], df["Low"], df["Close"], window=14).average_true_range().squeeze().astype(float)
+        df["ATR"] = atr
+        df["ATR_Upper"] = df["Close"] + (atr * 1.5)
+        df["ATR_Lower"] = df["Close"] - (atr * 1.5)
+        
+        df["OBV"] = OnBalanceVolumeIndicator(df["Close"], df["Volume"]).on_balance_volume().squeeze().astype(float)
         df["Volume_MA"] = df["Volume"].rolling(window=20).mean()
         df.dropna(inplace=True)
     except Exception as e:
@@ -55,7 +51,7 @@ if df.empty:
 
 def train_model(df):
     X = df[["SMA_50", "SMA_200", "EMA_21", "MACD", "RSI", "ATR", "OBV", "Volume_MA"]]
-    y = np.where(df["Close"].shift(-1) > df["Close"], 1, 0)
+    y = np.where(df["Close"].shift(-1).squeeze() > df["Close"], 1, 0)
     
     model_rf = RandomForestClassifier(n_estimators=100)
     model_rf.fit(X, y)
@@ -70,7 +66,6 @@ def train_model(df):
 
 df = train_model(df)
 
-# 📌 Υπολογισμός Entry Point, Stop Loss, Take Profit
 def calculate_trade_levels(df):
     latest_close = df["Close"].iloc[-1]
     atr = df["ATR"].iloc[-1] * 1.5
@@ -81,14 +76,10 @@ def calculate_trade_levels(df):
 
 entry, stop, profit = calculate_trade_levels(df)
 
-# 📌 Πρόβλεψη με Prophet (Facebook AI Time-Series Model)
-
-
-future_dates, forecast = list(df.index[-10:]), df["Close"].values[-10:].flatten().tolist()
+future_dates, forecast = list(df.index[-10:]), df["Close"].values[-10:].tolist()
 
 fig = go.Figure()
-fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="Τιμή", line=dict(color="blue"))
-)
+fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="Τιμή", line=dict(color="blue")))
 fig.add_trace(go.Scatter(x=df.index, y=df["ATR_Lower"], name="ATR Lower Band", line=dict(color="green", dash="dot")))
 fig.add_trace(go.Scatter(x=future_dates, y=forecast, name="Forecasted Price", line=dict(color="orange", dash="dot")))
 

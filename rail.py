@@ -32,13 +32,13 @@ def load_data(symbol, period="6mo", interval="1h"):
         df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
         df.dropna(inplace=True)
         
-        df["SMA_50"] = SMAIndicator(df["Close"], window=50).sma_indicator()
-        df["SMA_200"] = SMAIndicator(df["Close"], window=200).sma_indicator()
-        df["EMA_21"] = EMAIndicator(df["Close"], window=21).ema_indicator()
-        df["RSI"] = RSIIndicator(df["Close"], window=14).rsi()
-        df["MACD"] = MACD(df["Close"]).macd()
-        df["Bollinger_High"] = BollingerBands(df["Close"]).bollinger_hband()
-        df["Bollinger_Low"] = BollingerBands(df["Close"]).bollinger_lband()
+        df["SMA_50"] = SMAIndicator(df["Close"], window=50).sma_indicator().squeeze()
+        df["SMA_200"] = SMAIndicator(df["Close"], window=200).sma_indicator().squeeze()
+        df["EMA_21"] = EMAIndicator(df["Close"], window=21).ema_indicator().squeeze()
+        df["RSI"] = RSIIndicator(df["Close"], window=14).rsi().squeeze()
+        df["MACD"] = MACD(df["Close"]).macd().squeeze()
+        df["Bollinger_High"] = BollingerBands(df["Close"]).bollinger_hband().squeeze()
+        df["Bollinger_Low"] = BollingerBands(df["Close"]).bollinger_lband().squeeze()
         df["Ichimoku"] = IchimokuIndicator(df["High"], df["Low"]).ichimoku_a()
         df["ATR"] = AverageTrueRange(df["High"], df["Low"], df["Close"], window=14).average_true_range()
         df["OBV"] = OnBalanceVolumeIndicator(df["Close"], df["Volume"]).on_balance_volume()
@@ -84,7 +84,7 @@ entry, stop, profit = calculate_trade_levels(df)
 # 📌 Πρόβλεψη με Prophet (Facebook AI Time-Series Model)
 
 
-future_dates, forecast = arima_forecast(df)
+future_dates, forecast = df.index[-10:], df["Close"].values[-10:]
 
 fig = go.Figure()
 fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="Τιμή", line=dict(color="blue")))

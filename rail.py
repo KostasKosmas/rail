@@ -93,9 +93,9 @@ def calculate_trade_levels(df, timeframe):
         latest_close = df["Close"].iloc[-1].item()  # Ensure scalar value
         
         # Use a rolling ATR calculation over 14 periods
-        atr = (df["High"].rolling(window=14).mean() - df["Low"].rolling(window=14).mean()).iloc[-1]
+        atr = (df["High"].rolling(window=14).mean() - df["Low"].rolling(window=14).mean()).iloc[-1].item()  # Ensure scalar value
         
-        latest_pred = df["Final_Prediction"].iloc[-1]
+        latest_pred = df["Final_Prediction"].iloc[-1].item()  # Ensure scalar value
         if latest_pred == 1:  # Long position
             entry_point = latest_close
             stop_loss = latest_close - (atr * 1.5)
@@ -136,14 +136,14 @@ def main():
 
     # Extend predictions for the next 14 days
     future_dates = pd.date_range(df.index[-1], periods=14, freq="D")  # Predict for the next 14 days
-    future_predictions = np.repeat(df["Close"].iloc[-1], len(future_dates))  # Use latest close as placeholder
+    future_predictions = np.repeat(df["Close"].iloc[-1].item(), len(future_dates))  # Use latest close as placeholder
     fig.add_trace(go.Scatter(x=future_dates, y=future_predictions, name="Predicted Price", line=dict(color="orange", dash="dot")))
 
     st.plotly_chart(fig)
 
     # Display latest predictions and trade levels
     st.subheader("🔍 Latest Predictions & Trade Levels")
-    latest_pred = df["Final_Prediction"].iloc[-1]  # Extract the latest prediction value
+    latest_pred = df["Final_Prediction"].iloc[-1].item()  # Extract the latest prediction value
     confidence = np.random.uniform(70, 95)
 
     if latest_pred == 1:

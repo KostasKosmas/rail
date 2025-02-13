@@ -91,9 +91,18 @@ def calculate_trade_levels(df):
     try:
         latest_close = df["Close"].iloc[-1].item()  # Extract the latest close price as a scalar value
         atr = df["High"].iloc[-1] - df["Low"].iloc[-1]  # Use ATR-like calculation for dynamic levels
-        entry_point = float(latest_close)  # Convert to float
-        stop_loss = float(latest_close - (atr * 1.5))  # Dynamic stop loss
-        take_profit = float(latest_close + (atr * 2))  # Dynamic take profit
+        
+        # Determine trade levels based on prediction
+        latest_pred = df["Final_Prediction"].iloc[-1]
+        if latest_pred == 1:  # Long position
+            entry_point = latest_close
+            stop_loss = latest_close - (atr * 1.5)  # Stop loss below entry
+            take_profit = latest_close + (atr * 2)  # Take profit above entry
+        else:  # Short position
+            entry_point = latest_close
+            stop_loss = latest_close + (atr * 1.5)  # Stop loss above entry
+            take_profit = latest_close - (atr * 2)  # Take profit below entry
+        
         st.write("Trade levels calculated: Entry Point:", entry_point, "Stop Loss:", stop_loss, "Take Profit:", take_profit)
     except Exception as e:
         st.error(f"❌ Σφάλμα υπολογισμού επιπέδων συναλλαγών: {e}")
@@ -112,11 +121,11 @@ def main():
     if entry is None or stop is None or profit is None:
         st.stop()
 
-    # Display live price chart with predictions
-    st.subheader("📊 Live Price Chart with Predictions")
+    # Display live price chart with future predictions
+    st.subheader("📊 Live Price Chart with Future Predictions")
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="Τιμή", line=dict(color="blue")))
-    fig.add_trace(go.Scatter(x=df.index, y=df["Close"].shift(-1), name="Predicted Price", line=dict(color="orange", dash="dot")))
+    fig.add_trace(go.Scatter(x=df.index[-100:], y=df["Close"].iloc[-100:], name="Τιμή", line=dict(color="blue")))
+    fig.add_trace(go.Scatter(x=df.index[-100:], y=df["Close"].shift(-1).iloc[-100:], name="Predicted Price", line=dict(color="orange", dash="dot")))
     st.plotly_chart(fig)
 
     # Display latest predictions and trade levels

@@ -80,11 +80,11 @@ def train_model(df):
 
 def calculate_trade_levels(df, timeframe, confidence):
     try:
-        latest_close = df["Close"].iloc[-1].item()
-        atr = (df["High"].rolling(window=14).mean() - df["Low"].rolling(window=14).mean()).iloc[-1].item()
-        latest_pred = df["Final_Prediction"].iloc[-1].item()
-        rsi = df["RSI"].iloc[-1].item()
-        macd = df["MACD"].iloc[-1].item()
+        latest_close = df["Close"].iloc[-1].item()  # Use .item() to extract the value
+        atr = (df["High"].rolling(window=14).mean() - df["Low"].rolling(window=14).mean()).iloc[-1].item()  # Use .item()
+        latest_pred = df["Final_Prediction"].iloc[-1].item()  # Use .item()
+        rsi = df["RSI"].iloc[-1].item()  # Use .item()
+        macd = df["MACD"].iloc[-1].item()  # Use .item()
         if confidence > 80:
             stop_loss_multiplier = 1.2
             take_profit_multiplier = 1.8

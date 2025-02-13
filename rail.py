@@ -32,22 +32,22 @@ def load_data(symbol, period="6mo", interval="1h"):
         # Debug statements
         st.write("Dataframe after initial processing:", df.head())
         
-        df["SMA_50"] = SMAIndicator(df["Close"], window=50).sma_indicator().values.flatten()
+        df["SMA_50"] = SMAIndicator(df["Close"], window=50).sma_indicator().values
         st.write("SMA_50 added:", df[["Close", "SMA_50"]].head())
         
-        df["SMA_200"] = SMAIndicator(df["Close"], window=200).sma_indicator().values.flatten()
+        df["SMA_200"] = SMAIndicator(df["Close"], window=200).sma_indicator().values
         st.write("SMA_200 added:", df[["Close", "SMA_200"]].head())
         
-        df["EMA_21"] = EMAIndicator(df["Close"], window=21).ema_indicator().values.flatten()
+        df["EMA_21"] = EMAIndicator(df["Close"], window=21).ema_indicator().values
         st.write("EMA_21 added:", df[["Close", "EMA_21"]].head())
         
-        df["RSI"] = RSIIndicator(df["Close"], window=14).rsi().values.flatten()
+        df["RSI"] = RSIIndicator(df["Close"], window=14).rsi().values
         st.write("RSI added:", df[["Close", "RSI"]].head())
         
-        df["MACD"] = MACD(df["Close"]).macd().values.flatten()
+        df["MACD"] = MACD(df["Close"]).macd().values
         st.write("MACD added:", df[["Close", "MACD"]].head())
         
-        atr = AverageTrueRange(df["High"], df["Low"], df["Close"], window=14).average_true_range().values.flatten()
+        atr = AverageTrueRange(df["High"], df["Low"], df["Close"], window=14).average_true_range().values
         df["ATR"] = atr
         st.write("ATR added:", df[["Close", "ATR"]].head())
         
@@ -55,7 +55,7 @@ def load_data(symbol, period="6mo", interval="1h"):
         df["ATR_Lower"] = df["Close"] - (atr * 1.5)
         st.write("ATR Upper and Lower bands added:", df[["Close", "ATR_Upper", "ATR_Lower"]].head())
         
-        df["OBV"] = OnBalanceVolumeIndicator(df["Close"], df["Volume"]).on_balance_volume().values.flatten()
+        df["OBV"] = OnBalanceVolumeIndicator(df["Close"], df["Volume"]).on_balance_volume().values
         st.write("OBV added:", df[["Close", "OBV"]].head())
         
         df["Volume_MA"] = df["Volume"].rolling(window=20).mean().values
@@ -80,11 +80,11 @@ def train_model(df):
         y = np.where(df["Close"].shift(-1) > df["Close"], 1, 0)
         st.write("Target vector (y):", y[:5])
         
-        model_rf = RandomForestClassifier(n_estimators=100)
+        model_rf = RandomForestClassifier(n_estimators=100, random_state=42)
         model_rf.fit(X, y)
         st.write("RandomForest model trained")
         
-        model_gb = GradientBoostingClassifier(n_estimators=100)
+        model_gb = GradientBoostingClassifier(n_estimators=100, random_state=42)
         model_gb.fit(X, y)
         st.write("GradientBoosting model trained")
         
@@ -116,7 +116,7 @@ entry, stop, profit = calculate_trade_levels(df)
 if entry is None or stop is None or profit is None:
     st.stop()
 
-future_dates, forecast = list(df.index[-10:]), df["Close"].values[-10:].flatten().tolist()
+future_dates, forecast = list(df.index[-10:]), df["Close"].values[-10:].tolist()
 
 fig = go.Figure()
 fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="Τιμή", line=dict(color="blue")))

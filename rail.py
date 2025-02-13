@@ -6,8 +6,9 @@ import plotly.graph_objects as go
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.metrics import accuracy_score
 from statsmodels.tsa.arima.model import ARIMA
+from pmdarima import auto_arima  # For auto-tuning ARIMA parameters
+from sklearn.metrics import mean_absolute_error
 import time
-import pytz
 import joblib
 import os
 
@@ -20,27 +21,52 @@ def save_artifacts(df, model_rf, model_gb, crypto_symbol):
     df.to_csv(f"saved_models/{crypto_symbol}_data.csv")
     st.write("Artifacts saved successfully!")
 
-# Train ARIMA model
+# Train ARIMA model with auto-tuning
 def train_arima_model(df):
     try:
-        # Fit ARIMA model
-        model = ARIMA(df["Close"], order=(5, 1, 0))  # Example order (p, d, q)
-        model_fit = model.fit()
-        st.write("ARIMA model trained successfully.")
-        return model_fit
+        # Auto-tune ARIMA parameters
+        model = auto_arima(
+            df["Close"],
+            seasonal=False,  # Non-seasonal data
+            trace=True,  # Print logs
+            error_action="ignore",  # Ignore errors
+            suppress_warnings=True,  # Suppress warnings
+            stepwise=True,  # Use stepwise algorithm
+        )
+        st.write(f"Best ARIMA parameters: {model.order}")
+        return model
     except Exception as e:
         st.error(f"❌ Σφάλμα εκπαίδευσης ARIMA μοντέλου: {e}")
         return None
 
 # Predict future prices with ARIMA
-def predict_with_arima(model_fit, future_days=14):
+def predict_with_arima(model, future_days=14):
     try:
-        # Predict future prices
-        predictions = model_fit.forecast(steps=future_days)
-        return predictions
+        # Predict future prices with confidence intervals
+        predictions, conf_int = model.predict(n_periods=future_days, return_conf_int=True)
+        return predictions, conf_int
     except Exception as e:
         st.error(f"❌ Σφάλμα πρόβλεψης με ARIMA: {e}")
-        return None
+        return None, None
+
+# Evaluate ARIMA model accuracy
+def evaluate_arima_model(model, df):
+    try:
+        # Split data into train and test sets
+        train_size = int(len(df) * 0.8)
+        train, test = df["Close"].iloc[:train_size], df["Close"].iloc[train_size:]
+        
+        # Fit the model on training data
+        model.fit(train)
+        
+        # Predict on test data
+        predictions = model.predict(n_periods=len(test))
+        
+        # Calculate Mean Absolute Error (MAE)
+        mae = mean_absolute_error(test, predictions)
+        st.write(f"ARIMA Model Mean Absolute Error (MAE): {mae:.2f}")
+    except Exception as e:
+        st.error(f"❌ Σφάλμα αξιολόγησης ARIMA μοντέλου: {e}")
 
 # 📌 Streamlit UI
 st.title("📈 AI Crypto Market Analysis Bot")
@@ -56,7 +82,6 @@ def load_data(symbol, interval="1d", period="5y"):
         if df.empty:
             st.warning(f"⚠️ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {symbol} με interval {interval}. Δοκιμάστε διαφορετικό interval.")
             return None
-        df.index = df.index.tz_localize("UTC").tz_convert("Europe/Athens")
         df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
         df.dropna(inplace=True)
         df["SMA_50"] = df["Close"].rolling(window=50).mean()
@@ -165,8 +190,12 @@ def main():
     # Train ARIMA model
     arima_model = train_arima_model(data["1d"])
     if arima_model is not None:
+        # Evaluate ARIMA model accuracy
+        evaluate_arima_model(arima_model, data["1d"])
+
+        # Predict future prices with ARIMA
         future_dates = pd.date_range(data["1d"].index[-1], periods=14, freq="D")
-        future_predictions_arima = predict_with_arima(arima_model)
+        future_predictions_arima, conf_int = predict_with_arima(arima_model)
         if future_predictions_arima is not None:
             st.write("ARIMA Future Predictions:", future_predictions_arima)
 
@@ -178,9 +207,17 @@ def main():
     last_6_months = data["1d"].iloc[-180:]
     fig.add_trace(go.Scatter(x=last_6_months.index, y=last_6_months["Close"], name="Actual Price (Last 6 Months)", line=dict(color="blue")))
 
-    # Plot ARIMA future predictions
+    # Plot ARIMA future predictions with confidence intervals
     if arima_model is not None and future_predictions_arima is not None:
         fig.add_trace(go.Scatter(x=future_dates, y=future_predictions_arima, name="ARIMA Future Predictions", line=dict(color="red", dash="dot")))
+        fig.add_trace(go.Scatter(
+            x=np.concatenate([future_dates, future_dates[::-1]]),  # X values for the confidence interval
+            y=np.concatenate([conf_int[:, 0], conf_int[::-1, 1]]),  # Y values for the confidence interval
+            fill="toself",
+            fillcolor="rgba(255, 0, 0, 0.2)",
+            line=dict(color="rgba(255, 0, 0, 0)"),
+            name="ARIMA Confidence Interval",
+        ))
 
     # Plot existing future predictions (from RandomForest/GradientBoosting)
     future_dates = pd.date_range(data["1d"].index[-1], periods=14, freq="D")

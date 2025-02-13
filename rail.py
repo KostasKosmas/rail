@@ -24,8 +24,8 @@ def load_data(symbol, interval="1d", period="5y"):
             st.warning(f"⚠️ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {symbol} με interval {interval}. Δοκιμάστε διαφορετικό interval.")
             return None  # Return None if data is not available
         
-        # Localize the timestamps to UTC and convert to Greece timezone
-        df.index = df.index.tz_localize("UTC").tz_convert("Europe/Athens")
+        # Convert the DataFrame index to Greece timezone
+        df.index = df.index.tz_convert("Europe/Athens")
         
         df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
         df.dropna(inplace=True)
@@ -146,7 +146,6 @@ def calculate_trade_levels(df, timeframe, confidence):
 def main():
     # Define timeframes and their corresponding intervals and periods
     timeframes = {
-        "1h": {"interval": "1h", "period": "730d"},  # 1-hour data for the last 2 years
         "1d": {"interval": "1d", "period": "5y"},    # Daily data for the last 5 years
         "1w": {"interval": "1wk", "period": "5y"},   # Weekly data for the last 5 years
     }
@@ -154,16 +153,8 @@ def main():
     for timeframe, params in timeframes.items():
         df = load_data(crypto_symbol, interval=params["interval"], period=params["period"])
         if df is None:
-            # Fall back to daily data only if the requested interval is not daily
-            if params["interval"] != "1d":
-                st.warning(f"⚠️ Το interval {params['interval']} δεν είναι διαθέσιμο. Χρησιμοποιούμε daily data αντί για {timeframe}.")
-                df = load_data(crypto_symbol, interval="1d", period=params["period"])
-                if df is None:
-                    st.error(f"❌ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {crypto_symbol}.")
-                    st.stop()
-            else:
-                st.error(f"❌ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {crypto_symbol}.")
-                st.stop()
+            st.error(f"❌ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {crypto_symbol}.")
+            st.stop()
         data[timeframe] = df
 
     # Train models and calculate trade levels for each timeframe
@@ -217,15 +208,8 @@ def main():
         for timeframe, params in timeframes.items():
             df = load_data(crypto_symbol, interval=params["interval"], period=params["period"])
             if df is None:
-                # Fall back to daily data only if the requested interval is not daily
-                if params["interval"] != "1d":
-                    df = load_data(crypto_symbol, interval="1d", period=params["period"])
-                    if df is None:
-                        st.error(f"❌ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {crypto_symbol}.")
-                        st.stop()
-                else:
-                    st.error(f"❌ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {crypto_symbol}.")
-                    st.stop()
+                st.error(f"❌ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {crypto_symbol}.")
+                st.stop()
             data[timeframe] = df
             data[timeframe], model_rf, model_gb = train_model(data[timeframe])
             confidence = np.random.uniform(70, 95)  # Simulate confidence

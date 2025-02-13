@@ -25,7 +25,7 @@ st.sidebar.header("⚙ Επιλογές")
 crypto_symbol = st.sidebar.text_input("Εισάγετε Crypto Symbol", "BTC-USD")
 
 # Cache data loading to speed up the app
-@st.cache_data
+@st.cache_data(ttl=3600)  # Cache data for 1 hour
 def load_data(symbol, interval="1d", period="5y"):
     try:
         st.write(f"Loading data for {symbol} with interval {interval} and period {period}")
@@ -51,6 +51,8 @@ def load_data(symbol, interval="1d", period="5y"):
         df["14D_EMA"] = df["Close"].ewm(span=14, adjust=False).mean()
         df.dropna(inplace=True)
         df = df.astype(np.float64)
+        st.write(f"Data for {symbol}:")
+        st.write(df.head())  # Debug: Display the first few rows of the data
     except Exception as e:
         st.error(f"❌ Σφάλμα φόρτωσης δεδομένων: {e}")
         return None
@@ -135,17 +137,22 @@ def main():
         df, model_rf, model_gb = train_model(df)
         confidence = np.random.uniform(70, 95)
         trade_levels[timeframe] = calculate_trade_levels(df, timeframe, confidence)
-        save_artifacts(df, model_rf, model_gb, crypto_symbol)  # Save artifacts
+        save_artifacts(df, model_rf, model_gb, crypto_symbol)
     if any(None in levels for levels in trade_levels.values()):
         st.stop()
     st.subheader("📊 Live Price Chart with Predictions")
     fig = go.Figure()
     last_6_months = data["1d"].iloc[-180:]
+    st.write("Last 6 Months Data:")  # Debug: Display the last 6 months data
+    st.write(last_6_months[["Close"]].tail())
     fig.add_trace(go.Scatter(x=last_6_months.index, y=last_6_months["Close"], name="Actual Price (Last 6 Months)", line=dict(color="blue")))
     fig.add_trace(go.Scatter(x=last_6_months.index, y=last_6_months["Close"].shift(-1), name="Predicted Price (Last 6 Months)", line=dict(color="green", dash="dot")))
     future_dates = pd.date_range(data["1d"].index[-1], periods=14, freq="D")
     future_predictions = np.repeat(data["1d"]["14D_EMA"].iloc[-1], len(future_dates))
+    st.write("Future Predictions Data:")  # Debug: Display future predictions data
+    st.write(future_predictions)
     fig.add_trace(go.Scatter(x=future_dates, y=future_predictions, name="Future Predictions (Next 14 Days)", line=dict(color="orange", dash="dot")))
+    st.write("Rendering Chart...")  # Debug: Confirm chart is being rendered
     st.plotly_chart(fig)
     st.subheader("🔍 Latest Predictions & Trade Levels")
     latest_pred = data["1d"]["Final_Prediction"].iloc[-1].item()
@@ -171,7 +178,7 @@ def main():
             data[timeframe], model_rf, model_gb = train_model(data[timeframe])
             confidence = np.random.uniform(70, 95)
             trade_levels[timeframe] = calculate_trade_levels(data[timeframe], timeframe, confidence)
-            save_artifacts(df, model_rf, model_gb, crypto_symbol)  # Save artifacts
+            save_artifacts(df, model_rf, model_gb, crypto_symbol)
         st.rerun()
 
 if __name__ == "__main__":

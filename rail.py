@@ -4,8 +4,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from sklearn.metrics import accuracy_score, mean_absolute_error, mean_squared_error
-from statsmodels.tsa.arima.model import ARIMA
+from sklearn.metrics import accuracy_score
 import time
 import joblib
 import os
@@ -18,60 +17,6 @@ def save_artifacts(df, model_rf, model_gb, crypto_symbol):
     joblib.dump(model_gb, f"saved_models/{crypto_symbol}_model_gb.pkl")
     df.to_csv(f"saved_models/{crypto_symbol}_data.csv")
     st.write("Artifacts saved successfully!")
-
-# Train ARIMA model
-def train_arima_model(df):
-    try:
-        # Fit ARIMA model with fixed parameters (p=5, d=1, q=0)
-        model = ARIMA(df["Close"], order=(5, 1, 0))
-        model_fit = model.fit()
-        st.write("ARIMA model trained successfully.")
-        return model_fit
-    except Exception as e:
-        st.error(f"❌ Σφάλμα εκπαίδευσης ARIMA μοντέλου: {e}")
-        return None
-
-# Predict future prices with ARIMA using rolling forecast
-def predict_with_arima(model, df, future_days=14):
-    try:
-        # Use a rolling forecast approach
-        history = df["Close"].tolist()
-        predictions = []
-        for _ in range(future_days):
-            # Fit the model on the latest data
-            model = ARIMA(history, order=(5, 1, 0))
-            model_fit = model.fit()
-            # Predict the next value
-            output = model_fit.forecast()
-            predictions.append(output[0])
-            # Update history with the predicted value
-            history.append(output[0])
-        return predictions
-    except Exception as e:
-        st.error(f"❌ Σφάλμα πρόβλεψης με ARIMA: {e}")
-        return None
-
-# Evaluate ARIMA model accuracy
-def evaluate_arima_model(model, df):
-    try:
-        # Split data into train and test sets
-        train_size = int(len(df) * 0.8)
-        train, test = df["Close"].iloc[:train_size], df["Close"].iloc[train_size:]
-        
-        # Fit the model on training data
-        model = ARIMA(train, order=(5, 1, 0))
-        model_fit = model.fit()
-        
-        # Predict on test data
-        predictions = model_fit.forecast(steps=len(test))
-        
-        # Calculate Mean Absolute Error (MAE) and Root Mean Squared Error (RMSE)
-        mae = mean_absolute_error(test, predictions)
-        rmse = np.sqrt(mean_squared_error(test, predictions))
-        st.write(f"ARIMA Model Mean Absolute Error (MAE): {mae:.2f}")
-        st.write(f"ARIMA Model Root Mean Squared Error (RMSE): {rmse:.2f}")
-    except Exception as e:
-        st.error(f"❌ Σφάλμα αξιολόγησης ARIMA μοντέλου: {e}")
 
 # 📌 Streamlit UI
 st.title("📈 AI Crypto Market Analysis Bot")
@@ -192,18 +137,6 @@ def main():
     if any(None in levels for levels in trade_levels.values()):
         st.stop()
 
-    # Train ARIMA model
-    arima_model = train_arima_model(data["1d"])
-    if arima_model is not None:
-        # Evaluate ARIMA model accuracy
-        evaluate_arima_model(arima_model, data["1d"])
-
-        # Predict future prices with ARIMA using rolling forecast
-        future_dates = pd.date_range(data["1d"].index[-1], periods=14, freq="D")
-        future_predictions_arima = predict_with_arima(arima_model, data["1d"])
-        if future_predictions_arima is not None:
-            st.write("ARIMA Future Predictions:", future_predictions_arima)
-
     # Display live price chart with predictions
     st.subheader("📊 Live Price Chart with Predictions")
     fig = go.Figure()
@@ -212,14 +145,10 @@ def main():
     last_6_months = data["1d"].iloc[-180:]
     fig.add_trace(go.Scatter(x=last_6_months.index, y=last_6_months["Close"], name="Actual Price (Last 6 Months)", line=dict(color="blue")))
 
-    # Plot ARIMA future predictions
-    if arima_model is not None and future_predictions_arima is not None:
-        fig.add_trace(go.Scatter(x=future_dates, y=future_predictions_arima, name="ARIMA Future Predictions", line=dict(color="red", dash="dot")))
-
     # Plot existing future predictions (from RandomForest/GradientBoosting)
     future_dates = pd.date_range(data["1d"].index[-1], periods=14, freq="D")
     future_predictions = np.repeat(data["1d"]["14D_EMA"].iloc[-1], len(future_dates))
-    fig.add_trace(go.Scatter(x=future_dates, y=future_predictions, name="Existing Future Predictions", line=dict(color="orange", dash="dot")))
+    fig.add_trace(go.Scatter(x=future_dates, y=future_predictions, name="Future Predictions (Next 14 Days)", line=dict(color="orange", dash="dot")))
 
     st.plotly_chart(fig)
 

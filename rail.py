@@ -1,5 +1,4 @@
 import streamlit as st
-import os
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -9,7 +8,6 @@ from ta.momentum import RSIIndicator
 from ta.volatility import AverageTrueRange
 from ta.volume import OnBalanceVolumeIndicator
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from datetime import datetime
 
 # 📌 Streamlit UI
 st.title("📈 AI Crypto Market Analysis Bot")
@@ -53,7 +51,12 @@ def load_data(symbol, period="6mo", interval="1h"):
         st.write("Low data type:", type(df["Low"]), "Shape:", df["Low"].shape)
         st.write("Close data type:", type(df["Close"]), "Shape:", df["Close"].shape)
         
-        atr = AverageTrueRange(high=df["High"].squeeze(), low=df["Low"].squeeze(), close=df["Close"].squeeze(), window=14).average_true_range()
+        # Ensure data is 1-dimensional
+        high = df["High"].squeeze()  # Convert to 1-dimensional array
+        low = df["Low"].squeeze()    # Convert to 1-dimensional array
+        close = df["Close"].squeeze()  # Convert to 1-dimensional array
+        
+        atr = AverageTrueRange(high=high, low=low, close=close, window=14).average_true_range()
         df["ATR"] = atr
         st.write("ATR added:", df[["Close", "ATR"]].head())
 

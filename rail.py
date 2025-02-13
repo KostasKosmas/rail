@@ -172,6 +172,9 @@ def main():
     }
     df_table = pd.DataFrame(table_data)
 
+    # Ensure all columns are of consistent type
+    df_table = df_table.astype({"Predicted Price": "float64", "Live Price": "float64"})
+
     # Display the table
     st.subheader("📊 Predicted and Actual Prices")
     st.write(df_table)

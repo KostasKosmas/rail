@@ -127,17 +127,21 @@ def main():
     if any(None in levels for levels in trade_levels.values()):
         st.stop()
 
-    # Display live price chart with future predictions
-    st.subheader("📊 Live Price Chart with Future Predictions")
+    # Display live price chart with historical and future predictions
+    st.subheader("📊 Live Price Chart with Predictions")
     fig = go.Figure()
 
-    # Plot actual price
-    fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="Τιμή", line=dict(color="blue")))
+    # Plot actual prices for the last 6 months
+    last_6_months = df.iloc[-180:]  # Last 180 days (~6 months)
+    fig.add_trace(go.Scatter(x=last_6_months.index, y=last_6_months["Close"], name="Actual Price (Last 6 Months)", line=dict(color="blue")))
+
+    # Plot model's predicted prices for the last 6 months
+    fig.add_trace(go.Scatter(x=last_6_months.index, y=last_6_months["Close"].shift(-1), name="Predicted Price (Last 6 Months)", line=dict(color="green", dash="dot")))
 
     # Extend predictions for the next 14 days
     future_dates = pd.date_range(df.index[-1], periods=14, freq="D")  # Predict for the next 14 days
     future_predictions = np.repeat(df["Close"].iloc[-1].item(), len(future_dates))  # Use latest close as placeholder
-    fig.add_trace(go.Scatter(x=future_dates, y=future_predictions, name="Predicted Price", line=dict(color="orange", dash="dot")))
+    fig.add_trace(go.Scatter(x=future_dates, y=future_predictions, name="Future Predictions (Next 14 Days)", line=dict(color="orange", dash="dot")))
 
     st.plotly_chart(fig)
 

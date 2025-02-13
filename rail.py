@@ -11,6 +11,9 @@ from ta.volume import OnBalanceVolumeIndicator
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from datetime import datetime
 
+# Current Date and Time (UTC - YYYY-MM-DD HH:MM:SS formatted): 2025-02-13 19:43:46
+# Current User's Login: KostasKosmas
+
 # 📌 Streamlit UI
 st.title("📈 AI Crypto Market Analysis Bot")
 st.sidebar.header("⚙ Επιλογές")
@@ -26,18 +29,18 @@ def load_data(symbol, period="6mo", interval="1h"):
         df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
         df.dropna(inplace=True)
         
-        df["SMA_50"] = SMAIndicator(df["Close"], window=50).sma_indicator().values
-        df["SMA_200"] = SMAIndicator(df["Close"], window=200).sma_indicator().values
-        df["EMA_21"] = EMAIndicator(df["Close"], window=21).ema_indicator().values
-        df["RSI"] = RSIIndicator(df["Close"], window=14).rsi().values
-        df["MACD"] = MACD(df["Close"]).macd().values
+        df["SMA_50"] = SMAIndicator(df["Close"], window=50).sma_indicator().values.flatten()
+        df["SMA_200"] = SMAIndicator(df["Close"], window=200).sma_indicator().values.flatten()
+        df["EMA_21"] = EMAIndicator(df["Close"], window=21).ema_indicator().values.flatten()
+        df["RSI"] = RSIIndicator(df["Close"], window=14).rsi().values.flatten()
+        df["MACD"] = MACD(df["Close"]).macd().values.flatten()
         
-        atr = AverageTrueRange(df["High"], df["Low"], df["Close"], window=14).average_true_range().values
+        atr = AverageTrueRange(df["High"], df["Low"], df["Close"], window=14).average_true_range().values.flatten()
         df["ATR"] = atr
         df["ATR_Upper"] = df["Close"] + (atr * 1.5)
         df["ATR_Lower"] = df["Close"] - (atr * 1.5)
         
-        df["OBV"] = OnBalanceVolumeIndicator(df["Close"], df["Volume"]).on_balance_volume().values
+        df["OBV"] = OnBalanceVolumeIndicator(df["Close"], df["Volume"]).on_balance_volume().values.flatten()
         df["Volume_MA"] = df["Volume"].rolling(window=20).mean()
         df.dropna(inplace=True)
     except Exception as e:

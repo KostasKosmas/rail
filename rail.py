@@ -98,7 +98,7 @@ def train_model(df):
 
 def calculate_trade_levels(df):
     try:
-        latest_close = df["Close"].iloc[-1]  # Extract the latest close price as a scalar value
+        latest_close = df["Close"].iloc[-1].item()  # Extract the latest close price as a scalar value
         # Use a simple percentage-based stop loss and take profit
         stop_loss = float(latest_close * 0.95)  # 5% stop loss (convert to float)
         take_profit = float(latest_close * 1.10)  # 10% take profit (convert to float)
@@ -151,7 +151,7 @@ def main():
             st.stop()
         df, model_rf, model_gb = train_model(df)
         entry, stop, profit = calculate_trade_levels(df)
-        st.experimental_rerun()
+        st.rerun()  # Use st.rerun() instead of st.experimental_rerun()
 
 if __name__ == "__main__":
     main()

@@ -4,10 +4,9 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, mean_absolute_error, mean_squared_error
 from statsmodels.tsa.arima.model import ARIMA
 from pmdarima import auto_arima  # For auto-tuning ARIMA parameters
-from sklearn.metrics import mean_absolute_error
 import time
 import joblib
 import os
@@ -62,9 +61,11 @@ def evaluate_arima_model(model, df):
         # Predict on test data
         predictions = model.predict(n_periods=len(test))
         
-        # Calculate Mean Absolute Error (MAE)
+        # Calculate Mean Absolute Error (MAE) and Root Mean Squared Error (RMSE)
         mae = mean_absolute_error(test, predictions)
+        rmse = np.sqrt(mean_squared_error(test, predictions))
         st.write(f"ARIMA Model Mean Absolute Error (MAE): {mae:.2f}")
+        st.write(f"ARIMA Model Root Mean Squared Error (RMSE): {rmse:.2f}")
     except Exception as e:
         st.error(f"❌ Σφάλμα αξιολόγησης ARIMA μοντέλου: {e}")
 

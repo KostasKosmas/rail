@@ -3,9 +3,6 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from ta.trend import SMAIndicator, EMAIndicator, MACD
-from ta.momentum import RSIIndicator
-from ta.volume import OnBalanceVolumeIndicator
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 
 # 📌 Streamlit UI
@@ -29,26 +26,29 @@ def load_data(symbol, period="6mo", interval="1h"):
         # Debug statements
         st.write("Dataframe after initial processing:", df.head())
         
-        # Add technical indicators
-        df["SMA_50"] = SMAIndicator(df["Close"], window=50).sma_indicator()
+        # Add basic technical indicators (without `ta` library)
+        df["SMA_50"] = df["Close"].rolling(window=50).mean()
         st.write("SMA_50 added:", df[["Close", "SMA_50"]].head())
 
-        df["SMA_200"] = SMAIndicator(df["Close"], window=200).sma_indicator()
+        df["SMA_200"] = df["Close"].rolling(window=200).mean()
         st.write("SMA_200 added:", df[["Close", "SMA_200"]].head())
 
-        df["EMA_21"] = EMAIndicator(df["Close"], window=21).ema_indicator()
-        st.write("EMA_21 added:", df[["Close", "EMA_21"]].head())
-
-        df["RSI"] = RSIIndicator(df["Close"], window=14).rsi()
+        # Calculate RSI manually
+        delta = df["Close"].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df["RSI"] = 100 - (100 / (1 + rs))
         st.write("RSI added:", df[["Close", "RSI"]].head())
 
-        df["MACD"] = MACD(df["Close"]).macd()
+        # Calculate MACD manually
+        df["EMA_12"] = df["Close"].ewm(span=12, adjust=False).mean()
+        df["EMA_26"] = df["Close"].ewm(span=26, adjust=False).mean()
+        df["MACD"] = df["EMA_12"] - df["EMA_26"]
         st.write("MACD added:", df[["Close", "MACD"]].head())
 
-        # Skip ATR calculation
-        st.write("Skipping ATR calculation to avoid errors.")
-
-        df["OBV"] = OnBalanceVolumeIndicator(df["Close"], df["Volume"]).on_balance_volume()
+        # Calculate OBV manually
+        df["OBV"] = (np.sign(df["Close"].diff()) * df["Volume"]).cumsum()
         st.write("OBV added:", df[["Close", "OBV"]].head())
 
         df["Volume_MA"] = df["Volume"].rolling(window=20).mean()
@@ -76,7 +76,7 @@ if df.empty:
 
 def train_model(df):
     try:
-        X = df[["SMA_50", "SMA_200", "EMA_21", "MACD", "RSI", "OBV", "Volume_MA"]].astype(float)
+        X = df[["SMA_50", "SMA_200", "RSI", "MACD", "OBV", "Volume_MA"]].astype(float)
         st.write("Feature matrix (X):", X.head())
         
         y = np.where(df["Close"].shift(-1) > df["Close"], 1, 0)

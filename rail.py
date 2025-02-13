@@ -103,7 +103,7 @@ df = train_model(df)
 
 def calculate_trade_levels(df):
     try:
-        latest_close = df["Close"].iloc[-1]
+        latest_close = df["Close"].iloc[-1]  # Extract the latest close price
         # Use a simple percentage-based stop loss and take profit
         stop_loss = latest_close * 0.95  # 5% stop loss
         take_profit = latest_close * 1.10  # 10% take profit

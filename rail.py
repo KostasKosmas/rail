@@ -12,10 +12,10 @@ st.title("📈 AI Crypto Market Analysis Bot")
 st.sidebar.header("⚙ Επιλογές")
 crypto_symbol = st.sidebar.text_input("Εισάγετε Crypto Symbol", "BTC-USD")
 
-def load_data(symbol, interval="5m"):
+def load_data(symbol, interval="1h"):  # Changed to 1-hour interval
     try:
         st.write(f"Loading data for {symbol} with interval {interval}")
-        # Fetch 5 years of historical data with 5-minute intervals
+        # Fetch 5 years of historical data with 1-hour intervals
         df = yf.download(symbol, period="5y", interval=interval)
         if df.empty:
             st.error("⚠️ Τα δεδομένα δεν είναι διαθέσιμα. Δοκιμάστε διαφορετικό σύμβολο.")
@@ -90,7 +90,7 @@ def train_model(df):
 
 def calculate_trade_levels(df, timeframe):
     try:
-        latest_close = df["Close"].iloc[-1].item()
+        latest_close = df["Close"].iloc[-1].item()  # Ensure scalar value
         
         # Use a rolling ATR calculation over 14 periods
         atr = (df["High"].rolling(window=14).mean() - df["Low"].rolling(window=14).mean()).iloc[-1]

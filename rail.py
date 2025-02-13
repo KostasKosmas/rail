@@ -25,7 +25,7 @@ def load_data(symbol, interval="1d", period="5y"):
             return None  # Return None if data is not available
         
         # Convert the DataFrame index to Greece timezone
-        df.index = df.index.tz_localize("UTC").tz_convert("Europe/Athens")
+        df.index = df.index.tz_convert("Europe/Athens")
         
         df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
         df.dropna(inplace=True)

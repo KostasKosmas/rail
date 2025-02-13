@@ -22,6 +22,11 @@ def load_data(symbol, interval="1d", period="5y"):
         if df.empty:
             st.warning(f"⚠️ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {symbol} με interval {interval}. Δοκιμάστε διαφορετικό interval.")
             return None  # Return None if data is not available
+        
+        # Debug: Show the first few rows of the data
+        st.write("Data loaded successfully. First few rows:")
+        st.write(df.head())
+        
         df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
         df.dropna(inplace=True)
         

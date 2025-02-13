@@ -162,18 +162,15 @@ def main():
 
     # Fetch live price
     live_data = yf.download(crypto_symbol, period="1d", interval="1m")
-    live_price = live_data["Close"].iloc[-1] if not live_data.empty else None
+    live_price = live_data["Close"].iloc[-1] if not live_data.empty else np.nan
 
     # Create a DataFrame for the table
     table_data = {
         "Date": future_dates,
         "Predicted Price": future_price_points,
+        "Live Price": [live_price if i == 0 else np.nan for i in range(len(future_dates))]
     }
     df_table = pd.DataFrame(table_data)
-
-    # Add live price to the table
-    if live_price is not None:
-        df_table["Live Price"] = [live_price if i == 0 else None for i in range(len(future_dates))]
 
     # Display the table
     st.subheader("📊 Predicted and Actual Prices")

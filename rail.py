@@ -3,8 +3,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.metrics import accuracy_score
 import time
 
@@ -13,11 +12,11 @@ st.title("📈 AI Crypto Market Analysis Bot")
 st.sidebar.header("⚙ Επιλογές")
 crypto_symbol = st.sidebar.text_input("Εισάγετε Crypto Symbol", "BTC-USD")
 
-def load_data(symbol, interval="1d"):
+def load_data(symbol, interval="5m"):
     try:
         st.write(f"Loading data for {symbol} with interval {interval}")
-        # Fetch 10 years of historical data with daily interval
-        df = yf.download(symbol, period="10y", interval=interval)
+        # Fetch 5 years of historical data with 5-minute intervals
+        df = yf.download(symbol, period="5y", interval=interval)
         if df.empty:
             st.error("⚠️ Τα δεδομένα δεν είναι διαθέσιμα. Δοκιμάστε διαφορετικό σύμβολο.")
             return pd.DataFrame()
@@ -57,8 +56,8 @@ def load_data(symbol, interval="1d"):
 
 def train_model(df):
     try:
-        # Use only the most important features
-        X = df[["SMA_50", "SMA_200", "RSI", "MACD"]]
+        # Use all features
+        X = df[["SMA_50", "SMA_200", "RSI", "MACD", "OBV", "Volume_MA"]]
         y = np.where(df["Close"].shift(-1) > df["Close"], 1, 0)
         y = y.ravel()  # Flatten y to 1D array
         
@@ -67,18 +66,27 @@ def train_model(df):
         X_train, X_test = X[:split], X[split:]
         y_train, y_test = y[:split], y[split:]
         
-        # Train Logistic Regression model (faster and simpler)
-        model = LogisticRegression(max_iter=1000, random_state=42)
-        model.fit(X_train, y_train)
-        y_pred = model.predict(X_test)
-        accuracy = accuracy_score(y_test, y_pred)
-        st.write(f"Model trained with accuracy: {accuracy:.2f}")
+        # Train RandomForest model
+        model_rf = RandomForestClassifier(n_estimators=100, random_state=42)
+        model_rf.fit(X_train, y_train)
+        y_pred_rf = model_rf.predict(X_test)
+        accuracy_rf = accuracy_score(y_test, y_pred_rf)
+        st.write(f"RandomForest model trained with accuracy: {accuracy_rf:.2f}")
         
-        # Add predictions to the dataframe
-        df["Prediction"] = model.predict(X)
+        # Train GradientBoosting model
+        model_gb = GradientBoostingClassifier(n_estimators=100, random_state=42)
+        model_gb.fit(X_train, y_train)
+        y_pred_gb = model_gb.predict(X_test)
+        accuracy_gb = accuracy_score(y_test, y_pred_gb)
+        st.write(f"GradientBoosting model trained with accuracy: {accuracy_gb:.2f}")
+        
+        # Combine predictions
+        df["Prediction_RF"] = model_rf.predict(X)
+        df["Prediction_GB"] = model_gb.predict(X)
+        df["Final_Prediction"] = (df["Prediction_RF"] + df["Prediction_GB"]) // 2
     except Exception as e:
         st.error(f"❌ Σφάλμα εκπαίδευσης μοντέλου: {e}")
-    return df, model
+    return df, model_rf, model_gb
 
 def calculate_trade_levels(df, timeframe):
     try:
@@ -87,7 +95,7 @@ def calculate_trade_levels(df, timeframe):
         # Use a rolling ATR calculation over 14 periods
         atr = (df["High"].rolling(window=14).mean() - df["Low"].rolling(window=14).mean()).iloc[-1]
         
-        latest_pred = df["Prediction"].iloc[-1]
+        latest_pred = df["Final_Prediction"].iloc[-1]
         if latest_pred == 1:  # Long position
             entry_point = latest_close
             stop_loss = latest_close - (atr * 1.5)
@@ -108,7 +116,7 @@ def main():
     if df.empty:
         st.stop()
 
-    df, model = train_model(df)
+    df, model_rf, model_gb = train_model(df)
 
     # Calculate trade levels for multiple timeframes
     timeframes = ["1h", "4h", "1d", "1w"]
@@ -126,8 +134,8 @@ def main():
     # Plot actual price
     fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="Τιμή", line=dict(color="blue")))
 
-    # Extend predictions for the next week
-    future_dates = pd.date_range(df.index[-1], periods=7, freq="D")  # Predict for the next 7 days
+    # Extend predictions for the next 14 days
+    future_dates = pd.date_range(df.index[-1], periods=14, freq="D")  # Predict for the next 14 days
     future_predictions = np.repeat(df["Close"].iloc[-1], len(future_dates))  # Use latest close as placeholder
     fig.add_trace(go.Scatter(x=future_dates, y=future_predictions, name="Predicted Price", line=dict(color="orange", dash="dot")))
 
@@ -135,7 +143,7 @@ def main():
 
     # Display latest predictions and trade levels
     st.subheader("🔍 Latest Predictions & Trade Levels")
-    latest_pred = df["Prediction"].iloc[-1]  # Extract the latest prediction value
+    latest_pred = df["Final_Prediction"].iloc[-1]  # Extract the latest prediction value
     confidence = np.random.uniform(70, 95)
 
     if latest_pred == 1:
@@ -156,7 +164,7 @@ def main():
         df = load_data(crypto_symbol)
         if df.empty:
             st.stop()
-        df, model = train_model(df)
+        df, model_rf, model_gb = train_model(df)
         trade_levels = {}
         for timeframe in timeframes:
             trade_levels[timeframe] = calculate_trade_levels(df, timeframe)
@@ -164,4 +172,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

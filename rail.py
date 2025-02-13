@@ -55,7 +55,7 @@ def load_data(symbol, period="6mo", interval="1h"):
         df["OBV"] = OnBalanceVolumeIndicator(df["Close"], df["Volume"]).on_balance_volume().values.flatten()
         st.write("OBV added")
         
-        df["Volume_MA"] = df["Volume"].rolling(window=20).mean().values.flatten()
+        df["Volume_MA"] = df["Volume"].rolling(window=20).mean().values
         st.write("Volume_MA added")
         
         df.dropna(inplace=True)
@@ -66,23 +66,29 @@ def load_data(symbol, period="6mo", interval="1h"):
     return df
 
 df = load_data(crypto_symbol)
-if df.empty:
+if df.empty():
     st.stop()
 
 def train_model(df):
     try:
         X = df[["SMA_50", "SMA_200", "EMA_21", "MACD", "RSI", "ATR", "OBV", "Volume_MA"]].astype(float)
+        st.write("Feature matrix (X):", X.head())
+        
         y = np.where(df["Close"].shift(-1) > df["Close"], 1, 0)
+        st.write("Target vector (y):", y[:5])
         
         model_rf = RandomForestClassifier(n_estimators=100)
         model_rf.fit(X, y)
+        st.write("RandomForest model trained")
         
         model_gb = GradientBoostingClassifier(n_estimators=100)
         model_gb.fit(X, y)
+        st.write("GradientBoosting model trained")
         
         df["Prediction_RF"] = model_rf.predict(X)
         df["Prediction_GB"] = model_gb.predict(X)
         df["Final_Prediction"] = (df["Prediction_RF"] + df["Prediction_GB"]) // 2
+        st.write("Predictions added to dataframe")
     except Exception as e:
         st.error(f"❌ Σφάλμα εκπαίδευσης μοντέλου: {e}")
     return df
@@ -96,6 +102,7 @@ def calculate_trade_levels(df):
         entry_point = latest_close
         stop_loss = latest_close - atr
         take_profit = latest_close + atr * 2
+        st.write("Trade levels calculated: Entry Point:", entry_point, "Stop Loss:", stop_loss, "Take Profit:", take_profit)
     except Exception as e:
         st.error(f"❌ Σφάλμα υπολογισμού επιπέδων συναλλαγών: {e}")
         entry_point, stop_loss, take_profit = None, None, None

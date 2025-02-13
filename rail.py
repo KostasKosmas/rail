@@ -11,10 +11,11 @@ st.title("📈 AI Crypto Market Analysis Bot")
 st.sidebar.header("⚙ Επιλογές")
 crypto_symbol = st.sidebar.text_input("Εισάγετε Crypto Symbol", "BTC-USD")
 
-def load_data(symbol, period="6mo", interval="1h"):
+def load_data(symbol, interval="1h"):
     try:
-        st.write(f"Loading data for {symbol} with period {period} and interval {interval}")
-        df = yf.download(symbol, period=period, interval=interval)
+        st.write(f"Loading data for {symbol} with interval {interval}")
+        # Fetch historical data from the beginning
+        df = yf.download(symbol, period="max", interval=interval)
         if df.empty:
             st.error("⚠️ Τα δεδομένα δεν είναι διαθέσιμα. Δοκιμάστε διαφορετικό σύμβολο.")
             return pd.DataFrame()
@@ -29,10 +30,7 @@ def load_data(symbol, period="6mo", interval="1h"):
         
         # Add basic technical indicators (without `ta` library)
         df["SMA_50"] = df["Close"].rolling(window=50).mean()
-        st.write("SMA_50 added:", df[["Close", "SMA_50"]].head())
-
         df["SMA_200"] = df["Close"].rolling(window=200).mean()
-        st.write("SMA_200 added:", df[["Close", "SMA_200"]].head())
 
         # Calculate RSI manually
         delta = df["Close"].diff()
@@ -40,20 +38,16 @@ def load_data(symbol, period="6mo", interval="1h"):
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
         df["RSI"] = 100 - (100 / (1 + rs))
-        st.write("RSI added:", df[["Close", "RSI"]].head())
 
         # Calculate MACD manually
         df["EMA_12"] = df["Close"].ewm(span=12, adjust=False).mean()
         df["EMA_26"] = df["Close"].ewm(span=26, adjust=False).mean()
         df["MACD"] = df["EMA_12"] - df["EMA_26"]
-        st.write("MACD added:", df[["Close", "MACD"]].head())
 
         # Calculate OBV manually
         df["OBV"] = (np.sign(df["Close"].diff()) * df["Volume"]).cumsum()
-        st.write("OBV added:", df[["Close", "OBV"]].head())
 
         df["Volume_MA"] = df["Volume"].rolling(window=20).mean()
-        st.write("Volume_MA added:", df[["Volume", "Volume_MA"]].head())
 
         df.dropna(inplace=True)
         st.write("Dataframe after adding indicators and dropping NA:", df.head())
@@ -64,7 +58,8 @@ def load_data(symbol, period="6mo", interval="1h"):
             st.write(df.isnull().sum())
             return pd.DataFrame()
         
-        # Check data types
+        # Ensure all columns are of compatible types
+        df = df.astype(np.float32)
         st.write("Data types in DataFrame:", df.dtypes)
     except Exception as e:
         st.error(f"❌ Σφάλμα φόρτωσης δεδομένων: {e}")
@@ -73,7 +68,7 @@ def load_data(symbol, period="6mo", interval="1h"):
 
 def train_model(df):
     try:
-        X = df[["SMA_50", "SMA_200", "RSI", "MACD", "OBV", "Volume_MA"]].astype(float)
+        X = df[["SMA_50", "SMA_200", "RSI", "MACD", "OBV", "Volume_MA"]]
         st.write("Feature matrix (X):", X.head())
         
         y = np.where(df["Close"].shift(-1) > df["Close"], 1, 0)
@@ -121,15 +116,8 @@ def main():
     if entry is None or stop is None or profit is None:
         st.stop()
 
-    future_dates, forecast = list(df.index[-10:]), df["Close"].values[-10:].tolist()
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="Τιμή", line=dict(color="blue")))
-    fig.add_trace(go.Scatter(x=future_dates, y=forecast, name="Forecasted Price", line=dict(color="orange", dash="dot")))
-
-    st.plotly_chart(fig)
-
-    st.subheader("🔍 Προβλέψεις & Confidence Level")
+    # Display only the latest predictions and trade levels
+    st.subheader("🔍 Latest Predictions & Trade Levels")
     latest_pred = df["Final_Prediction"].iloc[-1]  # Extract the latest prediction value
     confidence = np.random.uniform(70, 95)
 
@@ -151,7 +139,7 @@ def main():
             st.stop()
         df, model_rf, model_gb = train_model(df)
         entry, stop, profit = calculate_trade_levels(df)
-        st.rerun()  # Use st.rerun() instead of st.experimental_rerun()
+        st.rerun()  # Use st.rerun() to refresh the app
 
 if __name__ == "__main__":
     main()

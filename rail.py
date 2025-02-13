@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.metrics import accuracy_score
 import time
+import pytz
 
 # 📌 Streamlit UI
 st.title("📈 AI Crypto Market Analysis Bot")
@@ -23,9 +24,8 @@ def load_data(symbol, interval="1d", period="5y"):
             st.warning(f"⚠️ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {symbol} με interval {interval}. Δοκιμάστε διαφορετικό interval.")
             return None  # Return None if data is not available
         
-        # Debug: Show the first few rows of the data
-        st.write("Data loaded successfully. First few rows:")
-        st.write(df.head())
+        # Convert the DataFrame index to Greece timezone
+        df.index = df.index.tz_localize("UTC").tz_convert("Europe/Athens")
         
         df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
         df.dropna(inplace=True)
@@ -50,6 +50,9 @@ def load_data(symbol, interval="1d", period="5y"):
         df["OBV"] = (np.sign(df["Close"].diff()) * df["Volume"]).cumsum()
 
         df["Volume_MA"] = df["Volume"].rolling(window=20).mean()
+
+        # Calculate 14-day EMA for future predictions
+        df["14D_EMA"] = df["Close"].ewm(span=14, adjust=False).mean()
 
         df.dropna(inplace=True)
         
@@ -94,7 +97,7 @@ def train_model(df):
         st.error(f"❌ Σφάλμα εκπαίδευσης μοντέλου: {e}")
     return df, model_rf, model_gb
 
-def calculate_trade_levels(df, timeframe):
+def calculate_trade_levels(df, timeframe, confidence):
     try:
         latest_close = df["Close"].iloc[-1].item()  # Ensure scalar value
         
@@ -102,14 +105,37 @@ def calculate_trade_levels(df, timeframe):
         atr = (df["High"].rolling(window=14).mean() - df["Low"].rolling(window=14).mean()).iloc[-1].item()  # Ensure scalar value
         
         latest_pred = df["Final_Prediction"].iloc[-1].item()  # Ensure scalar value
+        rsi = df["RSI"].iloc[-1].item()  # Latest RSI value
+        macd = df["MACD"].iloc[-1].item()  # Latest MACD value
+
+        # Adjust multipliers based on confidence, RSI, and MACD
+        if confidence > 80:  # High confidence
+            stop_loss_multiplier = 1.2
+            take_profit_multiplier = 1.8
+        elif confidence > 60:  # Medium confidence
+            stop_loss_multiplier = 1.5
+            take_profit_multiplier = 2.0
+        else:  # Low confidence
+            stop_loss_multiplier = 2.0
+            take_profit_multiplier = 2.5
+
+        # Adjust multipliers based on RSI and MACD
+        if rsi > 70 or rsi < 30:  # Overbought or oversold
+            stop_loss_multiplier *= 0.9  # Tighten stop loss
+            take_profit_multiplier *= 1.1  # Widen take profit
+        if macd > 0:  # Bullish signal
+            take_profit_multiplier *= 1.1  # Widen take profit
+        else:  # Bearish signal
+            stop_loss_multiplier *= 1.1  # Widen stop loss
+
         if latest_pred == 1:  # Long position
             entry_point = latest_close
-            stop_loss = latest_close - (atr * 1.5)
-            take_profit = latest_close + (atr * 2)
+            stop_loss = latest_close - (atr * stop_loss_multiplier)
+            take_profit = latest_close + (atr * take_profit_multiplier)
         else:  # Short position
             entry_point = latest_close
-            stop_loss = latest_close + (atr * 1.5)
-            take_profit = latest_close - (atr * 2)
+            stop_loss = latest_close + (atr * stop_loss_multiplier)
+            take_profit = latest_close - (atr * take_profit_multiplier)
         
         st.write(f"Trade levels for {timeframe}: Entry Point: {entry_point:.2f}, Stop Loss: {stop_loss:.2f}, Take Profit: {take_profit:.2f}")
     except Exception as e:
@@ -140,7 +166,8 @@ def main():
     trade_levels = {}
     for timeframe, df in data.items():
         df, model_rf, model_gb = train_model(df)
-        trade_levels[timeframe] = calculate_trade_levels(df, timeframe)
+        confidence = np.random.uniform(70, 95)  # Simulate confidence
+        trade_levels[timeframe] = calculate_trade_levels(df, timeframe, confidence)
 
     if any(None in levels for levels in trade_levels.values()):
         st.stop()
@@ -158,7 +185,7 @@ def main():
 
     # Extend predictions for the next 14 days
     future_dates = pd.date_range(data["1d"].index[-1], periods=14, freq="D")  # Predict for the next 14 days
-    future_predictions = np.repeat(data["1d"]["Close"].iloc[-1].item(), len(future_dates))  # Use latest close as placeholder
+    future_predictions = np.repeat(data["1d"]["14D_EMA"].iloc[-1], len(future_dates))  # Use 14-day EMA as placeholder
     fig.add_trace(go.Scatter(x=future_dates, y=future_predictions, name="Future Predictions (Next 14 Days)", line=dict(color="orange", dash="dot")))
 
     st.plotly_chart(fig)
@@ -193,7 +220,8 @@ def main():
                     st.stop()
             data[timeframe] = df
             data[timeframe], model_rf, model_gb = train_model(data[timeframe])
-            trade_levels[timeframe] = calculate_trade_levels(data[timeframe], timeframe)
+            confidence = np.random.uniform(70, 95)  # Simulate confidence
+            trade_levels[timeframe] = calculate_trade_levels(data[timeframe], timeframe, confidence)
         st.rerun()  # Use st.rerun() to refresh the app
 
 if __name__ == "__main__":

@@ -4,7 +4,6 @@ import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.metrics import accuracy_score
-from statsmodels.tsa.arima.model import ARIMA
 import time
 import joblib
 import os
@@ -17,26 +16,6 @@ def save_artifacts(df, model_rf, model_gb, crypto_symbol):
     joblib.dump(model_gb, f"saved_models/{crypto_symbol}_model_gb.pkl")
     df.to_csv(f"saved_models/{crypto_symbol}_data.csv")
     st.write("Artifacts saved successfully!")
-
-# Predict future prices using a rolling forecast
-def predict_future_prices(df, future_days=14):
-    try:
-        # Use ARIMA to predict future prices
-        history = df["Close"].tolist()
-        predictions = []
-        for _ in range(future_days):
-            # Fit ARIMA model
-            model = ARIMA(history, order=(5, 1, 0))  # Example ARIMA parameters
-            model_fit = model.fit()
-            # Predict the next value
-            output = model_fit.forecast()
-            predictions.append(output[0])
-            # Update history with the predicted value
-            history.append(output[0])
-        return predictions
-    except Exception as e:
-        st.error(f"❌ Σφάλμα πρόβλεψης μελλοντικών τιμών: {e}")
-        return None
 
 # 📌 Streamlit UI
 st.title("📈 AI Crypto Market Analysis Bot")
@@ -136,6 +115,22 @@ def calculate_trade_levels(df, timeframe, confidence):
         entry_point, stop_loss, take_profit = None, None, None
     return entry_point, stop_loss, take_profit
 
+def generate_price_points(entry_point, stop_loss, take_profit, future_days=14):
+    try:
+        # Generate price points based on trade levels
+        if entry_point is None or stop_loss is None or take_profit is None:
+            return None
+
+        # Determine the direction of the trade
+        if take_profit > entry_point:  # Long trade
+            price_points = np.linspace(entry_point, take_profit, future_days)
+        else:  # Short trade
+            price_points = np.linspace(entry_point, stop_loss, future_days)
+        return price_points
+    except Exception as e:
+        st.error(f"❌ Σφάλμα δημιουργίας τιμών: {e}")
+        return None
+
 def main():
     timeframes = {
         "1d": {"interval": "1d", "period": "5y"},
@@ -157,11 +152,12 @@ def main():
     if any(None in levels for levels in trade_levels.values()):
         st.stop()
 
-    # Predict future prices using a rolling forecast
+    # Generate price points for the next 14 days
+    entry_point, stop_loss, take_profit = trade_levels["1d"]
     future_dates = pd.date_range(data["1d"].index[-1], periods=14, freq="D")
-    future_predictions = predict_future_prices(data["1d"])
-    if future_predictions is None:
-        st.error("❌ Failed to predict future prices.")
+    future_price_points = generate_price_points(entry_point, stop_loss, take_profit)
+    if future_price_points is None:
+        st.error("❌ Failed to generate future price points.")
         st.stop()
 
     # Fetch live price
@@ -171,7 +167,7 @@ def main():
     # Create a DataFrame for the table
     table_data = {
         "Date": future_dates,
-        "Predicted Price": future_predictions,
+        "Predicted Price": future_price_points,
     }
     df_table = pd.DataFrame(table_data)
 

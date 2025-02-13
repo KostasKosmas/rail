@@ -90,18 +90,18 @@ def train_model(df):
 def calculate_trade_levels(df):
     try:
         latest_close = df["Close"].iloc[-1].item()  # Extract the latest close price as a scalar value
-        atr = df["High"].iloc[-1] - df["Low"].iloc[-1]  # Use ATR-like calculation for dynamic levels
+        atr = df["High"].iloc[-1].item() - df["Low"].iloc[-1].item()  # Use ATR-like calculation for dynamic levels
         
         # Determine trade levels based on prediction
         latest_pred = df["Final_Prediction"].iloc[-1]
         if latest_pred == 1:  # Long position
-            entry_point = float(latest_close)
-            stop_loss = float(latest_close - (atr * 1.5))  # Stop loss below entry
-            take_profit = float(latest_close + (atr * 2))  # Take profit above entry
+            entry_point = latest_close
+            stop_loss = latest_close - (atr * 1.5)  # Stop loss below entry
+            take_profit = latest_close + (atr * 2)  # Take profit above entry
         else:  # Short position
-            entry_point = float(latest_close)
-            stop_loss = float(latest_close + (atr * 1.5))  # Stop loss above entry
-            take_profit = float(latest_close - (atr * 2))  # Take profit below entry
+            entry_point = latest_close
+            stop_loss = latest_close + (atr * 1.5)  # Stop loss above entry
+            take_profit = latest_close - (atr * 2)  # Take profit below entry
         
         st.write("Trade levels calculated: Entry Point:", entry_point, "Stop Loss:", stop_loss, "Take Profit:", take_profit)
     except Exception as e:

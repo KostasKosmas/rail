@@ -18,45 +18,48 @@ crypto_symbol = st.sidebar.text_input("Εισάγετε Crypto Symbol", "BTC-USD
 
 def load_data(symbol, period="6mo", interval="1h"):
     try:
+        st.write(f"Loading data for {symbol} with period {period} and interval {interval}")
         df = yf.download(symbol, period=period, interval=interval)
         if df.empty:
             st.error("⚠️ Τα δεδομένα δεν είναι διαθέσιμα. Δοκιμάστε διαφορετικό σύμβολο.")
             return pd.DataFrame()
         
+        st.write("Dataframe after downloading:", df.head())
+        
         df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
         df.dropna(inplace=True)
         
         # Debug statements
-        st.write("Dataframe after downloading and initial processing:", df.head())
+        st.write("Dataframe after initial processing:", df.head())
         
         df["SMA_50"] = SMAIndicator(df["Close"], window=50).sma_indicator().values.flatten()
-        st.write("SMA_50 added")
+        st.write("SMA_50 added:", df["SMA_50"].head())
         
         df["SMA_200"] = SMAIndicator(df["Close"], window=200).sma_indicator().values.flatten()
-        st.write("SMA_200 added")
+        st.write("SMA_200 added:", df["SMA_200"].head())
         
         df["EMA_21"] = EMAIndicator(df["Close"], window=21).ema_indicator().values.flatten()
-        st.write("EMA_21 added")
+        st.write("EMA_21 added:", df["EMA_21"].head())
         
         df["RSI"] = RSIIndicator(df["Close"], window=14).rsi().values.flatten()
-        st.write("RSI added")
+        st.write("RSI added:", df["RSI"].head())
         
         df["MACD"] = MACD(df["Close"]).macd().values.flatten()
-        st.write("MACD added")
+        st.write("MACD added:", df["MACD"].head())
         
         atr = AverageTrueRange(df["High"], df["Low"], df["Close"], window=14).average_true_range().values.flatten()
         df["ATR"] = atr
-        st.write("ATR added")
+        st.write("ATR added:", df["ATR"].head())
         
         df["ATR_Upper"] = df["Close"] + (atr * 1.5)
         df["ATR_Lower"] = df["Close"] - (atr * 1.5)
-        st.write("ATR Upper and Lower bands added")
+        st.write("ATR Upper and Lower bands added:", df[["ATR_Upper", "ATR_Lower"]].head())
         
         df["OBV"] = OnBalanceVolumeIndicator(df["Close"], df["Volume"]).on_balance_volume().values.flatten()
-        st.write("OBV added")
+        st.write("OBV added:", df["OBV"].head())
         
         df["Volume_MA"] = df["Volume"].rolling(window=20).mean().values
-        st.write("Volume_MA added")
+        st.write("Volume_MA added:", df["Volume_MA"].head())
         
         df.dropna(inplace=True)
         st.write("Dataframe after adding indicators and dropping NA:", df.head())
@@ -88,7 +91,7 @@ def train_model(df):
         df["Prediction_RF"] = model_rf.predict(X)
         df["Prediction_GB"] = model_gb.predict(X)
         df["Final_Prediction"] = (df["Prediction_RF"] + df["Prediction_GB"]) // 2
-        st.write("Predictions added to dataframe")
+        st.write("Predictions added to dataframe", df[["Prediction_RF", "Prediction_GB", "Final_Prediction"]].head())
     except Exception as e:
         st.error(f"❌ Σφάλμα εκπαίδευσης μοντέλου: {e}")
     return df

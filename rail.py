@@ -83,23 +83,23 @@ def train_model(df):
 
         # Train RandomForestRegressor
         model_rf = RandomForestRegressor(n_estimators=50, max_depth=5, random_state=42)
-        model_rf.fit(X_train, y_train)
+        model_rf.fit(X_train, y_train.values.ravel())  # Use ravel() to flatten y
         y_pred_rf = model_rf.predict(X_test)
         mae_rf = mean_absolute_error(y_test, y_pred_rf)
         st.write(f"RandomForest model trained with MAE: {mae_rf:.2f}")
 
         # Train GradientBoostingRegressor
         model_gb = GradientBoostingRegressor(n_estimators=50, max_depth=5, random_state=42)
-        model_gb.fit(X_train, y_train)
+        model_gb.fit(X_train, y_train.values.ravel())  # Use ravel() to flatten y
         y_pred_gb = model_gb.predict(X_test)
         mae_gb = mean_absolute_error(y_test, y_pred_gb)
         st.write(f"GradientBoosting model trained with MAE: {mae_gb:.2f}")
 
         # Add predictions to the DataFrame
         df["Prediction_RF"] = np.nan
-        df["Prediction_RF"].iloc[split:] = model_rf.predict(X[split:])
+        df.loc[split:, "Prediction_RF"] = model_rf.predict(X[split:])
         df["Prediction_GB"] = np.nan
-        df["Prediction_GB"].iloc[split:] = model_gb.predict(X[split:])
+        df.loc[split:, "Prediction_GB"] = model_gb.predict(X[split:])
     except Exception as e:
         st.error(f"❌ Σφάλμα εκπαίδευσης μοντέλου: {e}")
     return df, model_rf, model_gb

@@ -78,8 +78,8 @@ def train_model(df):
 
         # Split data into training and testing sets
         split = int(0.8 * len(X))
-        X_train, X_test = X[:split], X[split:]
-        y_train, y_test = y[:split], y[split:]
+        X_train, X_test = X.iloc[:split], X.iloc[split:]
+        y_train, y_test = y.iloc[:split], y.iloc[split:]
 
         # Train RandomForestRegressor
         model_rf = RandomForestRegressor(n_estimators=50, max_depth=5, random_state=42)
@@ -97,11 +97,12 @@ def train_model(df):
 
         # Add predictions to the DataFrame
         df["Prediction_RF"] = np.nan
-        df.loc[split:, "Prediction_RF"] = model_rf.predict(X[split:])
         df["Prediction_GB"] = np.nan
-        df.loc[split:, "Prediction_GB"] = model_gb.predict(X[split:])
+        df.iloc[split:, df.columns.get_loc("Prediction_RF")] = model_rf.predict(X.iloc[split:])
+        df.iloc[split:, df.columns.get_loc("Prediction_GB")] = model_gb.predict(X.iloc[split:])
     except Exception as e:
         st.error(f"❌ Σφάλμα εκπαίδευσης μοντέλου: {e}")
+        return None, None, None
     return df, model_rf, model_gb
 
 def generate_price_points(df, future_days=14):
@@ -134,10 +135,11 @@ def main():
             st.error(f"❌ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {crypto_symbol}.")
             st.stop()
         data[timeframe] = df
-    trade_levels = {}
+
     for timeframe, df in data.items():
         df, model_rf, model_gb = train_model(df)
-        save_artifacts(df, model_rf, model_gb, crypto_symbol)  # Save artifacts
+        if df is not None and model_rf is not None and model_gb is not None:
+            save_artifacts(df, model_rf, model_gb, crypto_symbol)  # Save artifacts
 
     # Generate price points for the next 14 days
     future_dates = pd.date_range(data["1d"].index[-1], periods=14, freq="D")
@@ -175,8 +177,11 @@ def main():
                 st.stop()
             data[timeframe] = df
             data[timeframe], model_rf, model_gb = train_model(data[timeframe])
-            save_artifacts(df, model_rf, model_gb, crypto_symbol)  # Save artifacts
+            if df is not None and model_rf is not None and model_gb is not None:
+                save_artifacts(df, model_rf, model_gb, crypto_symbol)  # Save artifacts
         st.rerun()
 
+if __name__ == "__main__":
+    main()
 if __name__ == "__main__":
     main()

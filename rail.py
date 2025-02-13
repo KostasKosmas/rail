@@ -2,7 +2,6 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.metrics import accuracy_score
 import time
@@ -137,20 +136,30 @@ def main():
     if any(None in levels for levels in trade_levels.values()):
         st.stop()
 
-    # Display live price chart with predictions
-    st.subheader("📊 Live Price Chart with Predictions")
-    fig = go.Figure()
+    # Display predicted and actual prices in a table
+    st.subheader("📊 Predicted and Actual Prices")
 
-    # Plot actual prices for the last 6 months (using daily data)
-    last_6_months = data["1d"].iloc[-180:]
-    fig.add_trace(go.Scatter(x=last_6_months.index, y=last_6_months["Close"], name="Actual Price (Last 6 Months)", line=dict(color="blue")))
-
-    # Plot existing future predictions (from RandomForest/GradientBoosting)
+    # Create a table for predictions and actual prices
     future_dates = pd.date_range(data["1d"].index[-1], periods=14, freq="D")
     future_predictions = np.repeat(data["1d"]["14D_EMA"].iloc[-1], len(future_dates))
-    fig.add_trace(go.Scatter(x=future_dates, y=future_predictions, name="Future Predictions (Next 14 Days)", line=dict(color="orange", dash="dot")))
 
-    st.plotly_chart(fig)
+    # Fetch live price
+    live_data = yf.download(crypto_symbol, period="1d", interval="1m")
+    live_price = live_data["Close"].iloc[-1] if not live_data.empty else None
+
+    # Create a DataFrame for the table
+    table_data = {
+        "Date": future_dates,
+        "Predicted Price": future_predictions,
+    }
+    df_table = pd.DataFrame(table_data)
+
+    # Add live price to the table
+    if live_price is not None:
+        df_table["Live Price"] = [live_price if i == 0 else None for i in range(len(future_dates))]
+
+    # Display the table
+    st.write(df_table)
 
     # Display latest predictions and trade levels
     st.subheader("🔍 Latest Predictions & Trade Levels")

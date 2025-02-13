@@ -91,9 +91,9 @@ def calculate_trade_levels(df):
     try:
         latest_close = df["Close"].iloc[-1].item()  # Extract the latest close price as a scalar value
         atr = df["High"].iloc[-1] - df["Low"].iloc[-1]  # Use ATR-like calculation for dynamic levels
-        entry_point = latest_close
-        stop_loss = latest_close - (atr * 1.5)  # Dynamic stop loss
-        take_profit = latest_close + (atr * 2)  # Dynamic take profit
+        entry_point = float(latest_close)  # Convert to float
+        stop_loss = float(latest_close - (atr * 1.5))  # Dynamic stop loss
+        take_profit = float(latest_close + (atr * 2))  # Dynamic take profit
         st.write("Trade levels calculated: Entry Point:", entry_point, "Stop Loss:", stop_loss, "Take Profit:", take_profit)
     except Exception as e:
         st.error(f"❌ Σφάλμα υπολογισμού επιπέδων συναλλαγών: {e}")

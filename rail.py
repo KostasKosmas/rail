@@ -5,7 +5,6 @@ import numpy as np
 import plotly.graph_objects as go
 from ta.trend import SMAIndicator, EMAIndicator, MACD
 from ta.momentum import RSIIndicator
-from ta.volatility import AverageTrueRange
 from ta.volume import OnBalanceVolumeIndicator
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 
@@ -46,23 +45,8 @@ def load_data(symbol, period="6mo", interval="1h"):
         df["MACD"] = MACD(df["Close"]).macd()
         st.write("MACD added:", df[["Close", "MACD"]].head())
 
-        # Fix for ATR calculation
-        st.write("High data type:", type(df["High"]), "Shape:", df["High"].shape)
-        st.write("Low data type:", type(df["Low"]), "Shape:", df["Low"].shape)
-        st.write("Close data type:", type(df["Close"]), "Shape:", df["Close"].shape)
-        
-        # Ensure data is 1-dimensional
-        high = df["High"].squeeze()  # Convert to 1-dimensional array
-        low = df["Low"].squeeze()    # Convert to 1-dimensional array
-        close = df["Close"].squeeze()  # Convert to 1-dimensional array
-        
-        atr = AverageTrueRange(high=high, low=low, close=close, window=14).average_true_range()
-        df["ATR"] = atr
-        st.write("ATR added:", df[["Close", "ATR"]].head())
-
-        df["ATR_Upper"] = df["Close"] + (atr * 1.5)
-        df["ATR_Lower"] = df["Close"] - (atr * 1.5)
-        st.write("ATR Upper and Lower bands added:", df[["Close", "ATR_Upper", "ATR_Lower"]].head())
+        # Skip ATR calculation
+        st.write("Skipping ATR calculation to avoid errors.")
 
         df["OBV"] = OnBalanceVolumeIndicator(df["Close"], df["Volume"]).on_balance_volume()
         st.write("OBV added:", df[["Close", "OBV"]].head())
@@ -92,7 +76,7 @@ if df.empty:
 
 def train_model(df):
     try:
-        X = df[["SMA_50", "SMA_200", "EMA_21", "MACD", "RSI", "ATR", "OBV", "Volume_MA"]].astype(float)
+        X = df[["SMA_50", "SMA_200", "EMA_21", "MACD", "RSI", "OBV", "Volume_MA"]].astype(float)
         st.write("Feature matrix (X):", X.head())
         
         y = np.where(df["Close"].shift(-1) > df["Close"], 1, 0)
@@ -119,10 +103,10 @@ df = train_model(df)
 def calculate_trade_levels(df):
     try:
         latest_close = df["Close"].iloc[-1]
-        atr = df["ATR"].iloc[-1] * 1.5
+        # Use a simple percentage-based stop loss and take profit
+        stop_loss = latest_close * 0.95  # 5% stop loss
+        take_profit = latest_close * 1.10  # 10% take profit
         entry_point = latest_close
-        stop_loss = latest_close - atr
-        take_profit = latest_close + atr * 2
         st.write("Trade levels calculated: Entry Point:", entry_point, "Stop Loss:", stop_loss, "Take Profit:", take_profit)
     except Exception as e:
         st.error(f"❌ Σφάλμα υπολογισμού επιπέδων συναλλαγών: {e}")
@@ -138,7 +122,6 @@ future_dates, forecast = list(df.index[-10:]), df["Close"].values[-10:].tolist()
 
 fig = go.Figure()
 fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="Τιμή", line=dict(color="blue")))
-fig.add_trace(go.Scatter(x=df.index, y=df["ATR_Lower"], name="ATR Lower Band", line=dict(color="green", dash="dot")))
 fig.add_trace(go.Scatter(x=future_dates, y=forecast, name="Forecasted Price", line=dict(color="orange", dash="dot")))
 
 st.plotly_chart(fig)

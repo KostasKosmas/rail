@@ -12,10 +12,12 @@ st.title("📈 AI Crypto Market Analysis Bot")
 st.sidebar.header("⚙ Επιλογές")
 crypto_symbol = st.sidebar.text_input("Εισάγετε Crypto Symbol", "BTC-USD")
 
-def load_data(symbol, interval="1d"):  # Changed to daily interval
+# Cache data loading to speed up the app
+@st.cache_data
+def load_data(symbol, interval="1d"):
     try:
         st.write(f"Loading data for {symbol} with interval {interval}")
-        # Fetch 5 years of historical data with daily intervals
+        # Fetch historical data with the specified interval
         df = yf.download(symbol, period="5y", interval=interval)
         if df.empty:
             st.error("⚠️ Τα δεδομένα δεν είναι διαθέσιμα. Δοκιμάστε διαφορετικό σύμβολο.")
@@ -67,14 +69,14 @@ def train_model(df):
         y_train, y_test = y[:split], y[split:]
         
         # Train RandomForest model
-        model_rf = RandomForestClassifier(n_estimators=100, random_state=42)
+        model_rf = RandomForestClassifier(n_estimators=50, max_depth=5, random_state=42)  # Reduced n_estimators for speed
         model_rf.fit(X_train, y_train)
         y_pred_rf = model_rf.predict(X_test)
         accuracy_rf = accuracy_score(y_test, y_pred_rf)
         st.write(f"RandomForest model trained with accuracy: {accuracy_rf:.2f}")
         
         # Train GradientBoosting model
-        model_gb = GradientBoostingClassifier(n_estimators=100, random_state=42)
+        model_gb = GradientBoostingClassifier(n_estimators=50, max_depth=5, random_state=42)  # Reduced n_estimators for speed
         model_gb.fit(X_train, y_train)
         y_pred_gb = model_gb.predict(X_test)
         accuracy_gb = accuracy_score(y_test, y_pred_gb)
@@ -112,16 +114,23 @@ def calculate_trade_levels(df, timeframe):
     return entry_point, stop_loss, take_profit
 
 def main():
-    df = load_data(crypto_symbol)
-    if df.empty:
-        st.stop()
+    # Load data for different timeframes
+    timeframes = {
+        "1h": "1h",
+        "4h": "4h",
+        "1d": "1d",
+        "1w": "1wk",
+    }
+    data = {}
+    for timeframe, interval in timeframes.items():
+        data[timeframe] = load_data(crypto_symbol, interval=interval)
+        if data[timeframe].empty:
+            st.stop()
 
-    df, model_rf, model_gb = train_model(df)
-
-    # Calculate trade levels for multiple timeframes
-    timeframes = ["1h", "4h", "1d", "1w"]
+    # Train models and calculate trade levels for each timeframe
     trade_levels = {}
-    for timeframe in timeframes:
+    for timeframe, df in data.items():
+        df, model_rf, model_gb = train_model(df)
         trade_levels[timeframe] = calculate_trade_levels(df, timeframe)
 
     if any(None in levels for levels in trade_levels.values()):
@@ -131,23 +140,23 @@ def main():
     st.subheader("📊 Live Price Chart with Predictions")
     fig = go.Figure()
 
-    # Plot actual prices for the last 6 months
-    last_6_months = df.iloc[-180:]  # Last 180 days (~6 months)
+    # Plot actual prices for the last 6 months (using daily data)
+    last_6_months = data["1d"].iloc[-180:]  # Last 180 days (~6 months)
     fig.add_trace(go.Scatter(x=last_6_months.index, y=last_6_months["Close"], name="Actual Price (Last 6 Months)", line=dict(color="blue")))
 
     # Plot model's predicted prices for the last 6 months
     fig.add_trace(go.Scatter(x=last_6_months.index, y=last_6_months["Close"].shift(-1), name="Predicted Price (Last 6 Months)", line=dict(color="green", dash="dot")))
 
     # Extend predictions for the next 14 days
-    future_dates = pd.date_range(df.index[-1], periods=14, freq="D")  # Predict for the next 14 days
-    future_predictions = np.repeat(df["Close"].iloc[-1].item(), len(future_dates))  # Use latest close as placeholder
+    future_dates = pd.date_range(data["1d"].index[-1], periods=14, freq="D")  # Predict for the next 14 days
+    future_predictions = np.repeat(data["1d"]["Close"].iloc[-1].item(), len(future_dates))  # Use latest close as placeholder
     fig.add_trace(go.Scatter(x=future_dates, y=future_predictions, name="Future Predictions (Next 14 Days)", line=dict(color="orange", dash="dot")))
 
     st.plotly_chart(fig)
 
     # Display latest predictions and trade levels
     st.subheader("🔍 Latest Predictions & Trade Levels")
-    latest_pred = df["Final_Prediction"].iloc[-1].item()  # Extract the latest prediction value
+    latest_pred = data["1d"]["Final_Prediction"].iloc[-1].item()  # Extract the latest prediction value
     confidence = np.random.uniform(70, 95)
 
     if latest_pred == 1:
@@ -165,13 +174,12 @@ def main():
     # Continuously update data and retrain model
     while True:
         time.sleep(60)  # Wait for 1 minute
-        df = load_data(crypto_symbol)
-        if df.empty:
-            st.stop()
-        df, model_rf, model_gb = train_model(df)
-        trade_levels = {}
-        for timeframe in timeframes:
-            trade_levels[timeframe] = calculate_trade_levels(df, timeframe)
+        for timeframe, interval in timeframes.items():
+            data[timeframe] = load_data(crypto_symbol, interval=interval)
+            if data[timeframe].empty:
+                st.stop()
+            data[timeframe], model_rf, model_gb = train_model(data[timeframe])
+            trade_levels[timeframe] = calculate_trade_levels(data[timeframe], timeframe)
         st.rerun()  # Use st.rerun() to refresh the app
 
 if __name__ == "__main__":

@@ -1,23 +1,14 @@
+
 import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from sklearn.metrics import accuracy_score
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error
 import time
 import pytz
-import joblib
-import os
-
-# Save models and data
-def save_artifacts(df, model_rf, model_gb, crypto_symbol):
-    if not os.path.exists("saved_models"):
-        os.makedirs("saved_models")
-    joblib.dump(model_rf, f"saved_models/{crypto_symbol}_model_rf.pkl")
-    joblib.dump(model_gb, f"saved_models/{crypto_symbol}_model_gb.pkl")
-    df.to_csv(f"saved_models/{crypto_symbol}_data.csv")
-    st.write("Artifacts saved successfully!")
 
 # 📌 Streamlit UI
 st.title("📈 AI Crypto Market Analysis Bot")
@@ -47,7 +38,6 @@ def load_data(symbol, interval="1d", period="5y"):
         df["MACD"] = df["EMA_12"] - df["EMA_26"]
         df["OBV"] = (np.sign(df["Close"].diff()) * df["Volume"]).cumsum()
         df["Volume_MA"] = df["Volume"].rolling(window=20).mean()
-        df["14D_EMA"] = df["Close"].ewm(span=14, adjust=False).mean()
         df.dropna(inplace=True)
         df = df.astype(np.float64)
     except Exception as e:
@@ -57,133 +47,78 @@ def load_data(symbol, interval="1d", period="5y"):
 
 def train_model(df):
     try:
+        # Use historical data to predict future prices
         X = df[["SMA_50", "SMA_200", "RSI", "MACD", "OBV", "Volume_MA"]]
-        y = np.where(df["Close"].shift(-1) > df["Close"], 1, 0)
-        y = y.ravel()
-        split = int(0.8 * len(df))
-        X_train, X_test = X[:split], X[split:]
-        y_train, y_test = y[:split], y[split:]
-        model_rf = RandomForestClassifier(n_estimators=50, max_depth=5, random_state=42)
-        model_rf.fit(X_train, y_train)
-        y_pred_rf = model_rf.predict(X_test)
-        accuracy_rf = accuracy_score(y_test, y_pred_rf)
-        st.write(f"RandomForest model trained with accuracy: {accuracy_rf:.2f}")
-        model_gb = GradientBoostingClassifier(n_estimators=50, max_depth=5, random_state=42)
-        model_gb.fit(X_train, y_train)
-        y_pred_gb = model_gb.predict(X_test)
-        accuracy_gb = accuracy_score(y_test, y_pred_gb)
-        st.write(f"GradientBoosting model trained with accuracy: {accuracy_gb:.2f}")
-        df["Prediction_RF"] = model_rf.predict(X)
-        df["Prediction_GB"] = model_gb.predict(X)
-        df["Final_Prediction"] = (df["Prediction_RF"] + df["Prediction_GB"]) // 2
+        y = df["Close"]
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        model = RandomForestRegressor(n_estimators=100, random_state=42)
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_test)
+        mse = mean_squared_error(y_test, y_pred)
+        st.write(f"Model trained with Mean Squared Error: {mse:.2f}")
     except Exception as e:
         st.error(f"❌ Σφάλμα εκπαίδευσης μοντέλου: {e}")
-    return df, model_rf, model_gb
+        return None, None
+    return model, X.columns
 
-def calculate_trade_levels(df, timeframe, confidence):
+def predict_future_prices(model, last_row, feature_columns, future_days=14):
     try:
-        latest_close = df["Close"].iloc[-1].item()
-        atr = (df["High"].rolling(window=14).mean() - df["Low"].rolling(window=14).mean()).iloc[-1].item()
-        latest_pred = df["Final_Prediction"].iloc[-1].item()
-        rsi = df["RSI"].iloc[-1].item()
-        macd = df["MACD"].iloc[-1].item()
-        if confidence > 80:
-            stop_loss_multiplier = 1.2
-            take_profit_multiplier = 1.8
-        elif confidence > 60:
-            stop_loss_multiplier = 1.5
-            take_profit_multiplier = 2.0
-        else:
-            stop_loss_multiplier = 2.0
-            take_profit_multiplier = 2.5
-        if rsi > 70 or rsi < 30:
-            stop_loss_multiplier *= 0.9
-            take_profit_multiplier *= 1.1
-        if macd > 0:
-            take_profit_multiplier *= 1.1
-        else:
-            stop_loss_multiplier *= 1.1
-        if latest_pred == 1:
-            entry_point = latest_close
-            stop_loss = latest_close - (atr * stop_loss_multiplier)
-            take_profit = latest_close + (atr * take_profit_multiplier)
-        else:
-            entry_point = latest_close
-            stop_loss = latest_close + (atr * stop_loss_multiplier)
-            take_profit = latest_close - (atr * take_profit_multiplier)
-        st.write(f"Trade levels for {timeframe}: Entry Point: {entry_point:.2f}, Stop Loss: {stop_loss:.2f}, Take Profit: {take_profit:.2f}")
+        future_predictions = []
+        current_features = last_row[feature_columns].values.reshape(1, -1)
+        for _ in range(future_days):
+            # Predict the next day's price
+            next_price = model.predict(current_features)[0]
+            future_predictions.append(next_price)
+            # Update features for the next prediction
+            current_features[0][0] = next_price  # Update SMA_50 (simplified)
+            current_features[0][1] = next_price  # Update SMA_200 (simplified)
+            current_features[0][4] += np.random.normal(0, 100)  # Update OBV (simplified)
+        return future_predictions
     except Exception as e:
-        st.error(f"❌ Σφάλμα υπολογισμού επιπέδων συναλλαγών: {e}")
-        entry_point, stop_loss, take_profit = None, None, None
-    return entry_point, stop_loss, take_profit
+        st.error(f"❌ Σφάλμα πρόβλεψης μελλοντικών τιμών: {e}")
+        return None
 
 def main():
-    timeframes = {
-        "1d": {"interval": "1d", "period": "5y"},
-        "1w": {"interval": "1wk", "period": "5y"},
-    }
-    data = {}
-    for timeframe, params in timeframes.items():
-        df = load_data(crypto_symbol, interval=params["interval"], period=params["period"])
-        if df is None:
-            st.error(f"❌ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {crypto_symbol}.")
-            st.stop()
-        data[timeframe] = df
-    trade_levels = {}
-    for timeframe, df in data.items():
-        df, model_rf, model_gb = train_model(df)
-        confidence = np.random.uniform(70, 95)
-        trade_levels[timeframe] = calculate_trade_levels(df, timeframe, confidence)
-        save_artifacts(df, model_rf, model_gb, crypto_symbol)
-    if any(None in levels for levels in trade_levels.values()):
+    # Load historical data
+    df = load_data(crypto_symbol)
+    if df is None:
+        st.error(f"❌ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {crypto_symbol}.")
         st.stop()
 
-    # Display live price chart with historical and future predictions
+    # Train the model
+    model, feature_columns = train_model(df)
+    if model is None:
+        st.stop()
+
+    # Predict future prices
+    last_row = df.iloc[-1]
+    future_dates = pd.date_range(df.index[-1], periods=14, freq="D")
+    future_predictions = predict_future_prices(model, last_row, feature_columns)
+    if future_predictions is None:
+        st.stop()
+
+    # Display the chart
     st.subheader("📊 Live Price Chart with Predictions")
     fig = go.Figure()
 
-    # Plot actual prices for the last 6 months (using daily data)
-    last_6_months = data["1d"].iloc[-180:]  # Last 180 days (~6 months)
-    fig.add_trace(go.Scatter(x=last_6_months.index, y=last_6_months["Close"], name="Actual Price (Last 6 Months)", line=dict(color="blue")))
+    # Plot historical data (last 6 months)
+    last_6_months = df.iloc[-180:]
+    fig.add_trace(go.Scatter(x=last_6_months.index, y=last_6_months["Close"], name="Historical Prices (Last 6 Months)", line=dict(color="blue")))
 
-    # Extend predictions for the next 14 days using a linear trend
-    future_dates = pd.date_range(data["1d"].index[-1], periods=14, freq="D")  # Predict for the next 14 days
-    future_predictions = np.linspace(data["1d"]["Close"].iloc[-1], data["1d"]["Close"].iloc[-1] * 1.05, len(future_dates))  # Linear trend
+    # Plot future predictions
     fig.add_trace(go.Scatter(x=future_dates, y=future_predictions, name="Future Predictions (Next 14 Days)", line=dict(color="orange", dash="dot")))
 
-    st.plotly_chart(fig)
-
-    # Display latest predictions and trade levels
-    st.subheader("🔍 Latest Predictions & Trade Levels")
-    latest_pred = data["1d"]["Final_Prediction"].iloc[-1].item()
-    confidence = np.random.uniform(70, 95)
-
-    if latest_pred == 1:
-        st.success(f"📈 Προβλέπεται άνοδος με confidence {confidence:.2f}%")
-    else:
-        st.error(f"📉 Προβλέπεται πτώση με confidence {confidence:.2f}%")
-
-    st.subheader("📌 Trade Setup")
-    for timeframe, levels in trade_levels.items():
-        st.write(f"⏰ {timeframe}:")
-        st.write(f"✅ Entry Point: {levels[0]:.2f}")
-        st.write(f"🚨 Stop Loss: {levels[1]:.2f}")
-        st.write(f"🎯 Take Profit: {levels[2]:.2f}")
-
-    # Continuously update data and retrain model
+    # Continuously update with actual prices
     while True:
+        # Fetch the latest data
+        latest_data = yf.download(crypto_symbol, period="1d", interval="1m")
+        if not latest_data.empty:
+            latest_price = latest_data["Close"].iloc[-1]
+            latest_time = latest_data.index[-1].tz_localize("UTC").tz_convert("Europe/Athens")
+            # Update the chart with the latest price
+            fig.add_trace(go.Scatter(x=[latest_time], y=[latest_price], name="Actual Price", mode="markers", marker=dict(color="green", size=10)))
+            st.plotly_chart(fig)
         time.sleep(60)  # Wait for 1 minute
-        for timeframe, params in timeframes.items():
-            df = load_data(crypto_symbol, interval=params["interval"], period=params["period"])
-            if df is None:
-                st.error(f"❌ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {crypto_symbol}.")
-                st.stop()
-            data[timeframe] = df
-            data[timeframe], model_rf, model_gb = train_model(data[timeframe])
-            confidence = np.random.uniform(70, 95)
-            trade_levels[timeframe] = calculate_trade_levels(data[timeframe], timeframe, confidence)
-            save_artifacts(df, model_rf, model_gb, crypto_symbol)
-        st.rerun()
 
 if __name__ == "__main__":
     main()

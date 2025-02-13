@@ -80,6 +80,7 @@ def train_model(df):
         st.write("Feature matrix (X):", X.head())
         
         y = np.where(df["Close"].shift(-1) > df["Close"], 1, 0)
+        y = y.ravel()  # Flatten y to 1D array
         st.write("Target vector (y):", y[:5])
         
         model_rf = RandomForestClassifier(n_estimators=100, random_state=42)
@@ -127,7 +128,7 @@ fig.add_trace(go.Scatter(x=future_dates, y=forecast, name="Forecasted Price", li
 st.plotly_chart(fig)
 
 st.subheader("🔍 Προβλέψεις & Confidence Level")
-latest_pred = df.iloc[-1]["Final_Prediction"]
+latest_pred = df["Final_Prediction"].iloc[-1]  # Extract the latest prediction value
 confidence = np.random.uniform(70, 95)
 
 if latest_pred == 1:

@@ -20,9 +20,8 @@ def load_data(symbol, interval="1d", period="5y"):
         # Fetch historical data with the specified interval and period
         df = yf.download(symbol, period=period, interval=interval)
         if df.empty:
-            st.error(f"⚠️ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {symbol} με interval {interval}. Δοκιμάστε διαφορετικό σύμβολο ή interval.")
-            return pd.DataFrame()
-        
+            st.warning(f"⚠️ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {symbol} με interval {interval}. Δοκιμάστε διαφορετικό interval.")
+            return None  # Return None if data is not available
         df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
         df.dropna(inplace=True)
         
@@ -53,7 +52,7 @@ def load_data(symbol, interval="1d", period="5y"):
         df = df.astype(np.float64)
     except Exception as e:
         st.error(f"❌ Σφάλμα φόρτωσης δεδομένων: {e}")
-        return pd.DataFrame()
+        return None
     return df
 
 def train_model(df):
@@ -123,9 +122,15 @@ def main():
     }
     data = {}
     for timeframe, params in timeframes.items():
-        data[timeframe] = load_data(crypto_symbol, interval=params["interval"], period=params["period"])
-        if data[timeframe].empty:
-            st.stop()
+        df = load_data(crypto_symbol, interval=params["interval"], period=params["period"])
+        if df is None:
+            # Fall back to daily data if the requested interval is not available
+            st.warning(f"⚠️ Το interval {params['interval']} δεν είναι διαθέσιμο. Χρησιμοποιούμε daily data αντί για {timeframe}.")
+            df = load_data(crypto_symbol, interval="1d", period=params["period"])
+            if df is None:
+                st.error(f"❌ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {crypto_symbol}.")
+                st.stop()
+        data[timeframe] = df
 
     # Train models and calculate trade levels for each timeframe
     trade_levels = {}
@@ -175,9 +180,14 @@ def main():
     while True:
         time.sleep(60)  # Wait for 1 minute
         for timeframe, params in timeframes.items():
-            data[timeframe] = load_data(crypto_symbol, interval=params["interval"], period=params["period"])
-            if data[timeframe].empty:
-                st.stop()
+            df = load_data(crypto_symbol, interval=params["interval"], period=params["period"])
+            if df is None:
+                # Fall back to daily data if the requested interval is not available
+                df = load_data(crypto_symbol, interval="1d", period=params["period"])
+                if df is None:
+                    st.error(f"❌ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {crypto_symbol}.")
+                    st.stop()
+            data[timeframe] = df
             data[timeframe], model_rf, model_gb = train_model(data[timeframe])
             trade_levels[timeframe] = calculate_trade_levels(data[timeframe], timeframe)
         st.rerun()  # Use st.rerun() to refresh the app

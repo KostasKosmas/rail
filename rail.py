@@ -11,9 +11,6 @@ from ta.volume import OnBalanceVolumeIndicator
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from datetime import datetime
 
-# Current Date and Time (UTC - YYYY-MM-DD HH:MM:SS formatted): 2025-02-13 19:43:46
-# Current User's Login: KostasKosmas
-
 # 📌 Streamlit UI
 st.title("📈 AI Crypto Market Analysis Bot")
 st.sidebar.header("⚙ Επιλογές")
@@ -41,7 +38,7 @@ def load_data(symbol, period="6mo", interval="1h"):
         df["ATR_Lower"] = df["Close"] - (atr * 1.5)
         
         df["OBV"] = OnBalanceVolumeIndicator(df["Close"], df["Volume"]).on_balance_volume().values.flatten()
-        df["Volume_MA"] = df["Volume"].rolling(window=20).mean()
+        df["Volume_MA"] = df["Volume"].rolling(window=20).mean().values.flatten()
         df.dropna(inplace=True)
     except Exception as e:
         st.error(f"❌ Σφάλμα φόρτωσης δεδομένων: {e}")

@@ -1,4 +1,3 @@
-# Import all required libraries
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -32,11 +31,21 @@ def train_arima_model(df):
         st.error(f"❌ Σφάλμα εκπαίδευσης ARIMA μοντέλου: {e}")
         return None
 
-# Predict future prices with ARIMA
-def predict_with_arima(model, future_days=14):
+# Predict future prices with ARIMA using rolling forecast
+def predict_with_arima(model, df, future_days=14):
     try:
-        # Predict future prices with confidence intervals
-        predictions = model.forecast(steps=future_days)
+        # Use a rolling forecast approach
+        history = df["Close"].tolist()
+        predictions = []
+        for _ in range(future_days):
+            # Fit the model on the latest data
+            model = ARIMA(history, order=(5, 1, 0))
+            model_fit = model.fit()
+            # Predict the next value
+            output = model_fit.forecast()
+            predictions.append(output[0])
+            # Update history with the predicted value
+            history.append(output[0])
         return predictions
     except Exception as e:
         st.error(f"❌ Σφάλμα πρόβλεψης με ARIMA: {e}")
@@ -189,9 +198,9 @@ def main():
         # Evaluate ARIMA model accuracy
         evaluate_arima_model(arima_model, data["1d"])
 
-        # Predict future prices with ARIMA
+        # Predict future prices with ARIMA using rolling forecast
         future_dates = pd.date_range(data["1d"].index[-1], periods=14, freq="D")
-        future_predictions_arima = predict_with_arima(arima_model)
+        future_predictions_arima = predict_with_arima(arima_model, data["1d"])
         if future_predictions_arima is not None:
             st.write("ARIMA Future Predictions:", future_predictions_arima)
 

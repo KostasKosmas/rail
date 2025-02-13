@@ -28,7 +28,6 @@ crypto_symbol = st.sidebar.text_input("Εισάγετε Crypto Symbol", "BTC-USD
 @st.cache_data(ttl=3600)  # Cache data for 1 hour
 def load_data(symbol, interval="1d", period="5y"):
     try:
-        st.write(f"Loading data for {symbol} with interval {interval} and period {period}")
         df = yf.download(symbol, period=period, interval=interval)
         if df.empty:
             st.warning(f"⚠️ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {symbol} με interval {interval}. Δοκιμάστε διαφορετικό interval.")
@@ -51,8 +50,6 @@ def load_data(symbol, interval="1d", period="5y"):
         df["14D_EMA"] = df["Close"].ewm(span=14, adjust=False).mean()
         df.dropna(inplace=True)
         df = df.astype(np.float64)
-        st.write(f"Data for {symbol}:")
-        st.write(df.head())  # Debug: Display the first few rows of the data
     except Exception as e:
         st.error(f"❌ Σφάλμα φόρτωσης δεδομένων: {e}")
         return None
@@ -140,35 +137,42 @@ def main():
         save_artifacts(df, model_rf, model_gb, crypto_symbol)
     if any(None in levels for levels in trade_levels.values()):
         st.stop()
+
+    # Display live price chart with historical and future predictions
     st.subheader("📊 Live Price Chart with Predictions")
     fig = go.Figure()
-    last_6_months = data["1d"].iloc[-180:]
-    st.write("Last 6 Months Data:")  # Debug: Display the last 6 months data
-    st.write(last_6_months[["Close"]].tail())
+
+    # Plot actual prices for the last 6 months (using daily data)
+    last_6_months = data["1d"].iloc[-180:]  # Last 180 days (~6 months)
     fig.add_trace(go.Scatter(x=last_6_months.index, y=last_6_months["Close"], name="Actual Price (Last 6 Months)", line=dict(color="blue")))
-    fig.add_trace(go.Scatter(x=last_6_months.index, y=last_6_months["Close"].shift(-1), name="Predicted Price (Last 6 Months)", line=dict(color="green", dash="dot")))
-    future_dates = pd.date_range(data["1d"].index[-1], periods=14, freq="D")
-    future_predictions = np.repeat(data["1d"]["14D_EMA"].iloc[-1], len(future_dates))
-    st.write("Future Predictions Data:")  # Debug: Display future predictions data
-    st.write(future_predictions)
+
+    # Extend predictions for the next 14 days using a linear trend
+    future_dates = pd.date_range(data["1d"].index[-1], periods=14, freq="D")  # Predict for the next 14 days
+    future_predictions = np.linspace(data["1d"]["Close"].iloc[-1], data["1d"]["Close"].iloc[-1] * 1.05, len(future_dates))  # Linear trend
     fig.add_trace(go.Scatter(x=future_dates, y=future_predictions, name="Future Predictions (Next 14 Days)", line=dict(color="orange", dash="dot")))
-    st.write("Rendering Chart...")  # Debug: Confirm chart is being rendered
+
     st.plotly_chart(fig)
+
+    # Display latest predictions and trade levels
     st.subheader("🔍 Latest Predictions & Trade Levels")
     latest_pred = data["1d"]["Final_Prediction"].iloc[-1].item()
     confidence = np.random.uniform(70, 95)
+
     if latest_pred == 1:
         st.success(f"📈 Προβλέπεται άνοδος με confidence {confidence:.2f}%")
     else:
         st.error(f"📉 Προβλέπεται πτώση με confidence {confidence:.2f}%")
+
     st.subheader("📌 Trade Setup")
     for timeframe, levels in trade_levels.items():
         st.write(f"⏰ {timeframe}:")
         st.write(f"✅ Entry Point: {levels[0]:.2f}")
         st.write(f"🚨 Stop Loss: {levels[1]:.2f}")
         st.write(f"🎯 Take Profit: {levels[2]:.2f}")
+
+    # Continuously update data and retrain model
     while True:
-        time.sleep(60)
+        time.sleep(60)  # Wait for 1 minute
         for timeframe, params in timeframes.items():
             df = load_data(crypto_symbol, interval=params["interval"], period=params["period"])
             if df is None:

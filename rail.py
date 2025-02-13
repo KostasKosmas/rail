@@ -32,22 +32,28 @@ def load_data(symbol, period="6mo", interval="1h"):
         # Debug statements
         st.write("Dataframe after initial processing:", df.head())
         
-        df["SMA_50"] = SMAIndicator(df["Close"], window=50).sma_indicator().values
+        # Add technical indicators
+        df["SMA_50"] = SMAIndicator(df["Close"], window=50).sma_indicator()
         st.write("SMA_50 added:", df[["Close", "SMA_50"]].head())
 
-        df["SMA_200"] = SMAIndicator(df["Close"], window=200).sma_indicator().values
+        df["SMA_200"] = SMAIndicator(df["Close"], window=200).sma_indicator()
         st.write("SMA_200 added:", df[["Close", "SMA_200"]].head())
 
-        df["EMA_21"] = EMAIndicator(df["Close"], window=21).ema_indicator().values
+        df["EMA_21"] = EMAIndicator(df["Close"], window=21).ema_indicator()
         st.write("EMA_21 added:", df[["Close", "EMA_21"]].head())
 
-        df["RSI"] = RSIIndicator(df["Close"], window=14).rsi().values
+        df["RSI"] = RSIIndicator(df["Close"], window=14).rsi()
         st.write("RSI added:", df[["Close", "RSI"]].head())
 
-        df["MACD"] = MACD(df["Close"]).macd().values
+        df["MACD"] = MACD(df["Close"]).macd()
         st.write("MACD added:", df[["Close", "MACD"]].head())
 
-        atr = AverageTrueRange(df["High"], df["Low"], df["Close"], window=14).average_true_range().values
+        # Fix for ATR calculation
+        st.write("High data type:", type(df["High"]), "Shape:", df["High"].shape)
+        st.write("Low data type:", type(df["Low"]), "Shape:", df["Low"].shape)
+        st.write("Close data type:", type(df["Close"]), "Shape:", df["Close"].shape)
+        
+        atr = AverageTrueRange(high=df["High"].squeeze(), low=df["Low"].squeeze(), close=df["Close"].squeeze(), window=14).average_true_range()
         df["ATR"] = atr
         st.write("ATR added:", df[["Close", "ATR"]].head())
 
@@ -55,10 +61,10 @@ def load_data(symbol, period="6mo", interval="1h"):
         df["ATR_Lower"] = df["Close"] - (atr * 1.5)
         st.write("ATR Upper and Lower bands added:", df[["Close", "ATR_Upper", "ATR_Lower"]].head())
 
-        df["OBV"] = OnBalanceVolumeIndicator(df["Close"], df["Volume"]).on_balance_volume().values
+        df["OBV"] = OnBalanceVolumeIndicator(df["Close"], df["Volume"]).on_balance_volume()
         st.write("OBV added:", df[["Close", "OBV"]].head())
 
-        df["Volume_MA"] = df["Volume"].rolling(window=20).mean().values
+        df["Volume_MA"] = df["Volume"].rolling(window=20).mean()
         st.write("Volume_MA added:", df[["Volume", "Volume_MA"]].head())
 
         df.dropna(inplace=True)

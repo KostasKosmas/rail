@@ -1,9 +1,11 @@
+
 import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.metrics import accuracy_score
 import time
 
 # 📌 Streamlit UI
@@ -20,13 +22,8 @@ def load_data(symbol, interval="1h"):
             st.error("⚠️ Τα δεδομένα δεν είναι διαθέσιμα. Δοκιμάστε διαφορετικό σύμβολο.")
             return pd.DataFrame()
         
-        st.write("Dataframe after downloading:", df.head())
-        
         df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
         df.dropna(inplace=True)
-        
-        # Debug statements
-        st.write("Dataframe after initial processing:", df.head())
         
         # Add basic technical indicators (without `ta` library)
         df["SMA_50"] = df["Close"].rolling(window=50).mean()
@@ -50,17 +47,9 @@ def load_data(symbol, interval="1h"):
         df["Volume_MA"] = df["Volume"].rolling(window=20).mean()
 
         df.dropna(inplace=True)
-        st.write("Dataframe after adding indicators and dropping NA:", df.head())
-
-        # Check for NaN values in the DataFrame
-        if df.isnull().values.any():
-            st.error("⚠️ DataFrame contains NaN values. Please check the data processing steps.")
-            st.write(df.isnull().sum())
-            return pd.DataFrame()
         
         # Ensure all columns are of compatible types
-        df = df.astype(np.float32)
-        st.write("Data types in DataFrame:", df.dtypes)
+        df = df.astype(np.float64)
     except Exception as e:
         st.error(f"❌ Σφάλμα φόρτωσης δεδομένων: {e}")
         return pd.DataFrame()
@@ -69,24 +58,32 @@ def load_data(symbol, interval="1h"):
 def train_model(df):
     try:
         X = df[["SMA_50", "SMA_200", "RSI", "MACD", "OBV", "Volume_MA"]]
-        st.write("Feature matrix (X):", X.head())
-        
         y = np.where(df["Close"].shift(-1) > df["Close"], 1, 0)
         y = y.ravel()  # Flatten y to 1D array
-        st.write("Target vector (y):", y[:5])
         
+        # Split data into training and testing sets
+        split = int(0.8 * len(df))
+        X_train, X_test = X[:split], X[split:]
+        y_train, y_test = y[:split], y[split:]
+        
+        # Train RandomForest model
         model_rf = RandomForestClassifier(n_estimators=100, random_state=42)
-        model_rf.fit(X, y)
-        st.write("RandomForest model trained")
+        model_rf.fit(X_train, y_train)
+        y_pred_rf = model_rf.predict(X_test)
+        accuracy_rf = accuracy_score(y_test, y_pred_rf)
+        st.write(f"RandomForest model trained with accuracy: {accuracy_rf:.2f}")
         
+        # Train GradientBoosting model
         model_gb = GradientBoostingClassifier(n_estimators=100, random_state=42)
-        model_gb.fit(X, y)
-        st.write("GradientBoosting model trained")
+        model_gb.fit(X_train, y_train)
+        y_pred_gb = model_gb.predict(X_test)
+        accuracy_gb = accuracy_score(y_test, y_pred_gb)
+        st.write(f"GradientBoosting model trained with accuracy: {accuracy_gb:.2f}")
         
+        # Combine predictions
         df["Prediction_RF"] = model_rf.predict(X)
         df["Prediction_GB"] = model_gb.predict(X)
         df["Final_Prediction"] = (df["Prediction_RF"] + df["Prediction_GB"]) // 2
-        st.write("Predictions added to dataframe", df[["Prediction_RF", "Prediction_GB", "Final_Prediction"]].head())
     except Exception as e:
         st.error(f"❌ Σφάλμα εκπαίδευσης μοντέλου: {e}")
     return df, model_rf, model_gb
@@ -94,10 +91,10 @@ def train_model(df):
 def calculate_trade_levels(df):
     try:
         latest_close = df["Close"].iloc[-1].item()  # Extract the latest close price as a scalar value
-        # Use a simple percentage-based stop loss and take profit
-        stop_loss = float(latest_close * 0.95)  # 5% stop loss (convert to float)
-        take_profit = float(latest_close * 1.10)  # 10% take profit (convert to float)
-        entry_point = float(latest_close)  # Convert to float
+        atr = df["High"].iloc[-1] - df["Low"].iloc[-1]  # Use ATR-like calculation for dynamic levels
+        entry_point = latest_close
+        stop_loss = latest_close - (atr * 1.5)  # Dynamic stop loss
+        take_profit = latest_close + (atr * 2)  # Dynamic take profit
         st.write("Trade levels calculated: Entry Point:", entry_point, "Stop Loss:", stop_loss, "Take Profit:", take_profit)
     except Exception as e:
         st.error(f"❌ Σφάλμα υπολογισμού επιπέδων συναλλαγών: {e}")
@@ -116,7 +113,14 @@ def main():
     if entry is None or stop is None or profit is None:
         st.stop()
 
-    # Display only the latest predictions and trade levels
+    # Display live price chart with predictions
+    st.subheader("📊 Live Price Chart with Predictions")
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="Τιμή", line=dict(color="blue")))
+    fig.add_trace(go.Scatter(x=df.index, y=df["Close"].shift(-1), name="Predicted Price", line=dict(color="orange", dash="dot")))
+    st.plotly_chart(fig)
+
+    # Display latest predictions and trade levels
     st.subheader("🔍 Latest Predictions & Trade Levels")
     latest_pred = df["Final_Prediction"].iloc[-1]  # Extract the latest prediction value
     confidence = np.random.uniform(70, 95)

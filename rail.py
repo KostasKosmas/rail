@@ -7,7 +7,6 @@ import plotly.graph_objects as go
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.metrics import accuracy_score, mean_absolute_error, mean_squared_error
 from statsmodels.tsa.arima.model import ARIMA
-from pmdarima import auto_arima  # For auto-tuning ARIMA parameters
 import time
 import joblib
 import os
@@ -21,20 +20,14 @@ def save_artifacts(df, model_rf, model_gb, crypto_symbol):
     df.to_csv(f"saved_models/{crypto_symbol}_data.csv")
     st.write("Artifacts saved successfully!")
 
-# Train ARIMA model with auto-tuning
+# Train ARIMA model
 def train_arima_model(df):
     try:
-        # Auto-tune ARIMA parameters
-        model = auto_arima(
-            df["Close"],
-            seasonal=False,  # Non-seasonal data
-            trace=True,  # Print logs
-            error_action="ignore",  # Ignore errors
-            suppress_warnings=True,  # Suppress warnings
-            stepwise=True,  # Use stepwise algorithm
-        )
-        st.write(f"Best ARIMA parameters: {model.order}")
-        return model
+        # Fit ARIMA model with fixed parameters (p=5, d=1, q=0)
+        model = ARIMA(df["Close"], order=(5, 1, 0))
+        model_fit = model.fit()
+        st.write("ARIMA model trained successfully.")
+        return model_fit
     except Exception as e:
         st.error(f"❌ Σφάλμα εκπαίδευσης ARIMA μοντέλου: {e}")
         return None
@@ -43,11 +36,11 @@ def train_arima_model(df):
 def predict_with_arima(model, future_days=14):
     try:
         # Predict future prices with confidence intervals
-        predictions, conf_int = model.predict(n_periods=future_days, return_conf_int=True)
-        return predictions, conf_int
+        predictions = model.forecast(steps=future_days)
+        return predictions
     except Exception as e:
         st.error(f"❌ Σφάλμα πρόβλεψης με ARIMA: {e}")
-        return None, None
+        return None
 
 # Evaluate ARIMA model accuracy
 def evaluate_arima_model(model, df):
@@ -57,10 +50,11 @@ def evaluate_arima_model(model, df):
         train, test = df["Close"].iloc[:train_size], df["Close"].iloc[train_size:]
         
         # Fit the model on training data
-        model.fit(train)
+        model = ARIMA(train, order=(5, 1, 0))
+        model_fit = model.fit()
         
         # Predict on test data
-        predictions = model.predict(n_periods=len(test))
+        predictions = model_fit.forecast(steps=len(test))
         
         # Calculate Mean Absolute Error (MAE) and Root Mean Squared Error (RMSE)
         mae = mean_absolute_error(test, predictions)
@@ -197,7 +191,7 @@ def main():
 
         # Predict future prices with ARIMA
         future_dates = pd.date_range(data["1d"].index[-1], periods=14, freq="D")
-        future_predictions_arima, conf_int = predict_with_arima(arima_model)
+        future_predictions_arima = predict_with_arima(arima_model)
         if future_predictions_arima is not None:
             st.write("ARIMA Future Predictions:", future_predictions_arima)
 
@@ -209,17 +203,9 @@ def main():
     last_6_months = data["1d"].iloc[-180:]
     fig.add_trace(go.Scatter(x=last_6_months.index, y=last_6_months["Close"], name="Actual Price (Last 6 Months)", line=dict(color="blue")))
 
-    # Plot ARIMA future predictions with confidence intervals
+    # Plot ARIMA future predictions
     if arima_model is not None and future_predictions_arima is not None:
         fig.add_trace(go.Scatter(x=future_dates, y=future_predictions_arima, name="ARIMA Future Predictions", line=dict(color="red", dash="dot")))
-        fig.add_trace(go.Scatter(
-            x=np.concatenate([future_dates, future_dates[::-1]]),  # X values for the confidence interval
-            y=np.concatenate([conf_int[:, 0], conf_int[::-1, 1]]),  # Y values for the confidence interval
-            fill="toself",
-            fillcolor="rgba(255, 0, 0, 0.2)",
-            line=dict(color="rgba(255, 0, 0, 0)"),
-            name="ARIMA Confidence Interval",
-        ))
 
     # Plot existing future predictions (from RandomForest/GradientBoosting)
     future_dates = pd.date_range(data["1d"].index[-1], periods=14, freq="D")

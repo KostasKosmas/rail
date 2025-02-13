@@ -66,7 +66,7 @@ def load_data(symbol, period="6mo", interval="1h"):
     return df
 
 df = load_data(crypto_symbol)
-if df.empty():
+if df.empty:
     st.stop()
 
 def train_model(df):

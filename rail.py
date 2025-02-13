@@ -87,7 +87,7 @@ def train_model(df):
         st.error(f"❌ Σφάλμα εκπαίδευσης μοντέλου: {e}")
     return df, model_rf, model_gb
 
-def calculate_trade_levels(df):
+def calculate_trade_levels(df, timeframe):
     try:
         latest_close = df["Close"].iloc[-1].item()  # Extract the latest close price as a scalar value
         atr = df["High"].iloc[-1].item() - df["Low"].iloc[-1].item()  # Use ATR-like calculation for dynamic levels
@@ -103,7 +103,7 @@ def calculate_trade_levels(df):
             stop_loss = latest_close + (atr * 1.5)  # Stop loss above entry
             take_profit = latest_close - (atr * 2)  # Take profit below entry
         
-        st.write("Trade levels calculated: Entry Point:", entry_point, "Stop Loss:", stop_loss, "Take Profit:", take_profit)
+        st.write(f"Trade levels for {timeframe}: Entry Point: {entry_point:.2f}, Stop Loss: {stop_loss:.2f}, Take Profit: {take_profit:.2f}")
     except Exception as e:
         st.error(f"❌ Σφάλμα υπολογισμού επιπέδων συναλλαγών: {e}")
         entry_point, stop_loss, take_profit = None, None, None
@@ -116,9 +116,13 @@ def main():
 
     df, model_rf, model_gb = train_model(df)
 
-    entry, stop, profit = calculate_trade_levels(df)
+    # Calculate trade levels for multiple timeframes
+    timeframes = ["1h", "4h", "1d", "1w"]
+    trade_levels = {}
+    for timeframe in timeframes:
+        trade_levels[timeframe] = calculate_trade_levels(df, timeframe)
 
-    if entry is None or stop is None or profit is None:
+    if any(None in levels for levels in trade_levels.values()):
         st.stop()
 
     # Display live price chart with future predictions
@@ -139,9 +143,11 @@ def main():
         st.error(f"📉 Προβλέπεται πτώση με confidence {confidence:.2f}%")
 
     st.subheader("📌 Trade Setup")
-    st.write(f"✅ Entry Point: {entry:.2f}")
-    st.write(f"🚨 Stop Loss: {stop:.2f}")
-    st.write(f"🎯 Take Profit: {profit:.2f}")
+    for timeframe, levels in trade_levels.items():
+        st.write(f"⏰ {timeframe}:")
+        st.write(f"✅ Entry Point: {levels[0]:.2f}")
+        st.write(f"🚨 Stop Loss: {levels[1]:.2f}")
+        st.write(f"🎯 Take Profit: {levels[2]:.2f}")
 
     # Continuously update data and retrain model
     while True:
@@ -150,7 +156,9 @@ def main():
         if df.empty:
             st.stop()
         df, model_rf, model_gb = train_model(df)
-        entry, stop, profit = calculate_trade_levels(df)
+        trade_levels = {}
+        for timeframe in timeframes:
+            trade_levels[timeframe] = calculate_trade_levels(df, timeframe)
         st.rerun()  # Use st.rerun() to refresh the app
 
 if __name__ == "__main__":

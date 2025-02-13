@@ -34,35 +34,44 @@ def load_data(symbol, period="6mo", interval="1h"):
         
         df["SMA_50"] = SMAIndicator(df["Close"], window=50).sma_indicator().values
         st.write("SMA_50 added:", df[["Close", "SMA_50"]].head())
-        
+
         df["SMA_200"] = SMAIndicator(df["Close"], window=200).sma_indicator().values
         st.write("SMA_200 added:", df[["Close", "SMA_200"]].head())
-        
+
         df["EMA_21"] = EMAIndicator(df["Close"], window=21).ema_indicator().values
         st.write("EMA_21 added:", df[["Close", "EMA_21"]].head())
-        
+
         df["RSI"] = RSIIndicator(df["Close"], window=14).rsi().values
         st.write("RSI added:", df[["Close", "RSI"]].head())
-        
+
         df["MACD"] = MACD(df["Close"]).macd().values
         st.write("MACD added:", df[["Close", "MACD"]].head())
-        
+
         atr = AverageTrueRange(df["High"], df["Low"], df["Close"], window=14).average_true_range().values
         df["ATR"] = atr
         st.write("ATR added:", df[["Close", "ATR"]].head())
-        
+
         df["ATR_Upper"] = df["Close"] + (atr * 1.5)
         df["ATR_Lower"] = df["Close"] - (atr * 1.5)
         st.write("ATR Upper and Lower bands added:", df[["Close", "ATR_Upper", "ATR_Lower"]].head())
-        
+
         df["OBV"] = OnBalanceVolumeIndicator(df["Close"], df["Volume"]).on_balance_volume().values
         st.write("OBV added:", df[["Close", "OBV"]].head())
-        
+
         df["Volume_MA"] = df["Volume"].rolling(window=20).mean().values
         st.write("Volume_MA added:", df[["Volume", "Volume_MA"]].head())
-        
+
         df.dropna(inplace=True)
         st.write("Dataframe after adding indicators and dropping NA:", df.head())
+
+        # Check for NaN values in the DataFrame
+        if df.isnull().values.any():
+            st.error("⚠️ DataFrame contains NaN values. Please check the data processing steps.")
+            st.write(df.isnull().sum())
+            return pd.DataFrame()
+        
+        # Check data types
+        st.write("Data types in DataFrame:", df.dtypes)
     except Exception as e:
         st.error(f"❌ Σφάλμα φόρτωσης δεδομένων: {e}")
         return pd.DataFrame()

@@ -91,6 +91,10 @@ def calculate_trade_levels(df):
         latest_close = df["Close"].iloc[-1]
         atr = df["High"].rolling(window=14).max()[-1] - df["Low"].rolling(window=14).min()[-1]  # ATR-like calculation
 
+        # Log calculations for debugging
+        st.write(f"Latest Close: {latest_close}")
+        st.write(f"ATR: {atr}")
+
         # Determine trade levels based on prediction
         latest_pred = df["Final_Prediction"].iloc[-1]
         if latest_pred == 1:  # Long position

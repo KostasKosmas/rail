@@ -116,7 +116,6 @@ def main():
     # Define timeframes and their corresponding intervals and periods
     timeframes = {
         "1h": {"interval": "1h", "period": "730d"},  # 1-hour data for the last 2 years
-        "4h": {"interval": "4h", "period": "730d"},  # 4-hour data for the last 2 years
         "1d": {"interval": "1d", "period": "5y"},    # Daily data for the last 5 years
         "1w": {"interval": "1wk", "period": "5y"},   # Weekly data for the last 5 years
     }

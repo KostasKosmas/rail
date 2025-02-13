@@ -12,10 +12,10 @@ st.title("📈 AI Crypto Market Analysis Bot")
 st.sidebar.header("⚙ Επιλογές")
 crypto_symbol = st.sidebar.text_input("Εισάγετε Crypto Symbol", "BTC-USD")
 
-def load_data(symbol, interval="1h"):  # Changed to 1-hour interval
+def load_data(symbol, interval="1d"):  # Changed to daily interval
     try:
         st.write(f"Loading data for {symbol} with interval {interval}")
-        # Fetch 5 years of historical data with 1-hour intervals
+        # Fetch 5 years of historical data with daily intervals
         df = yf.download(symbol, period="5y", interval=interval)
         if df.empty:
             st.error("⚠️ Τα δεδομένα δεν είναι διαθέσιμα. Δοκιμάστε διαφορετικό σύμβολο.")

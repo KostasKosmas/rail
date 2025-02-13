@@ -14,13 +14,13 @@ crypto_symbol = st.sidebar.text_input("Εισάγετε Crypto Symbol", "BTC-USD
 
 # Cache data loading to speed up the app
 @st.cache_data
-def load_data(symbol, interval="1d"):
+def load_data(symbol, interval="1d", period="5y"):
     try:
-        st.write(f"Loading data for {symbol} with interval {interval}")
-        # Fetch historical data with the specified interval
-        df = yf.download(symbol, period="5y", interval=interval)
+        st.write(f"Loading data for {symbol} with interval {interval} and period {period}")
+        # Fetch historical data with the specified interval and period
+        df = yf.download(symbol, period=period, interval=interval)
         if df.empty:
-            st.error("⚠️ Τα δεδομένα δεν είναι διαθέσιμα. Δοκιμάστε διαφορετικό σύμβολο.")
+            st.error(f"⚠️ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {symbol} με interval {interval}. Δοκιμάστε διαφορετικό σύμβολο ή interval.")
             return pd.DataFrame()
         
         df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
@@ -114,16 +114,16 @@ def calculate_trade_levels(df, timeframe):
     return entry_point, stop_loss, take_profit
 
 def main():
-    # Load data for different timeframes
+    # Define timeframes and their corresponding intervals and periods
     timeframes = {
-        "1h": "1h",
-        "4h": "4h",
-        "1d": "1d",
-        "1w": "1wk",
+        "1h": {"interval": "1h", "period": "730d"},  # 1-hour data for the last 2 years
+        "4h": {"interval": "4h", "period": "730d"},  # 4-hour data for the last 2 years
+        "1d": {"interval": "1d", "period": "5y"},    # Daily data for the last 5 years
+        "1w": {"interval": "1wk", "period": "5y"},   # Weekly data for the last 5 years
     }
     data = {}
-    for timeframe, interval in timeframes.items():
-        data[timeframe] = load_data(crypto_symbol, interval=interval)
+    for timeframe, params in timeframes.items():
+        data[timeframe] = load_data(crypto_symbol, interval=params["interval"], period=params["period"])
         if data[timeframe].empty:
             st.stop()
 
@@ -174,8 +174,8 @@ def main():
     # Continuously update data and retrain model
     while True:
         time.sleep(60)  # Wait for 1 minute
-        for timeframe, interval in timeframes.items():
-            data[timeframe] = load_data(crypto_symbol, interval=interval)
+        for timeframe, params in timeframes.items():
+            data[timeframe] = load_data(crypto_symbol, interval=params["interval"], period=params["period"])
             if data[timeframe].empty:
                 st.stop()
             data[timeframe], model_rf, model_gb = train_model(data[timeframe])

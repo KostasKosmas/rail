@@ -103,11 +103,11 @@ df = train_model(df)
 
 def calculate_trade_levels(df):
     try:
-        latest_close = df["Close"].iloc[-1]  # Extract the latest close price
+        latest_close = df["Close"].iloc[-1]  # Extract the latest close price as a scalar value
         # Use a simple percentage-based stop loss and take profit
-        stop_loss = latest_close * 0.95  # 5% stop loss
-        take_profit = latest_close * 1.10  # 10% take profit
-        entry_point = latest_close
+        stop_loss = float(latest_close * 0.95)  # 5% stop loss (convert to float)
+        take_profit = float(latest_close * 1.10)  # 10% take profit (convert to float)
+        entry_point = float(latest_close)  # Convert to float
         st.write("Trade levels calculated: Entry Point:", entry_point, "Stop Loss:", stop_loss, "Take Profit:", take_profit)
     except Exception as e:
         st.error(f"❌ Σφάλμα υπολογισμού επιπέδων συναλλαγών: {e}")

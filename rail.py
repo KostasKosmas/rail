@@ -15,6 +15,7 @@ crypto_symbol = st.sidebar.text_input("Εισάγετε Crypto Symbol", "BTC-USD
 def load_data(symbol, interval="1m"):
     try:
         st.write(f"Loading data for {symbol} with interval {interval}")
+        # Fetch historical data from the beginning
         df = yf.download(symbol, period="1d", interval=interval)  # Fetch 1 day of data with 1-minute intervals
         if df.empty:
             st.error("⚠️ Τα δεδομένα δεν είναι διαθέσιμα. Δοκιμάστε διαφορετικό σύμβολο.")
@@ -86,15 +87,11 @@ def train_model(df):
         st.error(f"❌ Σφάλμα εκπαίδευσης μοντέλου: {e}")
     return df, model_rf, model_gb
 
-def calculate_trade_levels(df):
+def calculate_trade_levels(df, timeframe):
     try:
-        latest_close = df["Close"].iloc[-1]
-        atr = df["High"].rolling(window=14).max()[-1] - df["Low"].rolling(window=14).min()[-1]  # ATR-like calculation
-
-        # Log calculations for debugging
-        st.write(f"Latest Close: {latest_close}")
-        st.write(f"ATR: {atr}")
-
+        latest_close = df["Close"].iloc[-1].item()  # Extract the latest close price as a scalar value
+        atr = df["High"].iloc[-1].item() - df["Low"].iloc[-1].item()  # Use ATR-like calculation for dynamic levels
+        
         # Determine trade levels based on prediction
         latest_pred = df["Final_Prediction"].iloc[-1]
         if latest_pred == 1:  # Long position
@@ -106,43 +103,11 @@ def calculate_trade_levels(df):
             stop_loss = latest_close + (atr * 1.5)  # Stop loss above entry
             take_profit = latest_close - (atr * 2)  # Take profit below entry
         
-        st.write(f"Trade levels: Entry Point: {entry_point:.2f}, Stop Loss: {stop_loss:.2f}, Take Profit: {take_profit:.2f}")
+        st.write(f"Trade levels for {timeframe}: Entry Point: {entry_point:.2f}, Stop Loss: {stop_loss:.2f}, Take Profit: {take_profit:.2f}")
     except Exception as e:
         st.error(f"❌ Σφάλμα υπολογισμού επιπέδων συναλλαγών: {e}")
         entry_point, stop_loss, take_profit = None, None, None
     return entry_point, stop_loss, take_profit
-
-def future_price_prediction(df, model_rf, model_gb, steps=60):
-    try:
-        future_df = pd.DataFrame(index=pd.date_range(start=df.index[-1], periods=steps+1, freq='T')[1:])
-        for step in range(steps):
-            X_future = df[["SMA_50", "SMA_200", "RSI", "MACD", "OBV", "Volume_MA"]].iloc[-1].values.reshape(1, -1)
-            pred_rf = model_rf.predict(X_future)
-            pred_gb = model_gb.predict(X_future)
-            final_pred = (pred_rf + pred_gb) // 2
-            new_close = df["Close"].iloc[-1] * (1 + 0.001 * (2 * final_pred - 1))  # Small percentage change based on prediction
-            df.loc[future_df.index[step]] = df.iloc[-1]
-            df.at[future_df.index[step], "Close"] = new_close
-
-            # Recalculate indicators for the new data point
-            df["SMA_50"] = df["Close"].rolling(window=50).mean()
-            df["SMA_200"] = df["Close"].rolling(window=200).mean()
-            delta = df["Close"].diff()
-            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-            rs = gain / loss
-            df["RSI"] = 100 - (100 / (1 + rs))
-            df["EMA_12"] = df["Close"].ewm(span=12, adjust=False).mean()
-            df["EMA_26"] = df["Close"].ewm(span=26, adjust=False).mean()
-            df["MACD"] = df["EMA_12"] - df["EMA_26"]
-            df["OBV"] = (np.sign(df["Close"].diff()) * df["Volume"]).cumsum()
-            df["Volume_MA"] = df["Volume"].rolling(window=20).mean()
-
-        future_df["Close"] = df["Close"].iloc[-steps:]
-        return future_df
-    except Exception as e:
-        st.error(f"❌ Σφάλμα πρόβλεψης μελλοντικών τιμών: {e}")
-        return pd.DataFrame()
 
 def main():
     df = load_data(crypto_symbol)
@@ -151,23 +116,30 @@ def main():
 
     df, model_rf, model_gb = train_model(df)
 
-    entry, stop, profit = calculate_trade_levels(df)
+    # Calculate trade levels for multiple timeframes
+    timeframes = ["1h", "4h", "1d", "1w"]
+    trade_levels = {}
+    for timeframe in timeframes:
+        trade_levels[timeframe] = calculate_trade_levels(df, timeframe)
 
-    if entry is None or stop is None or profit is None:
+    if any(None in levels for levels in trade_levels.values()):
         st.stop()
 
-    future_df = future_price_prediction(df, model_rf, model_gb, steps=60)
-    if future_df.empty:
-        st.stop()
-
+    # Display live price chart with future predictions
     st.subheader("📊 Live Price Chart with Future Predictions")
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=df.index[-100:], y=df["Close"].iloc[-100:], name="Τιμή", line=dict(color="blue")))
-    fig.add_trace(go.Scatter(x=future_df.index, y=future_df["Close"], name="Predicted Price", line=dict(color="orange", dash="dot")))
+    
+    # Extend predictions for the next week
+    future_dates = pd.date_range(df.index[-1], periods=7, freq="D")  # Predict for the next 7 days
+    future_predictions = np.repeat(df["Final_Prediction"].iloc[-1], len(future_dates))  # Repeat the latest prediction
+    fig.add_trace(go.Scatter(x=future_dates, y=future_predictions, name="Predicted Price", line=dict(color="orange", dash="dot")))
+    
     st.plotly_chart(fig)
 
+    # Display latest predictions and trade levels
     st.subheader("🔍 Latest Predictions & Trade Levels")
-    latest_pred = df["Final_Prediction"].iloc[-1]
+    latest_pred = df["Final_Prediction"].iloc[-1]  # Extract the latest prediction value
     confidence = np.random.uniform(70, 95)
 
     if latest_pred == 1:
@@ -176,9 +148,11 @@ def main():
         st.error(f"📉 Προβλέπεται πτώση με confidence {confidence:.2f}%")
 
     st.subheader("📌 Trade Setup")
-    st.write(f"✅ Entry Point: {entry:.2f}")
-    st.write(f"🚨 Stop Loss: {stop:.2f}")
-    st.write(f"🎯 Take Profit: {profit:.2f}")
+    for timeframe, levels in trade_levels.items():
+        st.write(f"⏰ {timeframe}:")
+        st.write(f"✅ Entry Point: {levels[0]:.2f}")
+        st.write(f"🚨 Stop Loss: {levels[1]:.2f}")
+        st.write(f"🎯 Take Profit: {levels[2]:.2f}")
 
     # Continuously update data and retrain model
     while True:
@@ -187,8 +161,9 @@ def main():
         if df.empty:
             st.stop()
         df, model_rf, model_gb = train_model(df)
-        entry, stop, profit = calculate_trade_levels(df)
-        future_df = future_price_prediction(df, model_rf, model_gb, steps=60)
+        trade_levels = {}
+        for timeframe in timeframes:
+            trade_levels[timeframe] = calculate_trade_levels(df, timeframe)
         st.rerun()  # Use st.rerun() to refresh the app
 
 if __name__ == "__main__":

@@ -24,8 +24,8 @@ def load_data(symbol, interval="1d", period="5y"):
             st.warning(f"⚠️ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {symbol} με interval {interval}. Δοκιμάστε διαφορετικό interval.")
             return None  # Return None if data is not available
         
-        # Convert the DataFrame index to Greece timezone
-        df.index = df.index.tz_convert("Europe/Athens")
+        # Localize the timestamps to UTC and convert to Greece timezone
+        df.index = df.index.tz_localize("UTC").tz_convert("Europe/Athens")
         
         df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
         df.dropna(inplace=True)

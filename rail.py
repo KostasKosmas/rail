@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+import time
 
 # 📌 Streamlit UI
 st.title("📈 AI Crypto Market Analysis Bot")
@@ -70,10 +71,6 @@ def load_data(symbol, period="6mo", interval="1h"):
         return pd.DataFrame()
     return df
 
-df = load_data(crypto_symbol)
-if df.empty:
-    st.stop()
-
 def train_model(df):
     try:
         X = df[["SMA_50", "SMA_200", "RSI", "MACD", "OBV", "Volume_MA"]].astype(float)
@@ -97,9 +94,7 @@ def train_model(df):
         st.write("Predictions added to dataframe", df[["Prediction_RF", "Prediction_GB", "Final_Prediction"]].head())
     except Exception as e:
         st.error(f"❌ Σφάλμα εκπαίδευσης μοντέλου: {e}")
-    return df
-
-df = train_model(df)
+    return df, model_rf, model_gb
 
 def calculate_trade_levels(df):
     try:
@@ -114,29 +109,49 @@ def calculate_trade_levels(df):
         entry_point, stop_loss, take_profit = None, None, None
     return entry_point, stop_loss, take_profit
 
-entry, stop, profit = calculate_trade_levels(df)
+def main():
+    df = load_data(crypto_symbol)
+    if df.empty:
+        st.stop()
 
-if entry is None or stop is None or profit is None:
-    st.stop()
+    df, model_rf, model_gb = train_model(df)
 
-future_dates, forecast = list(df.index[-10:]), df["Close"].values[-10:].tolist()
+    entry, stop, profit = calculate_trade_levels(df)
 
-fig = go.Figure()
-fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="Τιμή", line=dict(color="blue")))
-fig.add_trace(go.Scatter(x=future_dates, y=forecast, name="Forecasted Price", line=dict(color="orange", dash="dot")))
+    if entry is None or stop is None or profit is None:
+        st.stop()
 
-st.plotly_chart(fig)
+    future_dates, forecast = list(df.index[-10:]), df["Close"].values[-10:].tolist()
 
-st.subheader("🔍 Προβλέψεις & Confidence Level")
-latest_pred = df["Final_Prediction"].iloc[-1]  # Extract the latest prediction value
-confidence = np.random.uniform(70, 95)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="Τιμή", line=dict(color="blue")))
+    fig.add_trace(go.Scatter(x=future_dates, y=forecast, name="Forecasted Price", line=dict(color="orange", dash="dot")))
 
-if latest_pred == 1:
-    st.success(f"📈 Προβλέπεται άνοδος με confidence {confidence:.2f}%")
-else:
-    st.error(f"📉 Προβλέπεται πτώση με confidence {confidence:.2f}%")
+    st.plotly_chart(fig)
 
-st.subheader("📌 Trade Setup")
-st.write(f"✅ Entry Point: {entry:.2f}")
-st.write(f"🚨 Stop Loss: {stop:.2f}")
-st.write(f"🎯 Take Profit: {profit:.2f}")
+    st.subheader("🔍 Προβλέψεις & Confidence Level")
+    latest_pred = df["Final_Prediction"].iloc[-1]  # Extract the latest prediction value
+    confidence = np.random.uniform(70, 95)
+
+    if latest_pred == 1:
+        st.success(f"📈 Προβλέπεται άνοδος με confidence {confidence:.2f}%")
+    else:
+        st.error(f"📉 Προβλέπεται πτώση με confidence {confidence:.2f}%")
+
+    st.subheader("📌 Trade Setup")
+    st.write(f"✅ Entry Point: {entry:.2f}")
+    st.write(f"🚨 Stop Loss: {stop:.2f}")
+    st.write(f"🎯 Take Profit: {profit:.2f}")
+
+    # Continuously update data and retrain model
+    while True:
+        time.sleep(60)  # Wait for 1 minute
+        df = load_data(crypto_symbol)
+        if df.empty:
+            st.stop()
+        df, model_rf, model_gb = train_model(df)
+        entry, stop, profit = calculate_trade_levels(df)
+        st.experimental_rerun()
+
+if __name__ == "__main__":
+    main()

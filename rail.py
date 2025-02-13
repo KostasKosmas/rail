@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.metrics import accuracy_score
+from statsmodels.tsa.arima.model import ARIMA
 import time
 import joblib
 import os
@@ -16,6 +17,26 @@ def save_artifacts(df, model_rf, model_gb, crypto_symbol):
     joblib.dump(model_gb, f"saved_models/{crypto_symbol}_model_gb.pkl")
     df.to_csv(f"saved_models/{crypto_symbol}_data.csv")
     st.write("Artifacts saved successfully!")
+
+# Predict future prices using a rolling forecast
+def predict_future_prices(df, future_days=14):
+    try:
+        # Use ARIMA to predict future prices
+        history = df["Close"].tolist()
+        predictions = []
+        for _ in range(future_days):
+            # Fit ARIMA model
+            model = ARIMA(history, order=(5, 1, 0))  # Example ARIMA parameters
+            model_fit = model.fit()
+            # Predict the next value
+            output = model_fit.forecast()
+            predictions.append(output[0])
+            # Update history with the predicted value
+            history.append(output[0])
+        return predictions
+    except Exception as e:
+        st.error(f"❌ Σφάλμα πρόβλεψης μελλοντικών τιμών: {e}")
+        return None
 
 # 📌 Streamlit UI
 st.title("📈 AI Crypto Market Analysis Bot")
@@ -136,12 +157,12 @@ def main():
     if any(None in levels for levels in trade_levels.values()):
         st.stop()
 
-    # Display predicted and actual prices in a table
-    st.subheader("📊 Predicted and Actual Prices")
-
-    # Create a table for predictions and actual prices
+    # Predict future prices using a rolling forecast
     future_dates = pd.date_range(data["1d"].index[-1], periods=14, freq="D")
-    future_predictions = np.repeat(data["1d"]["14D_EMA"].iloc[-1], len(future_dates))
+    future_predictions = predict_future_prices(data["1d"])
+    if future_predictions is None:
+        st.error("❌ Failed to predict future prices.")
+        st.stop()
 
     # Fetch live price
     live_data = yf.download(crypto_symbol, period="1d", interval="1m")
@@ -159,6 +180,7 @@ def main():
         df_table["Live Price"] = [live_price if i == 0 else None for i in range(len(future_dates))]
 
     # Display the table
+    st.subheader("📊 Predicted and Actual Prices")
     st.write(df_table)
 
     # Display latest predictions and trade levels

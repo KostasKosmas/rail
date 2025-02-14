@@ -1,5 +1,4 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import numpy as np
 import ta  # Technical analysis library
@@ -8,6 +7,7 @@ from sklearn.metrics import accuracy_score
 import time
 import joblib
 import os
+import requests
 
 # Save models and data
 def save_artifacts(df, model_rf, model_gb, crypto_symbol):
@@ -103,19 +103,42 @@ def calculate_stochastic_oscillator(df, window=14):
     df["Stochastic_%D"] = df["Stochastic_%K"].rolling(window=3).mean()
     return df
 
-# Cache data loading to speed up the app
+# Fetch data from CoinGecko
+def fetch_data_from_coingecko(crypto_id="bitcoin", vs_currency="usd", days="max"):
+    url = f"https://api.coingecko.com/api/v3/coins/{crypto_id}/market_chart"
+    params = {
+        "vs_currency": vs_currency,
+        "days": days,
+    }
+    response = requests.get(url, params=params)
+    if response.status_code == 200:
+        data = response.json()
+        prices = data["prices"]
+        df = pd.DataFrame(prices, columns=["Timestamp", "Price"])
+        df["Timestamp"] = pd.to_datetime(df["Timestamp"], unit="ms")
+        df.set_index("Timestamp", inplace=True)
+        return df
+    else:
+        st.error(f"❌ Failed to fetch data from CoinGecko for {crypto_id}.")
+        return None
+
+# Load data using CoinGecko
 @st.cache_data
-def load_data(symbol, interval="1d", period="5y"):
+def load_data(crypto_id="bitcoin", vs_currency="usd", days="max"):
     try:
-        st.write(f"Loading data for {symbol} with interval {interval} and period {period}")
-        df = yf.download(symbol, period=period, interval=interval)
+        st.write(f"Loading data for {crypto_id} in {vs_currency} for the last {days} days")
+        df = fetch_data_from_coingecko(crypto_id, vs_currency, days)
         
-        if df.empty:
-            st.warning(f"⚠️ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {symbol} με interval {interval}. Δοκιμάστε διαφορετικό interval.")
+        if df is None or df.empty:
+            st.warning(f"⚠️ No data available for {crypto_id} in {vs_currency}.")
             return None
         
-        df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
-        df.dropna(inplace=True)
+        # Rename columns to match yfinance format
+        df = df.rename(columns={"Price": "Close"})
+        df["Open"] = df["Close"]
+        df["High"] = df["Close"]
+        df["Low"] = df["Close"]
+        df["Volume"] = 0  # CoinGecko doesn't provide volume data in this endpoint
 
         # Calculate all indicators
         df = calculate_bollinger_bands(df)
@@ -134,7 +157,7 @@ def load_data(symbol, interval="1d", period="5y"):
         df = df.astype(np.float64)
 
     except Exception as e:
-        st.error(f"❌ Σφάλμα φόρτωσης δεδομένων: {e}")
+        st.error(f"❌ Error loading data: {e}")
         return None
     return df
 
@@ -181,106 +204,33 @@ def train_model(df):
         df["Prediction_GB"].iloc[split:] = model_gb.predict(X[split:])
         df["Final_Prediction"] = (df["Prediction_RF"] + df["Prediction_GB"]) // 2
     except Exception as e:
-        st.error(f"❌ Σφάλμα εκπαίδευσης μοντέλου: {e}")
+        st.error(f"❌ Error training model: {e}")
     return df, model_rf, model_gb
 
-# Calculate trade levels dynamically based on predictions
-def calculate_trade_levels(df, timeframe, confidence):
-    latest_pred = df["Final_Prediction"].iloc[-1]
-    latest_close = df["Close"].iloc[-1]
-
-    if latest_pred == 1:  # Bullish prediction
-        entry_point = latest_close * (1 + confidence / 1000)
-        stop_loss = latest_close * (1 - confidence / 1000)
-        take_profit = latest_close * (1 + confidence / 500)
-    else:  # Bearish prediction
-        entry_point = latest_close * (1 - confidence / 1000)
-        stop_loss = latest_close * (1 + confidence / 1000)
-        take_profit = latest_close * (1 - confidence / 500)
-
-    return entry_point, stop_loss, take_profit
-
-# Generate future price points dynamically
-def generate_price_points(entry_point, stop_loss, take_profit, df):
-    future_prices = np.linspace(entry_point, take_profit, num=14)
-    return future_prices
-
 # Main function
-def main(crypto_symbol):
-    timeframes = {
-        "1d": {"interval": "1d", "period": "5y"},
-        "1w": {"interval": "1wk", "period": "5y"},
-    }
-    data = {}
-    for timeframe, params in timeframes.items():
-        df = load_data(crypto_symbol, interval=params["interval"], period=params["period"])
-        if df is None:
-            st.error(f"❌ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {crypto_symbol}.")
-            st.stop()
-        data[timeframe] = df
-    trade_levels = {}
-    for timeframe, df in data.items():
-        df, model_rf, model_gb = train_model(df)
-        confidence = np.random.uniform(70, 95)
-        trade_levels[timeframe] = calculate_trade_levels(df, timeframe, confidence)
-        save_artifacts(df, model_rf, model_gb, crypto_symbol)  # Save artifacts
+def main(crypto_id="bitcoin", vs_currency="usd", days="max"):
+    df = load_data(crypto_id, vs_currency, days)
+    if df is None:
+        st.error(f"❌ No data available for {crypto_id} in {vs_currency}.")
+        st.stop()
 
-    # Generate price points for the next 14 days
-    entry_point, stop_loss, take_profit = trade_levels["1d"]
-    future_dates = pd.date_range(data["1d"].index[-1], periods=14, freq="D")
-    future_price_points = generate_price_points(entry_point, stop_loss, take_profit, data["1d"])
+    df, model_rf, model_gb = train_model(df)
+    save_artifacts(df, model_rf, model_gb, crypto_id)
 
-    # Fetch live price
-    live_data = yf.download(crypto_symbol, period="1d", interval="1m")
-    live_price = live_data["Close"].iloc[-1] if not live_data.empty else np.nan
-
-    # Create a DataFrame for the table
-    table_data = {
-        "Date": future_dates,
-        "Predicted Price": future_price_points,
-        "Live Price": [live_price if i == 0 else np.nan for i in range(len(future_dates))]
-    }
-    df_table = pd.DataFrame(table_data)
-
-    # Display the table
-    st.subheader("📊 Predicted and Actual Prices")
-    st.write(df_table)
-
-    # Display latest predictions and trade levels
-    st.subheader("🔍 Latest Predictions & Trade Levels")
-    latest_pred = data["1d"]["Final_Prediction"].iloc[-1].item()
+    # Display latest predictions
+    latest_pred = df["Final_Prediction"].iloc[-1].item()
     confidence = np.random.uniform(70, 95)
     if latest_pred == 1:
-        st.success(f"📈 Προβλέπεται άνοδος με confidence {confidence:.2f}%")
+        st.success(f"📈 Predicted uptrend with confidence {confidence:.2f}%")
     else:
-        st.error(f"📉 Προβλέπεται πτώση με confidence {confidence:.2f}%")
+        st.error(f"📉 Predicted downtrend with confidence {confidence:.2f}%")
 
-    st.subheader("📌 Trade Setup")
-    for timeframe, levels in trade_levels.items():
-        st.write(f"⏰ {timeframe}:")
-        st.write(f"✅ Entry Point: {levels[0]:.2f}")
-        st.write(f"🚨 Stop Loss: {levels[1]:.2f}")
-        st.write(f"🎯 Take Profit: {levels[2]:.2f}")
-
-    # Continuously update data and retrain model
-    while True:
-        time.sleep(60)
-        for timeframe, params in timeframes.items():
-            df = load_data(crypto_symbol, interval=params["interval"], period=params["period"])
-            if df is None:
-                st.error(f"❌ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {crypto_symbol}.")
-                st.stop()
-            data[timeframe] = df
-            data[timeframe], model_rf, model_gb = train_model(data[timeframe])
-            confidence = np.random.uniform(70, 95)
-            trade_levels[timeframe] = calculate_trade_levels(data[timeframe], timeframe, confidence)
-            save_artifacts(df, model_rf, model_gb, crypto_symbol)  # Save artifacts
-        st.rerun()
-
-# 📌 Streamlit UI
-st.title("📈 AI Crypto Market Analysis Bot")
-st.sidebar.header("⚙ Επιλογές")
-crypto_symbol = st.sidebar.text_input("Εισάγετε Crypto Symbol", "BTC-USD")
+# Streamlit UI
+st.title("📈 AI Crypto Market Analysis Bot (CoinGecko)")
+st.sidebar.header("⚙ Options")
+crypto_id = st.sidebar.text_input("Enter Crypto ID (e.g., bitcoin)", "bitcoin")
+vs_currency = st.sidebar.text_input("Enter Currency (e.g., usd)", "usd")
+days = st.sidebar.text_input("Enter Number of Days (e.g., max)", "max")
 
 if __name__ == "__main__":
-    main(crypto_symbol)
+    main(crypto_id, vs_currency, days)

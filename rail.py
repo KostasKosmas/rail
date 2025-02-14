@@ -1,3 +1,27 @@
+# Step 1: Check and Install Required Libraries
+import subprocess
+import sys
+
+def install_libraries():
+    required_libraries = [
+        "streamlit",
+        "pandas",
+        "numpy",
+        "ta",
+        "scikit-learn",
+        "python-binance",
+        "joblib",
+    ]
+    for lib in required_libraries:
+        try:
+            __import__(lib)
+        except ImportError:
+            print(f"Installing {lib}...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", lib])
+
+install_libraries()
+
+# Step 2: Import Libraries
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -9,14 +33,15 @@ import joblib
 import os
 from binance.client import Client
 
-# Binance API credentials
+# Step 3: Binance API Credentials
+# Replace these with your actual Binance API Key and Secret
 API_KEY = "FesgM4KrwoM2fpl91OMlXU8Qhxry3UqJi0MMwNojMWc7RoS5chdde1115HTDAHjw"
 API_SECRET = "4DpIJ9wOzThTJxRFh8s3G4yahzTtRc32mv6coiVsBN59SCblMPki6pugiEWb9roG"
 
-# Initialize Binance client
+# Step 4: Initialize Binance Client
 client = Client(API_KEY, API_SECRET)
 
-# Save models and data
+# Step 5: Save Models and Data
 def save_artifacts(df, model_rf, model_gb, crypto_symbol):
     if not os.path.exists("saved_models"):
         os.makedirs("saved_models")
@@ -25,7 +50,7 @@ def save_artifacts(df, model_rf, model_gb, crypto_symbol):
     df.to_csv(f"saved_models/{crypto_symbol}_data.csv")
     st.write("Artifacts saved successfully!")
 
-# Calculate Bollinger Bands
+# Step 6: Calculate Bollinger Bands
 def calculate_bollinger_bands(df, window=20, num_std=2):
     df["SMA"] = df["Close"].rolling(window=window).mean()
     df["STD"] = df["Close"].rolling(window=window).std()
@@ -33,7 +58,7 @@ def calculate_bollinger_bands(df, window=20, num_std=2):
     df["Lower_Band"] = df["SMA"] - (df["STD"] * num_std)
     return df
 
-# Calculate MACD
+# Step 7: Calculate MACD
 def calculate_macd(df, short_window=12, long_window=26, signal_window=9):
     df["EMA_12"] = df["Close"].ewm(span=short_window, adjust=False).mean()
     df["EMA_26"] = df["Close"].ewm(span=long_window, adjust=False).mean()
@@ -41,7 +66,7 @@ def calculate_macd(df, short_window=12, long_window=26, signal_window=9):
     df["Signal_Line"] = df["MACD"].ewm(span=signal_window, adjust=False).mean()
     return df
 
-# Calculate RSI
+# Step 8: Calculate RSI
 def calculate_rsi(df, window=14):
     delta = df["Close"].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
@@ -50,7 +75,7 @@ def calculate_rsi(df, window=14):
     df["RSI"] = 100 - (100 / (1 + rs))
     return df
 
-# Calculate ATR
+# Step 9: Calculate ATR
 def calculate_atr(df, window=14):
     high_low = df["High"] - df["Low"]
     high_close = np.abs(df["High"] - df["Close"].shift())
@@ -59,12 +84,12 @@ def calculate_atr(df, window=14):
     df["ATR"] = true_range.rolling(window=window).mean()
     return df
 
-# Calculate ADX
+# Step 10: Calculate ADX
 def calculate_adx(df, window=14):
     df["ADX"] = ta.trend.ADXIndicator(df["High"], df["Low"], df["Close"], window=window).adx()
     return df
 
-# Calculate Fibonacci Levels (Golden Ratio)
+# Step 11: Calculate Fibonacci Levels (Golden Ratio)
 def calculate_fibonacci_levels(df):
     max_price = df["High"].max()
     min_price = df["Low"].min()
@@ -75,7 +100,7 @@ def calculate_fibonacci_levels(df):
     df["Fib_0.618"] = max_price - diff * 0.618
     return df
 
-# Calculate Ichimoku Cloud
+# Step 12: Calculate Ichimoku Cloud
 def calculate_ichimoku(df):
     ichimoku = ta.trend.IchimokuIndicator(df["High"], df["Low"])
     df["Ichimoku_Base"] = ichimoku.ichimoku_base_line()
@@ -84,17 +109,17 @@ def calculate_ichimoku(df):
     df["Ichimoku_Span_B"] = ichimoku.ichimoku_b()
     return df
 
-# Calculate VWAP
+# Step 13: Calculate VWAP
 def calculate_vwap(df):
     df["VWAP"] = (df["Volume"] * (df["High"] + df["Low"] + df["Close"]) / 3).cumsum() / df["Volume"].cumsum()
     return df
 
-# Calculate OBV
+# Step 14: Calculate OBV
 def calculate_obv(df):
     df["OBV"] = ta.volume.OnBalanceVolumeIndicator(df["Close"], df["Volume"]).on_balance_volume()
     return df
 
-# Calculate Moving Averages (SMA, EMA)
+# Step 15: Calculate Moving Averages (SMA, EMA)
 def calculate_moving_averages(df):
     df["SMA_50"] = df["Close"].rolling(window=50).mean()
     df["SMA_200"] = df["Close"].rolling(window=200).mean()
@@ -102,7 +127,7 @@ def calculate_moving_averages(df):
     df["EMA_200"] = df["Close"].ewm(span=200, adjust=False).mean()
     return df
 
-# Calculate Stochastic Oscillator
+# Step 16: Calculate Stochastic Oscillator
 def calculate_stochastic_oscillator(df, window=14):
     df["Stochastic_%K"] = ta.momentum.StochasticOscillator(
         df["High"], df["Low"], df["Close"], window=window
@@ -110,7 +135,7 @@ def calculate_stochastic_oscillator(df, window=14):
     df["Stochastic_%D"] = df["Stochastic_%K"].rolling(window=3).mean()
     return df
 
-# Fetch historical data from Binance
+# Step 17: Fetch Historical Data from Binance
 def fetch_binance_data(symbol="BTCUSDT", interval="1d", limit=1000):
     try:
         klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
@@ -127,7 +152,7 @@ def fetch_binance_data(symbol="BTCUSDT", interval="1d", limit=1000):
         st.error(f"❌ Failed to fetch data from Binance: {e}")
         return None
 
-# Load data using Binance API
+# Step 18: Load Data Using Binance API
 @st.cache_data
 def load_data(symbol="BTCUSDT", interval="1d", limit=1000):
     try:
@@ -159,7 +184,7 @@ def load_data(symbol="BTCUSDT", interval="1d", limit=1000):
         return None
     return df
 
-# Train the model
+# Step 19: Train the Model
 def train_model(df):
     try:
         # Use technical indicators as features
@@ -205,7 +230,7 @@ def train_model(df):
         st.error(f"❌ Error training model: {e}")
     return df, model_rf, model_gb
 
-# Main function
+# Step 20: Main Function
 def main(symbol="BTCUSDT", interval="1d", limit=1000):
     df = load_data(symbol, interval, limit)
     if df is None:
@@ -223,7 +248,7 @@ def main(symbol="BTCUSDT", interval="1d", limit=1000):
     else:
         st.error(f"📉 Predicted downtrend with confidence {confidence:.2f}%")
 
-# Streamlit UI
+# Step 21: Streamlit UI
 st.title("📈 AI Crypto Market Analysis Bot (Binance)")
 st.sidebar.header("⚙ Options")
 symbol = st.sidebar.text_input("Enter Symbol (e.g., BTCUSDT)", "BTCUSDT")

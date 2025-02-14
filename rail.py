@@ -57,7 +57,7 @@ def calculate_adx(df, window=14):
     df["ADX"] = ta.trend.ADXIndicator(df["High"], df["Low"], df["Close"], window=window).adx()
     return df
 
-# Calculate Fibonacci Levels
+# Calculate Fibonacci Levels (Golden Ratio)
 def calculate_fibonacci_levels(df):
     max_price = df["High"].max()
     min_price = df["Low"].min()
@@ -87,6 +87,22 @@ def calculate_obv(df):
     df["OBV"] = ta.volume.OnBalanceVolumeIndicator(df["Close"], df["Volume"]).on_balance_volume()
     return df
 
+# Calculate Moving Averages (SMA, EMA)
+def calculate_moving_averages(df):
+    df["SMA_50"] = df["Close"].rolling(window=50).mean()
+    df["SMA_200"] = df["Close"].rolling(window=200).mean()
+    df["EMA_50"] = df["Close"].ewm(span=50, adjust=False).mean()
+    df["EMA_200"] = df["Close"].ewm(span=200, adjust=False).mean()
+    return df
+
+# Calculate Stochastic Oscillator
+def calculate_stochastic_oscillator(df, window=14):
+    df["Stochastic_%K"] = ta.momentum.StochasticOscillator(
+        df["High"], df["Low"], df["Close"], window=window
+    ).stoch()
+    df["Stochastic_%D"] = df["Stochastic_%K"].rolling(window=3).mean()
+    return df
+
 # Cache data loading to speed up the app
 @st.cache_data
 def load_data(symbol, interval="1d", period="5y"):
@@ -94,15 +110,10 @@ def load_data(symbol, interval="1d", period="5y"):
         st.write(f"Loading data for {symbol} with interval {interval} and period {period}")
         df = yf.download(symbol, period=period, interval=interval)
         
-        # Debug: Check if data is loaded
         if df.empty:
             st.warning(f"⚠️ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {symbol} με interval {interval}. Δοκιμάστε διαφορετικό interval.")
             return None
         
-        # Debug: Print the first few rows of the DataFrame
-        st.write("First few rows of the loaded data:")
-        st.write(df.head())
-
         df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
         df.dropna(inplace=True)
 
@@ -116,13 +127,12 @@ def load_data(symbol, interval="1d", period="5y"):
         df = calculate_ichimoku(df)
         df = calculate_vwap(df)
         df = calculate_obv(df)
+        df = calculate_moving_averages(df)
+        df = calculate_stochastic_oscillator(df)
 
         df.dropna(inplace=True)
         df = df.astype(np.float64)
 
-        # Debug: Check the final DataFrame
-        st.write("Final DataFrame after calculating indicators:")
-        st.write(df.head())
     except Exception as e:
         st.error(f"❌ Σφάλμα φόρτωσης δεδομένων: {e}")
         return None
@@ -132,7 +142,7 @@ def load_data(symbol, interval="1d", period="5y"):
 def train_model(df):
     try:
         # Use technical indicators as features
-        X = df[["SMA", "Upper_Band", "Lower_Band", "MACD", "Signal_Line", "RSI", "ATR", "ADX", "VWAP", "OBV"]]
+        X = df[["SMA", "Upper_Band", "Lower_Band", "MACD", "Signal_Line", "RSI", "ATR", "ADX", "VWAP", "OBV", "SMA_50", "SMA_200", "EMA_50", "EMA_200", "Stochastic_%K", "Stochastic_%D"]]
         
         # Predict the next day's closing price (1D array)
         y = np.where(df["Close"].shift(-1) > df["Close"], 1, 0).ravel()  # Ensure y is 1D
@@ -170,6 +180,27 @@ def train_model(df):
         st.error(f"❌ Σφάλμα εκπαίδευσης μοντέλου: {e}")
     return df, model_rf, model_gb
 
+# Calculate trade levels dynamically based on predictions
+def calculate_trade_levels(df, timeframe, confidence):
+    latest_pred = df["Final_Prediction"].iloc[-1]
+    latest_close = df["Close"].iloc[-1]
+
+    if latest_pred == 1:  # Bullish prediction
+        entry_point = latest_close * (1 + confidence / 1000)
+        stop_loss = latest_close * (1 - confidence / 1000)
+        take_profit = latest_close * (1 + confidence / 500)
+    else:  # Bearish prediction
+        entry_point = latest_close * (1 - confidence / 1000)
+        stop_loss = latest_close * (1 + confidence / 1000)
+        take_profit = latest_close * (1 - confidence / 500)
+
+    return entry_point, stop_loss, take_profit
+
+# Generate future price points dynamically
+def generate_price_points(entry_point, stop_loss, take_profit, df):
+    future_prices = np.linspace(entry_point, take_profit, num=14)
+    return future_prices
+
 # Main function
 def main(crypto_symbol):
     timeframes = {
@@ -189,16 +220,11 @@ def main(crypto_symbol):
         confidence = np.random.uniform(70, 95)
         trade_levels[timeframe] = calculate_trade_levels(df, timeframe, confidence)
         save_artifacts(df, model_rf, model_gb, crypto_symbol)  # Save artifacts
-    if any(None in levels for levels in trade_levels.values()):
-        st.stop()
 
     # Generate price points for the next 14 days
     entry_point, stop_loss, take_profit = trade_levels["1d"]
     future_dates = pd.date_range(data["1d"].index[-1], periods=14, freq="D")
     future_price_points = generate_price_points(entry_point, stop_loss, take_profit, data["1d"])
-    if future_price_points is None:
-        st.error("❌ Failed to generate future price points.")
-        st.stop()
 
     # Fetch live price
     live_data = yf.download(crypto_symbol, period="1d", interval="1m")
@@ -211,9 +237,6 @@ def main(crypto_symbol):
         "Live Price": [live_price if i == 0 else np.nan for i in range(len(future_dates))]
     }
     df_table = pd.DataFrame(table_data)
-
-    # Ensure all columns are of consistent type
-    df_table = df_table.astype({"Predicted Price": "float64", "Live Price": "float64"})
 
     # Display the table
     st.subheader("📊 Predicted and Actual Prices")

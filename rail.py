@@ -171,7 +171,7 @@ def train_model(df):
     return df, model_rf, model_gb
 
 # Main function
-def main():
+def main(crypto_symbol):
     timeframes = {
         "1d": {"interval": "1d", "period": "5y"},
         "1w": {"interval": "1wk", "period": "5y"},
@@ -250,5 +250,10 @@ def main():
             save_artifacts(df, model_rf, model_gb, crypto_symbol)  # Save artifacts
         st.rerun()
 
+# 📌 Streamlit UI
+st.title("📈 AI Crypto Market Analysis Bot")
+st.sidebar.header("⚙ Επιλογές")
+crypto_symbol = st.sidebar.text_input("Εισάγετε Crypto Symbol", "BTC-USD")
+
 if __name__ == "__main__":
-    main()
+    main(crypto_symbol)

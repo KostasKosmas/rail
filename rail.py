@@ -1,4 +1,3 @@
-
 # Step 1: Install Required Libraries
 import subprocess
 import sys
@@ -46,7 +45,7 @@ def save_artifacts(df, model_rf, model_gb, crypto_symbol):
         os.makedirs("saved_models")
     joblib.dump(model_rf, f"saved_models/{crypto_symbol}_model_rf.pkl")
     joblib.dump(model_gb, f"saved_models/{crypto_symbol}_model_gb.pkl")
-    df.to_csv(f"saved_models/{crypto_symbol}_data.csv")
+    df.to_csv(f"saved_models/{crypto_symbol}_data.csv", index=False)
     st.write("Artifacts saved successfully!")
 
 # Step 4: Calculate Bollinger Bands

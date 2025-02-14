@@ -17,7 +17,13 @@ def install_libraries():
             __import__(lib)
         except ImportError:
             print(f"Installing {lib}...")
-            subprocess.check_call([sys.executable, "-m", "pip", "install", lib])
+            try:
+                subprocess.check_call([sys.executable, "-m", "pip", "install", lib])
+            except subprocess.CalledProcessError as e:
+                print(f"Failed to install {lib}. Error: {e}")
+                print("Please install the libraries manually using:")
+                print(f"pip install {' '.join(required_libraries)}")
+                sys.exit(1)
 
 install_libraries()
 

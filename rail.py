@@ -125,10 +125,18 @@ def calculate_obv(df):
 # Train the model
 def train_model(df):
     try:
+        # Use technical indicators as features
         X = df[["SMA", "Upper_Band", "Lower_Band", "MACD", "Signal_Line", "RSI", "ATR", "ADX", "VWAP", "OBV"]]
-        y = np.where(df["Close"].shift(-1) > df["Close"], 1, 0)
-        y = y.ravel()
-        split = int(0.8 * len(df))
+        
+        # Predict the next day's closing price (1D array)
+        y = np.where(df["Close"].shift(-1) > df["Close"], 1, 0).ravel()  # Ensure y is 1D
+        
+        # Drop the last row of X and y to align them
+        X = X.iloc[:-1]
+        y = y[:-1]
+
+        # Split data into training and testing sets
+        split = int(0.8 * len(X))
         X_train, X_test = X[:split], X[split:]
         y_train, y_test = y[:split], y[split:]
 
@@ -147,8 +155,10 @@ def train_model(df):
         st.write(f"GradientBoosting model trained with accuracy: {accuracy_gb:.2f}")
 
         # Add predictions to the DataFrame
-        df["Prediction_RF"] = model_rf.predict(X)
-        df["Prediction_GB"] = model_gb.predict(X)
+        df["Prediction_RF"] = np.nan
+        df["Prediction_RF"].iloc[split:] = model_rf.predict(X[split:])
+        df["Prediction_GB"] = np.nan
+        df["Prediction_GB"].iloc[split:] = model_gb.predict(X[split:])
         df["Final_Prediction"] = (df["Prediction_RF"] + df["Prediction_GB"]) // 2
     except Exception as e:
         st.error(f"❌ Σφάλμα εκπαίδευσης μοντέλου: {e}")

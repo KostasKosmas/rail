@@ -1,8 +1,7 @@
 streamlit
-yfinance
 pandas
 numpy
-plotly
-scikit-learn
-statsmodels
 ta
+scikit-learn
+python-binance
+joblib

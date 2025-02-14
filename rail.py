@@ -2,6 +2,7 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import ta  # Technical analysis library
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.metrics import accuracy_score
 import time
@@ -33,19 +34,18 @@ def load_data(symbol, interval="1d", period="5y"):
             return None
         df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
         df.dropna(inplace=True)
-        df["SMA_50"] = df["Close"].rolling(window=50).mean()
-        df["SMA_200"] = df["Close"].rolling(window=200).mean()
-        delta = df["Close"].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        df["RSI"] = 100 - (100 / (1 + rs))
-        df["EMA_12"] = df["Close"].ewm(span=12, adjust=False).mean()
-        df["EMA_26"] = df["Close"].ewm(span=26, adjust=False).mean()
-        df["MACD"] = df["EMA_12"] - df["EMA_26"]
-        df["OBV"] = (np.sign(df["Close"].diff()) * df["Volume"]).cumsum()
-        df["Volume_MA"] = df["Volume"].rolling(window=20).mean()
-        df["14D_EMA"] = df["Close"].ewm(span=14, adjust=False).mean()
+
+        # Calculate all indicators
+        df = calculate_bollinger_bands(df)
+        df = calculate_macd(df)
+        df = calculate_rsi(df)
+        df = calculate_atr(df)
+        df = calculate_adx(df)
+        df = calculate_fibonacci_levels(df)
+        df = calculate_ichimoku(df)
+        df = calculate_vwap(df)
+        df = calculate_obv(df)
+
         df.dropna(inplace=True)
         df = df.astype(np.float64)
     except Exception as e:
@@ -53,24 +53,100 @@ def load_data(symbol, interval="1d", period="5y"):
         return None
     return df
 
+# Calculate Bollinger Bands
+def calculate_bollinger_bands(df, window=20, num_std=2):
+    df["SMA"] = df["Close"].rolling(window=window).mean()
+    df["STD"] = df["Close"].rolling(window=window).std()
+    df["Upper_Band"] = df["SMA"] + (df["STD"] * num_std)
+    df["Lower_Band"] = df["SMA"] - (df["STD"] * num_std)
+    return df
+
+# Calculate MACD
+def calculate_macd(df, short_window=12, long_window=26, signal_window=9):
+    df["EMA_12"] = df["Close"].ewm(span=short_window, adjust=False).mean()
+    df["EMA_26"] = df["Close"].ewm(span=long_window, adjust=False).mean()
+    df["MACD"] = df["EMA_12"] - df["EMA_26"]
+    df["Signal_Line"] = df["MACD"].ewm(span=signal_window, adjust=False).mean()
+    return df
+
+# Calculate RSI
+def calculate_rsi(df, window=14):
+    delta = df["Close"].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
+    rs = gain / loss
+    df["RSI"] = 100 - (100 / (1 + rs))
+    return df
+
+# Calculate ATR
+def calculate_atr(df, window=14):
+    high_low = df["High"] - df["Low"]
+    high_close = np.abs(df["High"] - df["Close"].shift())
+    low_close = np.abs(df["Low"] - df["Close"].shift())
+    true_range = np.maximum(high_low, np.maximum(high_close, low_close))
+    df["ATR"] = true_range.rolling(window=window).mean()
+    return df
+
+# Calculate ADX
+def calculate_adx(df, window=14):
+    df["ADX"] = ta.trend.ADXIndicator(df["High"], df["Low"], df["Close"], window=window).adx()
+    return df
+
+# Calculate Fibonacci Levels
+def calculate_fibonacci_levels(df):
+    max_price = df["High"].max()
+    min_price = df["Low"].min()
+    diff = max_price - min_price
+    df["Fib_0.236"] = max_price - diff * 0.236
+    df["Fib_0.382"] = max_price - diff * 0.382
+    df["Fib_0.5"] = max_price - diff * 0.5
+    df["Fib_0.618"] = max_price - diff * 0.618
+    return df
+
+# Calculate Ichimoku Cloud
+def calculate_ichimoku(df):
+    ichimoku = ta.trend.IchimokuIndicator(df["High"], df["Low"])
+    df["Ichimoku_Base"] = ichimoku.ichimoku_base_line()
+    df["Ichimoku_Conversion"] = ichimoku.ichimoku_conversion_line()
+    df["Ichimoku_Span_A"] = ichimoku.ichimoku_a()
+    df["Ichimoku_Span_B"] = ichimoku.ichimoku_b()
+    return df
+
+# Calculate VWAP
+def calculate_vwap(df):
+    df["VWAP"] = (df["Volume"] * (df["High"] + df["Low"] + df["Close"]) / 3).cumsum() / df["Volume"].cumsum()
+    return df
+
+# Calculate OBV
+def calculate_obv(df):
+    df["OBV"] = ta.volume.OnBalanceVolumeIndicator(df["Close"], df["Volume"]).on_balance_volume()
+    return df
+
+# Train the model
 def train_model(df):
     try:
-        X = df[["SMA_50", "SMA_200", "RSI", "MACD", "OBV", "Volume_MA"]]
+        X = df[["SMA", "Upper_Band", "Lower_Band", "MACD", "Signal_Line", "RSI", "ATR", "ADX", "VWAP", "OBV"]]
         y = np.where(df["Close"].shift(-1) > df["Close"], 1, 0)
         y = y.ravel()
         split = int(0.8 * len(df))
         X_train, X_test = X[:split], X[split:]
         y_train, y_test = y[:split], y[split:]
-        model_rf = RandomForestClassifier(n_estimators=50, max_depth=5, random_state=42)
+
+        # Train RandomForestClassifier
+        model_rf = RandomForestClassifier(n_estimators=30, max_depth=5, random_state=42, n_jobs=-1)
         model_rf.fit(X_train, y_train)
         y_pred_rf = model_rf.predict(X_test)
         accuracy_rf = accuracy_score(y_test, y_pred_rf)
         st.write(f"RandomForest model trained with accuracy: {accuracy_rf:.2f}")
-        model_gb = GradientBoostingClassifier(n_estimators=50, max_depth=5, random_state=42)
+
+        # Train GradientBoostingClassifier
+        model_gb = GradientBoostingClassifier(n_estimators=30, max_depth=5, random_state=42)
         model_gb.fit(X_train, y_train)
         y_pred_gb = model_gb.predict(X_test)
         accuracy_gb = accuracy_score(y_test, y_pred_gb)
         st.write(f"GradientBoosting model trained with accuracy: {accuracy_gb:.2f}")
+
+        # Add predictions to the DataFrame
         df["Prediction_RF"] = model_rf.predict(X)
         df["Prediction_GB"] = model_gb.predict(X)
         df["Final_Prediction"] = (df["Prediction_RF"] + df["Prediction_GB"]) // 2
@@ -78,59 +154,67 @@ def train_model(df):
         st.error(f"❌ Σφάλμα εκπαίδευσης μοντέλου: {e}")
     return df, model_rf, model_gb
 
+# Calculate trade levels with dynamic timeframes
 def calculate_trade_levels(df, timeframe, confidence):
     try:
-        latest_close = df["Close"].iloc[-1].item()  # Use .item() to extract the value
-        atr = (df["High"].rolling(window=14).mean() - df["Low"].rolling(window=14).mean()).iloc[-1].item()  # Use .item()
-        latest_pred = df["Final_Prediction"].iloc[-1].item()  # Use .item()
-        rsi = df["RSI"].iloc[-1].item()  # Use .item()
-        macd = df["MACD"].iloc[-1].item()  # Use .item()
-        if confidence > 80:
-            stop_loss_multiplier = 1.2
-            take_profit_multiplier = 1.8
-        elif confidence > 60:
-            stop_loss_multiplier = 1.5
-            take_profit_multiplier = 2.0
-        else:
-            stop_loss_multiplier = 2.0
-            take_profit_multiplier = 2.5
-        if rsi > 70 or rsi < 30:
-            stop_loss_multiplier *= 0.9
-            take_profit_multiplier *= 1.1
-        if macd > 0:
-            take_profit_multiplier *= 1.1
-        else:
-            stop_loss_multiplier *= 1.1
+        latest_close = df["Close"].iloc[-1].item()
+        atr = df["ATR"].iloc[-1].item()
+        latest_pred = df["Final_Prediction"].iloc[-1].item()
+        rsi = df["RSI"].iloc[-1].item()
+        macd = df["MACD"].iloc[-1].item()
+        trend_strength = df["ADX"].iloc[-1].item()
+
+        # Calculate trade levels
         if latest_pred == 1:
             entry_point = latest_close
-            stop_loss = latest_close - (atr * stop_loss_multiplier)
-            take_profit = latest_close + (atr * take_profit_multiplier)
+            stop_loss = latest_close - (atr * 1.5)
+            take_profit = latest_close + (atr * 2.0)
         else:
             entry_point = latest_close
-            stop_loss = latest_close + (atr * stop_loss_multiplier)
-            take_profit = latest_close - (atr * take_profit_multiplier)
-        st.write(f"Trade levels for {timeframe}: Entry Point: {entry_point:.2f}, Stop Loss: {stop_loss:.2f}, Take Profit: {take_profit:.2f}")
+            stop_loss = latest_close + (atr * 1.5)
+            take_profit = latest_close - (atr * 2.0)
+
+        # Dynamic timeframes based on confidence, volatility, and trend strength
+        entry_timeframe = max(1, int(60 / (confidence * trend_strength)))  # In minutes
+        stop_loss_timeframe = max(2, int(120 / (confidence * trend_strength)))  # In minutes
+        take_profit_timeframe = max(24, int(1440 / (confidence * trend_strength)))  # In minutes
+
+        st.write(f"Trade levels for {timeframe}:")
+        st.write(f"✅ Entry Point: {entry_point:.2f} (within {entry_timeframe} minutes, {confidence}% confidence)")
+        st.write(f"🚨 Stop Loss: {stop_loss:.2f} (within {stop_loss_timeframe} minutes, {confidence}% confidence)")
+        st.write(f"🎯 Take Profit: {take_profit:.2f} (within {take_profit_timeframe} minutes, {confidence}% confidence)")
     except Exception as e:
         st.error(f"❌ Σφάλμα υπολογισμού επιπέδων συναλλαγών: {e}")
         entry_point, stop_loss, take_profit = None, None, None
     return entry_point, stop_loss, take_profit
 
-def generate_price_points(entry_point, stop_loss, take_profit, future_days=14):
+# Generate price points with volatility and Fibonacci levels
+def generate_price_points(entry_point, stop_loss, take_profit, df, future_days=14):
     try:
-        # Generate price points based on trade levels
         if entry_point is None or stop_loss is None or take_profit is None:
             return None
 
-        # Determine the direction of the trade
-        if take_profit > entry_point:  # Long trade
-            price_points = np.linspace(entry_point, take_profit, future_days)
-        else:  # Short trade
-            price_points = np.linspace(entry_point, stop_loss, future_days)
+        # Adjust prediction based on trend strength and volatility
+        trend_strength = df["ADX"].iloc[-1].item()
+        volatility = df["ATR"].iloc[-1].item()
+
+        # Add randomness to simulate volatility
+        price_points = np.linspace(entry_point, take_profit, future_days)
+        price_points = price_points * (1 + np.random.uniform(-volatility, volatility, future_days))
+
+        # Adjust for Fibonacci levels
+        fib_levels = [df["Fib_0.236"].iloc[-1].item(), df["Fib_0.382"].iloc[-1].item(), df["Fib_0.5"].iloc[-1].item(), df["Fib_0.618"].iloc[-1].item()]
+        for i in range(len(price_points)):
+            for level in fib_levels:
+                if abs(price_points[i] - level) < volatility:
+                    price_points[i] = level  # Snap to Fibonacci level
+
         return price_points
     except Exception as e:
         st.error(f"❌ Σφάλμα δημιουργίας τιμών: {e}")
         return None
 
+# Main function
 def main():
     timeframes = {
         "1d": {"interval": "1d", "period": "5y"},
@@ -155,7 +239,7 @@ def main():
     # Generate price points for the next 14 days
     entry_point, stop_loss, take_profit = trade_levels["1d"]
     future_dates = pd.date_range(data["1d"].index[-1], periods=14, freq="D")
-    future_price_points = generate_price_points(entry_point, stop_loss, take_profit)
+    future_price_points = generate_price_points(entry_point, stop_loss, take_profit, data["1d"])
     if future_price_points is None:
         st.error("❌ Failed to generate future price points.")
         st.stop()

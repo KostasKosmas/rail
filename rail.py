@@ -151,6 +151,10 @@ def train_model(df):
         X = X.iloc[:-1]
         y = y[:-1]
 
+        # Debug: Print shapes of X and y
+        st.write(f"Shape of X: {X.shape}")
+        st.write(f"Shape of y: {y.shape}")
+
         # Split data into training and testing sets
         split = int(0.8 * len(X))
         X_train, X_test = X[:split], X[split:]

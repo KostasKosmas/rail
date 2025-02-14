@@ -34,7 +34,6 @@ import numpy as np
 import ta  # Technical analysis library
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.metrics import accuracy_score
-import time
 import joblib
 import os
 import yfinance as yf
@@ -186,7 +185,7 @@ def train_model(df):
         X = df[["SMA", "Upper_Band", "Lower_Band", "MACD", "Signal_Line", "RSI", "ATR", "ADX", "VWAP", "OBV", "SMA_50", "SMA_200", "EMA_50", "EMA_200", "Stochastic_%K", "Stochastic_%D"]]
         
         # Predict the next day's closing price (1D array)
-        y = np.where(df["Close"].shift(-1) > df["Close"], 1, 0).ravel()  # Ensure y is 1D
+        y = np.where(df["Close"].shift(-1) > df["Close"], 1, 0)  # Ensure y is 1D
         
         # Drop the last row of X and y to align them
         X = X.iloc[:-1]

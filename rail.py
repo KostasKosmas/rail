@@ -117,10 +117,11 @@ def calculate_moving_averages(df):
 
 # Step 13: Calculate Stochastic Oscillator
 def calculate_stochastic_oscillator(df, window=14):
-    df["Stochastic_%K"] = ta.momentum.StochasticOscillator(
+    stoch = ta.momentum.StochasticOscillator(
         df["High"], df["Low"], df["Close"], window=window
-    ).stoch()
-    df["Stochastic_%D"] = df["Stochastic_%K"].rolling(window=3).mean()
+    )
+    df["Stochastic_%K"] = stoch.stoch()  # Ensure this is a 1D array
+    df["Stochastic_%D"] = df["Stochastic_%K"].rolling(window=3).mean()  # Ensure this is a 1D array
     return df
 
 # Step 14: Fetch Historical Data from Yahoo Finance
@@ -148,7 +149,7 @@ def load_data(symbol="BTC-USD", interval="1d", period="5y"):
             st.warning(f"⚠️ No data available for {symbol}.")
             return None
 
-        # Calculate all indicators (excluding Ichimoku Cloud)
+        # Calculate all indicators
         df = calculate_bollinger_bands(df)
         df = calculate_macd(df)
         df = calculate_rsi(df)

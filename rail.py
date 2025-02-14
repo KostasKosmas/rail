@@ -18,12 +18,18 @@ def install_libraries():
         except ImportError:
             print(f"Installing {lib}...")
             try:
+                # Try installing with elevated permissions
                 subprocess.check_call([sys.executable, "-m", "pip", "install", lib])
             except subprocess.CalledProcessError as e:
-                print(f"Failed to install {lib}. Error: {e}")
-                print("Please install the libraries manually using:")
-                print(f"pip install {' '.join(required_libraries)}")
-                sys.exit(1)
+                print(f"Failed to install {lib} with elevated permissions. Error: {e}")
+                try:
+                    # Try installing for the current user only
+                    subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", lib])
+                except subprocess.CalledProcessError as e:
+                    print(f"Failed to install {lib} for the current user. Error: {e}")
+                    print("Please install the libraries manually using:")
+                    print(f"pip install {' '.join(required_libraries)}")
+                    sys.exit(1)
 
 install_libraries()
 

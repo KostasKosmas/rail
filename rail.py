@@ -7,7 +7,14 @@ from sklearn.metrics import accuracy_score
 import time
 import joblib
 import os
-import requests
+from binance.client import Client
+
+# Binance API credentials
+API_KEY = "FesgM4KrwoM2fpl91OMlXU8Qhxry3UqJi0MMwNojMWc7RoS5chdde1115HTDAHjw"
+API_SECRET = "4DpIJ9wOzThTJxRFh8s3G4yahzTtRc32mv6coiVsBN59SCblMPki6pugiEWb9roG"
+
+# Initialize Binance client
+client = Client(API_KEY, API_SECRET)
 
 # Save models and data
 def save_artifacts(df, model_rf, model_gb, crypto_symbol):
@@ -103,42 +110,33 @@ def calculate_stochastic_oscillator(df, window=14):
     df["Stochastic_%D"] = df["Stochastic_%K"].rolling(window=3).mean()
     return df
 
-# Fetch data from CoinGecko
-def fetch_data_from_coingecko(crypto_id="bitcoin", vs_currency="usd", days="max"):
-    url = f"https://api.coingecko.com/api/v3/coins/{crypto_id}/market_chart"
-    params = {
-        "vs_currency": vs_currency,
-        "days": days,
-    }
-    response = requests.get(url, params=params)
-    if response.status_code == 200:
-        data = response.json()
-        prices = data["prices"]
-        df = pd.DataFrame(prices, columns=["Timestamp", "Price"])
-        df["Timestamp"] = pd.to_datetime(df["Timestamp"], unit="ms")
-        df.set_index("Timestamp", inplace=True)
+# Fetch historical data from Binance
+def fetch_binance_data(symbol="BTCUSDT", interval="1d", limit=1000):
+    try:
+        klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
+        df = pd.DataFrame(klines, columns=[
+            "Open Time", "Open", "High", "Low", "Close", "Volume",
+            "Close Time", "Quote Asset Volume", "Number of Trades",
+            "Taker Buy Base Asset Volume", "Taker Buy Quote Asset Volume", "Ignore"
+        ])
+        df["Open Time"] = pd.to_datetime(df["Open Time"], unit="ms")
+        df.set_index("Open Time", inplace=True)
+        df = df[["Open", "High", "Low", "Close", "Volume"]].astype(float)
         return df
-    else:
-        st.error(f"❌ Failed to fetch data from CoinGecko for {crypto_id}.")
+    except Exception as e:
+        st.error(f"❌ Failed to fetch data from Binance: {e}")
         return None
 
-# Load data using CoinGecko
+# Load data using Binance API
 @st.cache_data
-def load_data(crypto_id="bitcoin", vs_currency="usd", days="max"):
+def load_data(symbol="BTCUSDT", interval="1d", limit=1000):
     try:
-        st.write(f"Loading data for {crypto_id} in {vs_currency} for the last {days} days")
-        df = fetch_data_from_coingecko(crypto_id, vs_currency, days)
+        st.write(f"Loading data for {symbol} with interval {interval}")
+        df = fetch_binance_data(symbol, interval, limit)
         
         if df is None or df.empty:
-            st.warning(f"⚠️ No data available for {crypto_id} in {vs_currency}.")
+            st.warning(f"⚠️ No data available for {symbol}.")
             return None
-        
-        # Rename columns to match yfinance format
-        df = df.rename(columns={"Price": "Close"})
-        df["Open"] = df["Close"]
-        df["High"] = df["Close"]
-        df["Low"] = df["Close"]
-        df["Volume"] = 0  # CoinGecko doesn't provide volume data in this endpoint
 
         # Calculate all indicators
         df = calculate_bollinger_bands(df)
@@ -208,14 +206,14 @@ def train_model(df):
     return df, model_rf, model_gb
 
 # Main function
-def main(crypto_id="bitcoin", vs_currency="usd", days="max"):
-    df = load_data(crypto_id, vs_currency, days)
+def main(symbol="BTCUSDT", interval="1d", limit=1000):
+    df = load_data(symbol, interval, limit)
     if df is None:
-        st.error(f"❌ No data available for {crypto_id} in {vs_currency}.")
+        st.error(f"❌ No data available for {symbol}.")
         st.stop()
 
     df, model_rf, model_gb = train_model(df)
-    save_artifacts(df, model_rf, model_gb, crypto_id)
+    save_artifacts(df, model_rf, model_gb, symbol)
 
     # Display latest predictions
     latest_pred = df["Final_Prediction"].iloc[-1].item()
@@ -226,11 +224,11 @@ def main(crypto_id="bitcoin", vs_currency="usd", days="max"):
         st.error(f"📉 Predicted downtrend with confidence {confidence:.2f}%")
 
 # Streamlit UI
-st.title("📈 AI Crypto Market Analysis Bot (CoinGecko)")
+st.title("📈 AI Crypto Market Analysis Bot (Binance)")
 st.sidebar.header("⚙ Options")
-crypto_id = st.sidebar.text_input("Enter Crypto ID (e.g., bitcoin)", "bitcoin")
-vs_currency = st.sidebar.text_input("Enter Currency (e.g., usd)", "usd")
-days = st.sidebar.text_input("Enter Number of Days (e.g., max)", "max")
+symbol = st.sidebar.text_input("Enter Symbol (e.g., BTCUSDT)", "BTCUSDT")
+interval = st.sidebar.text_input("Enter Interval (e.g., 1d)", "1d")
+limit = st.sidebar.number_input("Enter Limit (e.g., 1000)", value=1000)
 
 if __name__ == "__main__":
-    main(crypto_id, vs_currency, days)
+    main(symbol, interval, limit)

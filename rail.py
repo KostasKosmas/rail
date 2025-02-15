@@ -178,7 +178,7 @@ def main():
 
     # Add live price to the table
     if live_price is not None:
-        df_table["Live Price"] = [live_price if i == 0 else None for i in range(len(future_dates))]
+        df_table["Live Price"] = [float(live_price) if i == 0 else None for i in range(len(future_dates))]
 
     # Ensure the "Predicted Price" and "Live Price" columns are of type float
     df_table["Predicted Price"] = df_table["Predicted Price"].astype(float)

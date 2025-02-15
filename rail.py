@@ -40,25 +40,21 @@ def load_enhanced_data(symbol, interval="1d", period="5y"):
             st.error(f"⚠️ Insufficient data for {symbol}")
             return None
 
-        # Add technical indicators
         df = add_all_ta_features(df, open="Open", high="High", low="Low", close="Close", volume="Volume")
         
-        # Bollinger Bands
+        # Custom indicators
         bb = BollingerBands(df["Close"])
         df["BB_upper"] = bb.bollinger_hband()
         df["BB_lower"] = bb.bollinger_lband()
         df["BB_width"] = bb.bollinger_wband()
         
-        # Stochastic Oscillator
         stoch = StochasticOscillator(high=df["High"], low=df["Low"], close=df["Close"])
         df["Stoch_%K"] = stoch.stoch()
         df["Stoch_%D"] = stoch.stoch_signal()
         
-        # Money Flow Index
         mfi = MFIIndicator(high=df["High"], low=df["Low"], close=df["Close"], volume=df["Volume"])
         df["MFI"] = mfi.money_flow_index()
         
-        # ADX
         adx = ADXIndicator(high=df["High"], low=df["Low"], close=df["Close"])
         df["ADX"] = adx.adx()
         
@@ -69,7 +65,7 @@ def load_enhanced_data(symbol, interval="1d", period="5y"):
         
         # Target variable
         future_returns = df["Close"].pct_change(THRESHOLD_DAYS).shift(-THRESHOLD_DAYS)
-        df["Target"] = np.where(future_returns > 0.015, 1, 0).astype(np.int32)
+        df["Target"] = np.where(future_returns > 0.015, 1, 0).astype(int)
         
         # Feature engineering
         df["RSI_Volume"] = df["rsi"] * df["volume_adi"]
@@ -79,10 +75,6 @@ def load_enhanced_data(symbol, interval="1d", period="5y"):
         df = df.dropna().iloc[-MAX_DATA_POINTS:]
         df = df.astype(np.float32)
         
-        # Ensure 1D target
-        if df["Target"].ndim > 1:
-            df["Target"] = df["Target"].squeeze()
-            
         return df
     
     except Exception as e:
@@ -101,7 +93,7 @@ def train_enhanced_model(df, crypto_symbol):
             raise ValueError("Insufficient training data")
             
         X = df.drop(columns=["Target"])
-        y = np.ravel(df["Target"].values)  # Ensure 1D array
+        y = np.ravel(df["Target"].values)
         
         tscv = TimeSeriesSplit(n_splits=3)
         feature_pipeline = create_feature_pipeline()
@@ -113,7 +105,6 @@ def train_enhanced_model(df, crypto_symbol):
         X_train_trans = feature_pipeline.fit_transform(X_train, y_train)
         X_test_trans = feature_pipeline.transform(X_test)
 
-        # Model setup
         rf = RandomForestClassifier(n_jobs=-1, class_weight='balanced')
         gb = GradientBoostingClassifier(n_iter_no_change=10, validation_fraction=0.1)
         meta = LogisticRegression()
@@ -151,7 +142,6 @@ def train_enhanced_model(df, crypto_symbol):
                 stack_method='predict_proba'
             ).fit(X_train_trans, y_train)
 
-        # Evaluation
         y_pred = model.predict(X_test_trans)
         
         metrics = {
@@ -174,12 +164,14 @@ def generate_enhanced_forecast(df):
         volatility = returns.rolling(21).std().iloc[-1]
         last_price = df['Close'].iloc[-1].item()
         
+        # Fixed parentheses closure
         simulations = np.exp(
             np.random.normal(
                 loc=0, 
                 scale=volatility, 
                 size=(SIMULATIONS, FORECAST_DAYS)
             ).cumsum(axis=1)
+        )  # Properly closed parentheses
         
         price_paths = last_price * simulations
         

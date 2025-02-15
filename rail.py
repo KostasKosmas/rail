@@ -184,7 +184,7 @@ def main():
         df, model_rf, model_gb = train_model(df)
         confidence = np.random.uniform(70, 95)
         future_price_points = generate_price_points(df, df["Close"].iloc[-1], future_minutes=15)
-        if future_price_points is None:
+        if future_price_points is None or len(future_price_points) == 0:
             st.error("❌ Failed to generate future price points.")
             st.stop()
         entry_point, stop_loss, take_profit, expected_profit_time = calculate_trade_levels(df, timeframe, confidence, future_price_points)
@@ -195,9 +195,9 @@ def main():
 
     # Generate price points for the next 15 minutes
     entry_point, stop_loss, take_profit, expected_profit_time = trade_levels["1d"]
-    future_dates = pd.date_range(data["1d"].index[-1], periods=15, freq="min")
+    future_dates = pd.date_range(data["1d"].index[-1], periods=15, freq="T")
     future_price_points = generate_price_points(data["1d"], entry_point, future_minutes=15)
-    if future_price_points is None:
+    if future_price_points is None or len(future_price_points) == 0:
         st.error("❌ Failed to generate future price points.")
         st.stop()
 
@@ -262,7 +262,7 @@ def main():
                     data["1d"], model_rf, model_gb = train_model(data["1d"])
                     confidence = np.random.uniform(70, 95)
                     future_price_points = generate_price_points(data["1d"], data["1d"]["Close"].iloc[-1], future_minutes=15)
-                    if future_price_points is None:
+                    if future_price_points is None or len(future_price_points) == 0:
                         st.error("❌ Failed to generate future price points.")
                         st.stop()
                     entry_point, stop_loss, take_profit, expected_profit_time = calculate_trade_levels(data["1d"], "1d", confidence, future_price_points)

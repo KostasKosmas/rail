@@ -108,7 +108,7 @@ def calculate_trade_levels(df, timeframe, confidence):
         else:
             entry_point = latest_close
             stop_loss = latest_close + (atr * stop_loss_multiplier)
-            take_profit = latest_close - (atr * take_profit_multiplier)
+            take_profit = latest close - (atr * take_profit_multiplier)
         st.write(f"Trade levels for {timeframe}: Entry Point: {entry_point:.2f}, Stop Loss: {stop_loss:.2f}, Take Profit: {take_profit:.2f}")
     except Exception as e:
         st.error(f"❌ Σφάλμα υπολογισμού επιπέδων συναλλαγών: {e}")
@@ -179,6 +179,9 @@ def main():
     # Add live price to the table
     if live_price is not None:
         df_table["Live Price"] = [live_price if i == 0 else None for i in range(len(future_dates))]
+
+    # Ensure the "Predicted Price" column is of type float
+    df_table["Predicted Price"] = df_table["Predicted Price"].astype(float)
 
     # Display the table
     st.subheader("📊 Predicted and Actual Prices")

@@ -251,7 +251,7 @@ def main():
         
         if actual_price is not None:
             # Compare predicted price with actual price and retrain if necessary
-            if future_price_points:
+            if future_price_points and len(future_price_points) > 0:
                 predicted_price = future_price_points.pop(0)
                 if abs(predicted_price - actual_price) / actual_price > 0.001:  # 0.1% threshold
                     df = load_data(crypto_symbol, interval="1d", period="5y")

@@ -220,7 +220,7 @@ def main():
         st.write(f"⏰ {timeframe}:")
         st.write(f"✅ Entry Point: {levels[0]:.2f}")
         st.write(f"🚨 Stop Loss: {levels[1]:.2f}")
-        st.write(f"🎯 Take Profit: {levels[2]::.2f}")
+        st.write(f"🎯 Take Profit: {levels[2]:.2f}")
 
     # Continuously update data and retrain model
     while True:

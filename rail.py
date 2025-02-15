@@ -132,12 +132,16 @@ def calculate_trade_levels(df, timeframe, confidence, future_price_points, futur
             stop_loss = latest_close + (atr * stop_loss_multiplier)
             take_profit = latest_close - (atr * take_profit_multiplier)
 
-        expected_profit_index = np.argmin(np.abs(np.array(future_price_points, dtype=float) - take_profit))
+        # Ensure future_dates is in the correct timezone
+        future_dates = future_dates.tz_localize('UTC')
+
+        expected_profit_index = np.argmax(np.array(future_price_points) >= take_profit)
+        if future_price_points[expected_profit_index] < take_profit:
+            expected_profit_index = np.argmin(np.abs(np.array(future_price_points) - take_profit))
+        
         expected_profit_time = future_dates[expected_profit_index]
 
         greece_tz = timezone('Europe/Athens')
-        if expected_profit_time.tzinfo is None:
-            expected_profit_time = expected_profit_time.tz_localize(utc)
         expected_profit_time_eet = expected_profit_time.tz_convert(greece_tz)
 
         st.write(f"Trade levels for {timeframe}: Entry Point: {entry_point:.2f}, Stop Loss: {stop_loss:.2f}, Take Profit: {take_profit:.2f}, Expected Time to Profit: {expected_profit_time_eet.strftime('%Y-%m-%d %H:%M:%S')} EET")

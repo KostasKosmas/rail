@@ -98,11 +98,11 @@ def train_model(df):
 
 def calculate_trade_levels(df, timeframe, confidence):
     try:
-        latest_close = df["Close"].iloc[-1].item()
-        atr = (df["High"].rolling(window=14).mean() - df["Low"].rolling(window=14).mean()).iloc[-1].item()
-        latest_pred = df["Final_Prediction"].iloc[-1].item()
-        rsi = df["RSI"].iloc[-1].item()
-        macd = df["MACD"].iloc[-1].item()
+        latest_close = df["Close"].iloc[-1]
+        atr = (df["High"].rolling(window=14).mean() - df["Low"].rolling(window=14).mean()).iloc[-1]
+        latest_pred = df["Final_Prediction"].iloc[-1]
+        rsi = df["RSI"].iloc[-1]
+        macd = df["MACD"].iloc[-1]
         if confidence > 80:
             stop_loss_multiplier = 1.2
             take_profit_multiplier = 1.8
@@ -220,7 +220,7 @@ def main():
         st.write(f"⏰ {timeframe}:")
         st.write(f"✅ Entry Point: {levels[0]:.2f}")
         st.write(f"🚨 Stop Loss: {levels[1]:.2f}")
-        st.write(f"🎯 Take Profit: {levels[2]:.2f}")
+        st.write(f"🎯 Take Profit: {levels[2]::.2f}")
 
     # Continuously update data and retrain model
     while True:

@@ -171,6 +171,7 @@ def generate_enhanced_forecast(df):
                 scale=volatility, 
                 size=(SIMULATIONS, FORECAST_DAYS)
             ).cumsum(axis=1)
+        )
         
         price_paths = last_price * simulations
         

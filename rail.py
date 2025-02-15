@@ -105,11 +105,14 @@ def train_model(df):
 
 def calculate_trade_levels(df, timeframe, confidence, future_price_points, future_dates):
     try:
-        latest_close = df["Close"].iloc[-1].item()
-        atr = (df["High"].rolling(window=14).mean() - df["Low"].rolling(window=14).mean()).iloc[-1].item()
+        if df.empty or len(df) == 0:
+            raise ValueError("DataFrame is empty")
+
+        latest_close = df["Close"].iloc[-1]
+        atr = (df["High"].rolling(window=14).mean() - df["Low"].rolling(window=14).mean()).iloc[-1]
         latest_pred = df["Final_Prediction"].iloc[-1]
-        rsi = df["RSI"].iloc[-1].item()
-        macd = df["MACD"].iloc[-1].item()
+        rsi = df["RSI"].iloc[-1]
+        macd = df["MACD"].iloc[-1]
 
         stop_loss_multiplier = 1.0  # Initialize stop loss multiplier
         take_profit_multiplier = 1.0  # Initialize take profit multiplier
@@ -147,7 +150,7 @@ def calculate_trade_levels(df, timeframe, confidence, future_price_points, futur
         else:
             expected_profit_index = np.argmin(np.abs(np.array(future_price_points) - take_profit))
         
-        expected_profit_time = future_dates[expected_profit_index]
+        expected_profit_time = future_dates[min(expected_profit_index, len(future_dates) - 1)]
 
         greece_tz = timezone('Europe/Athens')
         expected_profit_time_eet = expected_profit_time.tz_convert(greece_tz)

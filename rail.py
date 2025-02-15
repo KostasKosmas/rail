@@ -65,9 +65,13 @@ def load_enhanced_data(symbol, interval="1d", period="5y"):
         
         # Target variable - Explicit 1D conversion
         future_returns = df["Close"].pct_change(THRESHOLD_DAYS).shift(-THRESHOLD_DAYS)
-        future_returns_values = future_returns.to_numpy().reshape(-1)  # Force 1D
-        target_values = np.where(future_returns_values > 0.015, 1, 0).astype(np.int8)
-        df["Target"] = target_values.reshape(-1)  # Ensure 1D shape
+        future_returns_values = future_returns.to_numpy().flatten()  # Force 1D
+        valid_indices = ~np.isnan(future_returns_values)
+        target_values = np.where(future_returns_values[valid_indices] > 0.015, 1, 0).astype(np.int8)
+        
+        # Align target with original DataFrame
+        df = df.iloc[:len(target_values)]  # Trim DataFrame to match valid targets
+        df["Target"] = target_values
         
         # Feature engineering
         df["RSI_Volume"] = df["rsi"] * df["volume_adi"]
@@ -173,7 +177,6 @@ def generate_enhanced_forecast(df):
                 scale=volatility, 
                 size=(SIMULATIONS, FORECAST_DAYS)
             ).cumsum(axis=1)
-        )
         
         price_paths = last_price * simulations
         

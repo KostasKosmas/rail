@@ -114,7 +114,7 @@ def calculate_trade_levels(df, timeframe, confidence, future_price_points):
         stop_loss_multiplier = 1.0  # Initialize stop loss multiplier
         take_profit_multiplier = 1.0  # Initialize take profit multiplier
 
-        if future_price_points:
+        if future_price_points is not None and len(future_price_points) > 0:
             future_pred = future_price_points[-1]
             if future_pred > latest_close:
                 take_profit_multiplier = (future_pred - latest_close) / atr

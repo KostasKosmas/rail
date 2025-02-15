@@ -136,7 +136,7 @@ def calculate_trade_levels(df, timeframe, confidence, future_price_points):
 
         greece_tz = timezone('Europe/Athens')
         now_utc = pd.Timestamp.utcnow().tz_convert(utc)
-        expected_profit_time_eet = (now_utc + pd.Timedelta(minutes=int(expected_profit_time))).tz_convert(greece_tz)
+        expected_profit_time_eet = (now_utc + pd.Timedelta(days=int(expected_profit_time))).tz_convert(greece_tz)
 
         st.write(f"Trade levels for {timeframe}: Entry Point: {entry_point:.2f}, Stop Loss: {stop_loss:.2f}, Take Profit: {take_profit:.2f}, Expected Time to Profit: {expected_profit_time_eet.strftime('%Y-%m-%d %H:%M:%S')} EET")
     except Exception as e:
@@ -144,7 +144,7 @@ def calculate_trade_levels(df, timeframe, confidence, future_price_points):
         return None, None, None, None
     return entry_point, stop_loss, take_profit, expected_profit_time
 
-def generate_price_points(df, entry_point, future_minutes=15):
+def generate_price_points(df, entry_point, future_days=15):
     try:
         # Generate price points based on trade levels
         if entry_point is None:
@@ -155,7 +155,7 @@ def generate_price_points(df, entry_point, future_minutes=15):
 
         # Generate price points with randomness
         price_points = [entry_point]
-        for _ in range(1, future_minutes):
+        for _ in range(1, future_days):
             random_change = np.random.normal(0, historical_volatility)
             new_price = price_points[-1] * (1 + random_change)
             price_points.append(new_price)
@@ -181,7 +181,7 @@ def main():
     for timeframe, df in data.items():
         df, model_rf, model_gb = train_model(df)
         confidence = np.random.uniform(70, 95)
-        future_price_points = generate_price_points(df, df["Close"].iloc[-1], future_minutes=15)
+        future_price_points = generate_price_points(df, df["Close"].iloc[-1], future_days=15)
         if future_price_points is None or len(future_price_points) == 0:
             st.error("❌ Failed to generate future price points.")
             st.stop()
@@ -191,10 +191,10 @@ def main():
     if any(levels is None for levels in trade_levels.values()):
         st.stop()
 
-    # Generate price points for the next 15 minutes
+    # Generate price points for the next 15 days
     entry_point, stop_loss, take_profit, expected_profit_time = trade_levels["1d"]
-    future_dates = pd.date_range(data["1d"].index[-1], periods=15, freq="min")
-    future_price_points = generate_price_points(data["1d"], entry_point, future_minutes=15)
+    future_dates = pd.date_range(data["1d"].index[-1], periods=15, freq="D")
+    future_price_points = generate_price_points(data["1d"], entry_point, future_days=15)
     if future_price_points is None or len(future_price_points) == 0:
         st.error("❌ Failed to generate future price points.")
         st.stop()
@@ -236,7 +236,7 @@ def main():
         if levels is not None:
             entry_point, stop_loss, take_profit, expected_profit_time = levels
             now_utc = pd.Timestamp.utcnow().tz_convert(utc)
-            expected_profit_time_eet = (now_utc + pd.Timedelta(minutes=int(expected_profit_time))).tz_convert(timezone('Europe/Athens'))
+            expected_profit_time_eet = (now_utc + pd.Timedelta(days=int(expected_profit_time))).tz_convert(timezone('Europe/Athens'))
             st.write(f"⏰ {timeframe}:")
             st.write(f"✅ Entry Point: {entry_point:.2f}")
             st.write(f"🚨 Stop Loss: {stop_loss:.2f}")
@@ -261,7 +261,7 @@ def main():
                     data["1d"] = df
                     data["1d"], model_rf, model_gb = train_model(data["1d"])
                     confidence = np.random.uniform(70, 95)
-                    future_price_points = generate_price_points(data["1d"], data["1d"]["Close"].iloc[-1], future_minutes=15)
+                    future_price_points = generate_price_points(data["1d"], data["1d"]["Close"].iloc[-1], future_days=15)
                     if future_price_points is None or len(future_price_points) == 0:
                         st.error("❌ Failed to generate future price points.")
                         st.stop()

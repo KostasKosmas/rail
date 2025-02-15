@@ -98,6 +98,14 @@ def train_model(df):
 
 def calculate_trade_levels(df, timeframe, confidence, future_price_points):
     try:
+        # Debug statements to trace values
+        st.write("Starting calculate_trade_levels")
+        st.write(f"Latest Close: {df['Close'].iloc[-1]}")
+        st.write(f"ATR: {(df['High'].rolling(window=14).mean() - df['Low'].rolling(window=14).mean()).iloc[-1]}")
+        st.write(f"Final Prediction: {df['Final_Prediction'].iloc[-1]}")
+        st.write(f"RSI: {df['RSI'].iloc[-1]}")
+        st.write(f"MACD: {df['MACD'].iloc[-1]}")
+        
         latest_close = df["Close"].iloc[-1]
         atr = (df["High"].rolling(window=14).mean() - df["Low"].rolling(window=14).mean()).iloc[-1]
         latest_pred = df["Final_Prediction"].iloc[-1]
@@ -114,8 +122,11 @@ def calculate_trade_levels(df, timeframe, confidence, future_price_points):
         stop_loss_multiplier = 1.0  # Initialize stop loss multiplier
         take_profit_multiplier = 1.0  # Initialize take profit multiplier
 
+        st.write(f"Future Price Points: {future_price_points}")
+
         if future_price_points is not None and len(future_price_points) > 0:
             future_pred = future_price_points[-1]
+            st.write(f"Future Prediction: {future_pred}")
             if future_pred > latest_close:
                 take_profit_multiplier = (future_pred - latest_close) / atr
             else:

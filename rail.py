@@ -9,7 +9,6 @@ from sklearn.feature_selection import SelectKBest, f_classif
 import joblib
 import os
 import time
-from pytz import timezone, utc
 
 # Configuration
 MAX_DATA_POINTS = 3000
@@ -22,7 +21,6 @@ SIMULATIONS = 500
 if not os.path.exists(SAVE_PATH):
     os.makedirs(SAVE_PATH)
 
-# Data loading with enhanced validation
 @st.cache_data
 def load_data(symbol, interval="1d", period="5y"):
     try:
@@ -31,7 +29,6 @@ def load_data(symbol, interval="1d", period="5y"):
             st.error(f"⚠️ Insufficient data for {symbol}")
             return None
 
-        # Feature engineering
         df = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
         
         # Technical indicators
@@ -44,7 +41,7 @@ def load_data(symbol, interval="1d", period="5y"):
         loss = (-delta).clip(lower=0)
         avg_gain = gain.rolling(14).mean()
         avg_loss = loss.rolling(14).mean()
-        rs = avg_gain / avg_loss
+        rs = avg_gain / (avg_loss + 1e-10)  # Avoid division by zero
         df['RSI'] = 100 - (100 / (1 + rs))
         
         df['MACD'] = df['Close'].ewm(span=12).mean() - df['Close'].ewm(span=26).mean()
@@ -57,13 +54,11 @@ def load_data(symbol, interval="1d", period="5y"):
         st.error(f"Data error: {str(e)}")
         return None
 
-# Feature selection pipeline
 def select_features(X, y):
     selector = SelectKBest(score_func=f_classif, k='all')
     selector.fit(X, y)
     return selector
 
-# Enhanced model training with validation
 def train_model(df, crypto_symbol):
     try:
         if df is None or len(df) < 200:
@@ -80,7 +75,6 @@ def train_model(df, crypto_symbol):
         X_train_sel = selector.transform(X_train)
         X_test_sel = selector.transform(X_test)
 
-        # Model initialization
         rf_path = f"{SAVE_PATH}/{crypto_symbol}_model_rf.pkl"
         gb_path = f"{SAVE_PATH}/{crypto_symbol}_model_gb.pkl"
         
@@ -92,11 +86,7 @@ def train_model(df, crypto_symbol):
         else:
             model_rf = RandomizedSearchCV(
                 RandomForestClassifier(n_jobs=-1, class_weight='balanced'),
-                {
-                    'n_estimators': [200, 300],
-                    'max_depth': [15, 20, None],
-                    'min_samples_split': [2, 5]
-                },
+                {'n_estimators': [200, 300], 'max_depth': [15, 20, None], 'min_samples_split': [2, 5]},
                 n_iter=3, cv=3, scoring='f1'
             ).fit(X_train_sel, y_train).best_estimator_
 
@@ -108,16 +98,10 @@ def train_model(df, crypto_symbol):
         else:
             model_gb = RandomizedSearchCV(
                 GradientBoostingClassifier(n_iter_no_change=5),
-                {
-                    'n_estimators': [200, 300],
-                    'learning_rate': [0.05, 0.1],
-                    'max_depth': [3, 5],
-                    'subsample': [0.8, 1.0]
-                },
+                {'n_estimators': [200, 300], 'learning_rate': [0.05, 0.1], 'max_depth': [3, 5], 'subsample': [0.8, 1.0]},
                 n_iter=3, cv=3, scoring='f1'
             ).fit(X_train_sel, y_train).best_estimator_
 
-        # Validation
         y_pred = (model_rf.predict(X_test_sel) + model_gb.predict(X_test_sel)) // 2
         accuracy = accuracy_score(y_test, y_pred)
         f1 = f1_score(y_test, y_pred)
@@ -131,7 +115,6 @@ def train_model(df, crypto_symbol):
         st.error(f"Training error: {str(e)}")
         return None, None, None, None, None, None
 
-# Robust price forecasting using GBM
 def generate_price_points(df, days=FORECAST_DAYS, simulations=SIMULATIONS):
     try:
         if df.empty or len(df) < 100:
@@ -140,26 +123,25 @@ def generate_price_points(df, days=FORECAST_DAYS, simulations=SIMULATIONS):
         returns = np.log(df['Close']).diff().dropna()
         mu = returns.mean()
         sigma = returns.std()
-        last_price = df['Close'].iloc[-1]
+        last_price = df['Close'].iloc[-1].item()  # Fix 1: Use .item()
         
-        forecast = np.zeros((simulations, days))
+        forecast = np.zeros((days, simulations))
         for i in range(simulations):
             daily_returns = np.random.normal(mu, sigma, days)
             price_path = last_price * np.exp(np.cumsum(daily_returns))
-            forecast[i] = price_path
+            forecast[:, i] = price_path
         
         return pd.DataFrame({
             'Day': range(1, days+1),
-            'Median': np.median(forecast, axis=0),
-            'Upper': np.percentile(forecast, 95, axis=0),
-            'Lower': np.percentile(forecast, 5, axis=0)
-        })
+            'Median': np.median(forecast, axis=1),
+            'Upper': np.percentile(forecast, 95, axis=1),
+            'Lower': np.percentile(forecast, 5, axis=1)
+        }).reset_index(drop=True)  # Fix 2: Reset index
         
     except Exception as e:
         st.error(f"Forecast error: {str(e)}")
         return pd.DataFrame()
 
-# Trading logic with comprehensive validation
 def calculate_trade_levels(df, selector, model_rf, model_gb):
     try:
         features = ["SMA_50", "SMA_200", "RSI", "MACD", "OBV", "Volume_MA"]
@@ -171,10 +153,10 @@ def calculate_trade_levels(df, selector, model_rf, model_gb):
         
         high = df['High'].iloc[-14:].values
         low = df['Low'].iloc[-14:].values
-        atr = float(np.mean(high - low))
+        atr = np.mean(high - low).item()  # Fix 3: Use .item()
         
-        current_price = float(df['Close'].iloc[-1])
-        sma_trend = bool(df['SMA_50'].iloc[-1] > df['SMA_200'].iloc[-1])
+        current_price = df['Close'].iloc[-1].item()  # Fix 4: Use .item()
+        sma_trend = df['SMA_50'].iloc[-1].item() > df['SMA_200'].iloc[-1].item()
         
         forecast = generate_price_points(df)
         if forecast.empty:
@@ -196,7 +178,6 @@ def calculate_trade_levels(df, selector, model_rf, model_gb):
         st.error(f"Trade error: {str(e)}")
         return None
 
-# Streamlit UI with robust data handling
 def main():
     st.title("🚀 AI Crypto Trading System")
     
@@ -221,50 +202,42 @@ def main():
             if levels:
                 st.subheader("📈 Trading Signals")
                 
-                # Price Levels
                 cols = st.columns(3)
                 cols[0].metric("Current Price", f"${levels['entry']:.2f}")
-                cols[1].metric("Stop Loss", f"${levels['stop_loss']:.2f}", 
-                              delta_color="inverse")
+                cols[1].metric("Stop Loss", f"${levels['stop_loss']:.2f}", delta_color="inverse")
                 cols[2].metric("Take Profit", f"${levels['take_profit']:.2f}")
                 
-                # Forecast Visualization
                 st.subheader("🔮 Price Forecast")
                 st.line_chart(levels['forecast'].set_index('Day'))
                 
-                # Confidence Indicator
                 st.progress(levels['confidence'])
                 st.caption(f"Model Confidence: {levels['confidence']:.2%}")
                 
-                # Trend Analysis
                 if levels['trend'] == 'Bullish':
                     st.success("📈 Bullish Trend Detected")
                 else:
                     st.warning("📉 Bearish Market Conditions")
     
-    # Live market feed with error resilience
     try:
         live_data = yf.download(crypto_symbol, period='1d', interval='1m')
-        if not live_data.empty and len(live_data) > 1:
+        if not live_data.empty and len(live_data) > 1:  # Fix 5: Proper empty check
             st.subheader("🔴 Live Market Feed")
             current = live_data.iloc[-1]
             prev = live_data.iloc[-2]
             
-            # Price metrics
-            price_now = current['Close']
-            price_change = price_now - prev['Close']
+            price_now = current['Close'].item()
+            price_change = price_now - prev['Close'].item()
             
-            # Volume metrics
-            vol_now = current['Volume'] or 0
-            vol_prev = prev['Volume'] or 0
+            vol_now = current['Volume'].item()
+            vol_prev = prev['Volume'].item()
             vol_change = vol_now - vol_prev
             
             cols = st.columns(4)
             cols[0].metric("Price", f"${price_now:.2f}", f"{price_change:.2f}")
             cols[1].metric("Volume", f"{vol_now:,.0f}", 
                           f"{vol_change:+,.0f}" if vol_change >=0 else f"({-vol_change:,.0f})")
-            cols[2].metric("24H High", f"${live_data['High'].max():.2f}")
-            cols[3].metric("24H Low", f"${live_data['Low'].min():.2f}")
+            cols[2].metric("24H High", f"${live_data['High'].max().item():.2f}")
+            cols[3].metric("24H Low", f"${live_data['Low'].min().item():.2f}")
     except Exception as e:
         st.error(f"Live feed error: {str(e)}")
 

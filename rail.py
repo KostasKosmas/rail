@@ -63,14 +63,13 @@ def load_enhanced_data(symbol, interval="1d", period="5y"):
             df[f"Return_{lag}d"] = df["Close"].pct_change(lag)
             df[f"Volatility_{lag}d"] = df["Close"].pct_change().rolling(lag).std()
         
-        # Target variable - Explicit 1D conversion
+        # Target variable
         future_returns = df["Close"].pct_change(THRESHOLD_DAYS).shift(-THRESHOLD_DAYS)
-        future_returns_values = future_returns.to_numpy().flatten()  # Force 1D
+        future_returns_values = future_returns.to_numpy().flatten()
         valid_indices = ~np.isnan(future_returns_values)
         target_values = np.where(future_returns_values[valid_indices] > 0.015, 1, 0).astype(np.int8)
         
-        # Align target with original DataFrame
-        df = df.iloc[:len(target_values)]  # Trim DataFrame to match valid targets
+        df = df.iloc[:len(target_values)]
         df["Target"] = target_values
         
         # Feature engineering
@@ -171,12 +170,14 @@ def generate_enhanced_forecast(df):
         volatility = returns.rolling(21).std().iloc[-1]
         last_price = df['Close'].iloc[-1].item()
         
+        # Fixed parenthesis closure
         simulations = np.exp(
             np.random.normal(
                 loc=0, 
                 scale=volatility, 
                 size=(SIMULATIONS, FORECAST_DAYS)
             ).cumsum(axis=1)
+        )
         
         price_paths = last_price * simulations
         
@@ -210,7 +211,7 @@ def calculate_risk_levels(df, model, pipeline):
         
         return {
             'entry': df['Close'].iloc[-1].item(),
-            'stop_loss': df['Close'].iloc[-1] * (1 - (risk_params['base_atr'] * (2 - confidence))),
+            'stop_loss': df['Close'].iloc[-1] * (1 - (risk_params['base_atr'] * (2 - confidence)) if confidence < 1 else df['Close'].iloc[-1] * 0.95,
             'take_profit': df['Close'].iloc[-1] * (1 + (risk_params['base_atr'] * (1 + confidence))),
             'confidence': confidence,
             'volatility': volatility,

@@ -26,7 +26,7 @@ crypto_symbol = st.sidebar.text_input("Εισάγετε Crypto Symbol", "BTC-USD
 
 # Cache data loading to speed up the app
 @st.cache_data
-def load_data(symbol, interval="1d", period="1y"):
+def load_data(symbol, interval="1d", period="5y"):
     try:
         st.write(f"Loading data for {symbol} with interval {interval} and period {period}")
         df = yf.download(symbol, period=period, interval=interval)

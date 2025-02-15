@@ -56,6 +56,8 @@ def load_data(symbol, interval="1d", period="1y"):
     return df
 
 def train_model(df):
+    best_rf = None
+    best_gb = None
     try:
         X = df[["SMA_50", "SMA_200", "RSI", "MACD", "OBV", "Volume_MA"]]
         y = np.where(df["Close"].shift(-1) > df["Close"], 1, 0)

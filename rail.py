@@ -1,6 +1,5 @@
-# First run these commands in your terminal:
-# pip install streamlit yfinance pandas numpy scikit-learn joblib
-# streamlit run crypto_trading.py
+# crypto_trading.py
+# Install dependencies: pip install streamlit yfinance pandas numpy scikit-learn joblib
 
 import streamlit as st
 import yfinance as yf
@@ -21,9 +20,8 @@ SAVE_PATH = "saved_models"
 FORECAST_DAYS = 15
 SIMULATIONS = 500
 
-# Create save directory if not exists
-if not os.path.exists(SAVE_PATH):
-    os.makedirs(SAVE_PATH)
+# Auto-create model directory
+os.makedirs(SAVE_PATH, exist_ok=True)
 
 @st.cache_data
 def load_data(symbol, interval="1d", period="5y"):

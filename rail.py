@@ -40,41 +40,51 @@ def load_enhanced_data(symbol, interval="1d", period="5y"):
             st.error(f"⚠️ Insufficient data for {symbol}")
             return None
 
+        # Add technical indicators
         df = add_all_ta_features(df, open="Open", high="High", low="Low", close="Close", volume="Volume")
         
-        # Custom indicators
+        # Bollinger Bands
         bb = BollingerBands(df["Close"])
-        df["BB_upper"] = bb.bollinger_hband()
-        df["BB_lower"] = bb.bollinger_lband()
-        df["BB_width"] = bb.bollinger_wband()
+        df["BB_upper"] = bb.bollinger_hband().values
+        df["BB_lower"] = bb.bollinger_lband().values
+        df["BB_width"] = bb.bollinger_wband().values
         
+        # Stochastic Oscillator
         stoch = StochasticOscillator(high=df["High"], low=df["Low"], close=df["Close"])
-        df["Stoch_%K"] = stoch.stoch()
-        df["Stoch_%D"] = stoch.stoch_signal()
+        df["Stoch_%K"] = stoch.stoch().values
+        df["Stoch_%D"] = stoch.stoch_signal().values
         
+        # Money Flow Index
         mfi = MFIIndicator(high=df["High"], low=df["Low"], close=df["Close"], volume=df["Volume"])
-        df["MFI"] = mfi.money_flow_index()
+        df["MFI"] = mfi.money_flow_index().values
         
+        # ADX
         adx = ADXIndicator(high=df["High"], low=df["Low"], close=df["Close"])
-        df["ADX"] = adx.adx()
+        df["ADX"] = adx.adx().values
         
         # Lagged features
         for lag in [1, 3, 5]:
-            df[f"Return_{lag}d"] = df["Close"].pct_change(lag)
-            df[f"Volatility_{lag}d"] = df["Close"].pct_change().rolling(lag).std()
+            df[f"Return_{lag}d"] = df["Close"].pct_change(lag).values
+            df[f"Volatility_{lag}d"] = df["Close"].pct_change().rolling(lag).std().values
         
-        # Target variable
+        # Target variable with explicit 1D conversion
         future_returns = df["Close"].pct_change(THRESHOLD_DAYS).shift(-THRESHOLD_DAYS)
-        df["Target"] = np.where(future_returns > 0.015, 1, 0).astype(np.int32).flatten()
+        target = np.where(future_returns > 0.015, 1, 0)
+        df["Target"] = target.astype(np.int8).flatten()  # Force 1D
         
         # Feature engineering
-        df["RSI_Volume"] = df["rsi"] * df["volume_adi"]
-        df["MACD_Signal_Ratio"] = df["macd"] / (df["macd_signal"] + 1e-10)
+        df["RSI_Volume"] = (df["rsi"] * df["volume_adi"]).values
+        df["MACD_Signal_Ratio"] = (df["macd"] / (df["macd_signal"] + 1e-10)).values
         
-        # Clean data
+        # Clean data and validate dimensions
         df = df.dropna().iloc[-MAX_DATA_POINTS:]
         df = df.astype(np.float32)
         
+        # Final validation
+        if df["Target"].ndim != 1:
+            df["Target"] = df["Target"].squeeze()
+            st.warning("Target dimension corrected to 1D")
+            
         return df
     
     except Exception as e:
@@ -92,8 +102,14 @@ def train_enhanced_model(df, crypto_symbol):
         if df is None or len(df) < 300:
             raise ValueError("Insufficient training data")
             
+        # Explicit 1D conversion for target
+        y = df["Target"].to_numpy().ravel()  # Double ensure 1D
         X = df.drop(columns=["Target"])
-        y = np.ravel(df["Target"].values)
+        
+        # Validation check
+        if y.ndim != 1:
+            st.error(f"Invalid target shape: {y.shape}. Must be 1D.")
+            return None, None, None, None
         
         tscv = TimeSeriesSplit(n_splits=3)
         feature_pipeline = create_feature_pipeline()
@@ -164,14 +180,12 @@ def generate_enhanced_forecast(df):
         volatility = returns.rolling(21).std().iloc[-1]
         last_price = df['Close'].iloc[-1].item()
         
-        # Fixed parentheses closure
         simulations = np.exp(
             np.random.normal(
                 loc=0, 
                 scale=volatility, 
                 size=(SIMULATIONS, FORECAST_DAYS)
             ).cumsum(axis=1)
-        )  # Added closing parenthesis here
         
         price_paths = last_price * simulations
         

@@ -180,8 +180,9 @@ def main():
     if live_price is not None:
         df_table["Live Price"] = [live_price if i == 0 else None for i in range(len(future_dates))]
 
-    # Ensure the "Predicted Price" column is of type float
+    # Ensure the "Predicted Price" and "Live Price" columns are of type float
     df_table["Predicted Price"] = df_table["Predicted Price"].astype(float)
+    df_table["Live Price"] = df_table["Live Price"].astype(float)
 
     # Display the table
     st.subheader("📊 Predicted and Actual Prices")
@@ -201,7 +202,7 @@ def main():
         st.write(f"⏰ {timeframe}:")
         st.write(f"✅ Entry Point: {levels[0]:.2f}")
         st.write(f"🚨 Stop Loss: {levels[1]:.2f}")
-        st.write(f"🎯 Take Profit: {levels[2]:.2f}")
+        st.write(f"🎯 Take Profit: {levels[2]::.2f}")
 
     # Continuously update data and retrain model
     while True:

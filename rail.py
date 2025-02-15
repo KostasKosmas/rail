@@ -99,24 +99,17 @@ def train_model(df):
 
 def calculate_trade_levels(df, timeframe, confidence, future_price_points):
     try:
-        latest_close = df["Close"].iloc[-1]
-        atr = (df["High"].rolling(window=14).mean() - df["Low"].rolling(window=14).mean()).iloc[-1]
+        latest_close = df["Close"].iloc[-1].item()
+        atr = (df["High"].rolling(window=14).mean() - df["Low"].rolling(window=14).mean()).iloc[-1].item()
         latest_pred = df["Final_Prediction"].iloc[-1]
-        rsi = df["RSI"].iloc[-1]
-        macd = df["MACD"].iloc[-1]
+        rsi = df["RSI"].iloc[-1].item()
+        macd = df["MACD"].iloc[-1].item()
         
-        # Ensure values are scalar before formatting
-        latest_close = float(latest_close)
-        atr = float(atr)
-        latest_pred = int(latest_pred)
-        rsi = float(rsi)
-        macd = float(macd)
-
         stop_loss_multiplier = 1.0  # Initialize stop loss multiplier
         take_profit_multiplier = 1.0  # Initialize take profit multiplier
 
         if future_price_points is not None and len(future_price_points) > 0:
-            future_pred = float(future_price_points[-1])
+            future_pred = future_price_points[-1].item()
             if future_pred > latest_close:
                 take_profit_multiplier = (future_pred - latest_close) / atr
             else:
@@ -142,8 +135,8 @@ def calculate_trade_levels(df, timeframe, confidence, future_price_points):
         expected_profit_time = np.argmin(np.abs(np.array(future_price_points, dtype=float) - take_profit))
 
         greece_tz = timezone('Europe/Athens')
-        now_utc = pd.Timestamp.utcnow().tz_localize(utc)
-        expected_profit_time_eet = (now_utc + pd.Timedelta(minutes=int(expected_profit_time))).astimezone(greece_tz)
+        now_utc = pd.Timestamp.utcnow().tz_convert(utc)
+        expected_profit_time_eet = (now_utc + pd.Timedelta(minutes=int(expected_profit_time))).tz_convert(greece_tz)
 
         st.write(f"Trade levels for {timeframe}: Entry Point: {entry_point:.2f}, Stop Loss: {stop_loss:.2f}, Take Profit: {take_profit:.2f}, Expected Time to Profit: {expected_profit_time_eet.strftime('%Y-%m-%d %H:%M:%S')} EET")
     except Exception as e:
@@ -200,7 +193,7 @@ def main():
 
     # Generate price points for the next 15 minutes
     entry_point, stop_loss, take_profit, expected_profit_time = trade_levels["1d"]
-    future_dates = pd.date_range(data["1d"].index[-1], periods=15, freq="T")
+    future_dates = pd.date_range(data["1d"].index[-1], periods=15, freq="min")
     future_price_points = generate_price_points(data["1d"], entry_point, future_minutes=15)
     if future_price_points is None or len(future_price_points) == 0:
         st.error("❌ Failed to generate future price points.")
@@ -242,8 +235,8 @@ def main():
     for timeframe, levels in trade_levels.items():
         if levels is not None:
             entry_point, stop_loss, take_profit, expected_profit_time = levels
-            now_utc = pd.Timestamp.utcnow().tz_localize(utc)
-            expected_profit_time_eet = (now_utc + pd.Timedelta(minutes=int(expected_profit_time))).astimezone(timezone('Europe/Athens'))
+            now_utc = pd.Timestamp.utcnow().tz_convert(utc)
+            expected_profit_time_eet = (now_utc + pd.Timedelta(minutes=int(expected_profit_time))).tz_convert(timezone('Europe/Athens'))
             st.write(f"⏰ {timeframe}:")
             st.write(f"✅ Entry Point: {entry_point:.2f}")
             st.write(f"🚨 Stop Loss: {stop_loss:.2f}")

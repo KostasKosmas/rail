@@ -127,10 +127,17 @@ def calculate_trade_levels(df, timeframe, confidence):
             entry_point = latest_close
             stop_loss = latest_close + (atr * stop_loss_multiplier)
             take_profit = latest_close - (atr * take_profit_multiplier)
+        
+        # Ensure values are scalar before formatting
+        entry_point = float(entry_point)
+        stop_loss = float(stop_loss)
+        take_profit = float(take_profit)
+        
         st.write(f"Trade levels for {timeframe}: Entry Point: {entry_point:.2f}, Stop Loss: {stop_loss:.2f}, Take Profit: {take_profit:.2f}")
     except Exception as e:
         st.error(f"❌ Σφάλμα υπολογισμού επιπέδων συναλλαγών: {e}")
         return None, None, None
+    return entry_point, stop_loss, take_profit
 
 def generate_price_points(df, entry_point, stop_loss, take_profit, future_minutes=15):
     try:

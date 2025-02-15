@@ -1,7 +1,7 @@
-streamlit
-pandas
-numpy
-ta
-scikit-learn
-python-binance
-joblib
+# Core dependencies
+streamlit>=1.32.0
+yfinance>=0.2.36
+pandas>=2.0.0
+numpy>=1.24.0
+scikit-learn>=1.3.0
+joblib>=1.3.0

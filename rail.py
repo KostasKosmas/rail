@@ -152,7 +152,7 @@ def calculate_trade_levels(df, timeframe, confidence, future_price_points, futur
         future_dates = future_dates.tz_localize('UTC')
 
         take_profit_reached = (np.array(future_price_points) >= take_profit).any()
-        if take_profit_reached:
+        if take_profit_reached.any():
             expected_profit_index = np.argmax(np.array(future_price_points) >= take_profit)
         else:
             expected_profit_index = np.argmin(np.abs(np.array(future_price_points) - take_profit))

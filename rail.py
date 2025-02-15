@@ -138,7 +138,7 @@ def train_model(df, crypto_symbol):
         st.error(f"Training error: {e}")
         return None, None, None, None, None, None
 
-# Enhanced trading logic with explicit type casting
+# Enhanced trading logic with explicit scalar conversion
 def calculate_trade_levels(df, selector, model_rf, model_gb):
     try:
         # Prepare features
@@ -150,13 +150,13 @@ def calculate_trade_levels(df, selector, model_rf, model_gb):
         gb_pred = model_gb.predict_proba(X)[:, 1]
         combined_confidence = (rf_pred + gb_pred) / 2
         
-        # Calculate dynamic ATR with explicit type conversion
+        # Calculate dynamic ATR with explicit scalar conversion
         high_low = df['High'].iloc[-14:].values - df['Low'].iloc[-14:].values
         atr = float(np.mean(high_low))
         
-        # Current market state with scalar conversion
-        current_price = float(df['Close'].iloc[-1])
-        sma_trend = bool(df['SMA_50'].iloc[-1] > df['SMA_200'].iloc[-1])
+        # Current market state with proper scalar extraction
+        current_price = float(df['Close'].iloc[-1].item())
+        sma_trend = bool(df['SMA_50'].iloc[-1].item() > df['SMA_200'].iloc[-1].item())
         
         # Risk management parameters
         confidence = float(np.mean(combined_confidence))
@@ -231,13 +231,13 @@ def main():
             current = live_data.iloc[-1]
             prev = live_data.iloc[-2]
             
-            # Convert to native Python types
-            current_close = float(current['Close'])
-            prev_close = float(prev['Close'])
-            current_vol = int(current['Volume'])
-            prev_vol = int(prev['Volume'])
-            high_24h = float(live_data['High'].max())
-            low_24h = float(live_data['Low'].min())
+            # Convert to native Python types using .item()
+            current_close = current['Close'].item()
+            prev_close = prev['Close'].item()
+            current_vol = current['Volume'].item()
+            prev_vol = prev['Volume'].item()
+            high_24h = live_data['High'].max().item()
+            low_24h = live_data['Low'].min().item()
             
             cols = st.columns(4)
             cols[0].metric("Price", f"${current_close:.2f}", 

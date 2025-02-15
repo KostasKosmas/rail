@@ -208,7 +208,7 @@ def main():
 
     # Display latest predictions and trade levels
     st.subheader("🔍 Latest Predictions & Trade Levels")
-    latest_pred = data["1d"]["Final_Prediction"].iloc[-1].item()
+    latest_pred = data["1d"]["Final_Prediction"].iloc[-1]
     confidence = np.random.uniform(70, 95)
     if latest_pred == 1:
         st.success(f"📈 Προβλέπεται άνοδος με confidence {confidence:.2f}%")

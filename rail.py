@@ -136,7 +136,7 @@ def calculate_trade_levels(df, timeframe, confidence, future_price_points):
 
         greece_tz = timezone('Europe/Athens')
         now_utc = pd.Timestamp.utcnow().tz_convert(utc)
-        expected_profit_time_eet = (now_utc + pd.Timedelta(minutes=int(expected_profit_time))).tz_convert(greece_tz)
+        expected_profit_time_eet = (now_utc + pd.Timedelta(minutes=int(expected_profit_time))).astimezone(greece_tz)
 
         st.write(f"Trade levels for {timeframe}: Entry Point: {entry_point:.2f}, Stop Loss: {stop_loss:.2f}, Take Profit: {take_profit:.2f}, Expected Time to Profit: {expected_profit_time_eet.strftime('%Y-%m-%d %H:%M:%S')} EET")
     except Exception as e:
@@ -235,7 +235,7 @@ def main():
     for timeframe, levels in trade_levels.items():
         if levels is not None:
             entry_point, stop_loss, take_profit, expected_profit_time = levels
-            now_utc = pd.Timestamp.utcnow().tz_convert(utc)
+            now_utc = pd.Timestamp.utcnow().tz_localize(utc)
             expected_profit_time_eet = (now_utc + pd.Timedelta(minutes=int(expected_profit_time))).tz_convert(timezone('Europe/Athens'))
             st.write(f"⏰ {timeframe}:")
             st.write(f"✅ Entry Point: {entry_point:.2f}")
@@ -272,4 +272,4 @@ def main():
         st.rerun()
 
 if __name__ == "__main__":
-    main()
+    main ▋

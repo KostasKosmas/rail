@@ -97,7 +97,7 @@ def train_model(df):
         st.error(f"❌ Σφάλμα εκπαίδευσης μοντέλου: {e}")
     return df, best_rf, best_gb
 
-def calculate_trade_levels(df, timeframe, confidence, future_price_points):
+def calculate_trade_levels(df, timeframe, confidence, future_price_points, future_dates):
     try:
         latest_close = df["Close"].iloc[-1].item()
         atr = (df["High"].rolling(window=14).mean() - df["Low"].rolling(window=14).mean()).iloc[-1].item()
@@ -132,11 +132,11 @@ def calculate_trade_levels(df, timeframe, confidence, future_price_points):
             stop_loss = latest_close + (atr * stop_loss_multiplier)
             take_profit = latest_close - (atr * take_profit_multiplier)
 
-        expected_profit_time = np.argmin(np.abs(np.array(future_price_points, dtype=float) - take_profit))
+        expected_profit_index = np.argmin(np.abs(np.array(future_price_points, dtype=float) - take_profit))
+        expected_profit_time = future_dates[expected_profit_index]
 
         greece_tz = timezone('Europe/Athens')
-        now_utc = pd.Timestamp.utcnow().tz_convert(utc)
-        expected_profit_time_eet = (now_utc + pd.Timedelta(days=int(expected_profit_time))).tz_convert(greece_tz)
+        expected_profit_time_eet = expected_profit_time.tz_convert(greece_tz)
 
         st.write(f"Trade levels for {timeframe}: Entry Point: {entry_point:.2f}, Stop Loss: {stop_loss:.2f}, Take Profit: {take_profit:.2f}, Expected Time to Profit: {expected_profit_time_eet.strftime('%Y-%m-%d %H:%M:%S')} EET")
     except Exception as e:
@@ -182,10 +182,11 @@ def main():
         df, model_rf, model_gb = train_model(df)
         confidence = np.random.uniform(70, 95)
         future_price_points = generate_price_points(df, df["Close"].iloc[-1], future_days=15)
+        future_dates = pd.date_range(df.index[-1], periods=15, freq="D")
         if future_price_points is None or len(future_price_points) == 0:
             st.error("❌ Failed to generate future price points.")
             st.stop()
-        entry_point, stop_loss, take_profit, expected_profit_time = calculate_trade_levels(df, timeframe, confidence, future_price_points)
+        entry_point, stop_loss, take_profit, expected_profit_time = calculate_trade_levels(df, timeframe, confidence, future_price_points, future_dates)
         trade_levels[timeframe] = (entry_point, stop_loss, take_profit, expected_profit_time)
         save_artifacts(df, model_rf, model_gb, crypto_symbol)  # Save artifacts
     if any(levels is None for levels in trade_levels.values()):
@@ -236,7 +237,7 @@ def main():
         if levels is not None:
             entry_point, stop_loss, take_profit, expected_profit_time = levels
             now_utc = pd.Timestamp.utcnow().tz_convert(utc)
-            expected_profit_time_eet = (now_utc + pd.Timedelta(days=int(expected_profit_time))).tz_convert(timezone('Europe/Athens'))
+            expected_profit_time_eet = expected_profit_time.tz_convert(timezone('Europe/Athens'))
             st.write(f"⏰ {timeframe}:")
             st.write(f"✅ Entry Point: {entry_point:.2f}")
             st.write(f"🚨 Stop Loss: {stop_loss:.2f}")
@@ -262,10 +263,11 @@ def main():
                     data["1d"], model_rf, model_gb = train_model(data["1d"])
                     confidence = np.random.uniform(70, 95)
                     future_price_points = generate_price_points(data["1d"], data["1d"]["Close"].iloc[-1], future_days=15)
+                    future_dates = pd.date_range(data["1d"].index[-1], periods=15, freq="D")
                     if future_price_points is None or len(future_price_points) == 0:
                         st.error("❌ Failed to generate future price points.")
                         st.stop()
-                    entry_point, stop_loss, take_profit, expected_profit_time = calculate_trade_levels(data["1d"], "1d", confidence, future_price_points)
+                    entry_point, stop_loss, take_profit, expected_profit_time = calculate_trade_levels(data["1d"], "1d", confidence, future_price_points, future_dates)
                     trade_levels["1d"] = (entry_point, stop_loss, take_profit, expected_profit_time)
                     save_artifacts(df, model_rf, model_gb, crypto_symbol)  # Save artifacts
 

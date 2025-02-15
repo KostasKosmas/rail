@@ -1,5 +1,5 @@
 # crypto_trading_advanced.py
-# Install: pip install streamlit yfinance pandas numpy scikit-learn joblib ta
+# Install: pip install streamlit yfinance pandas numpy scikit-learn joblib ta arch
 
 import streamlit as st
 import yfinance as yf
@@ -19,7 +19,8 @@ from ta import add_all_ta_features
 from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.volatility import BollingerBands
 from ta.trend import MACD, ADXIndicator
-from ta.volume import MoneyFlowIndex
+from ta.volume import MFIIndicator  # Corrected import
+from arch import arch_model
 
 # Configuration
 MAX_DATA_POINTS = 5000
@@ -35,7 +36,8 @@ os.makedirs(SAVE_PATH, exist_ok=True)
 @st.cache_data
 def load_enhanced_data(symbol, interval="1d", period="5y"):
     try:
-        df = yf.download(symbol, period=period, interval=interval)
+        # Updated yfinance download with explicit auto_adjust
+        df = yf.download(symbol, period=period, interval=interval, auto_adjust=True)
         if df.empty or len(df) < 100:
             st.error(f"⚠️ Insufficient data for {symbol}")
             return None
@@ -53,7 +55,8 @@ def load_enhanced_data(symbol, interval="1d", period="5y"):
         df["Stoch_%K"] = stoch.stoch()
         df["Stoch_%D"] = stoch.stoch_signal()
         
-        mfi = MoneyFlowIndex(high=df["High"], low=df["Low"], close=df["Close"], volume=df["Volume"])
+        # Corrected MFI calculation
+        mfi = MFIIndicator(high=df["High"], low=df["Low"], close=df["Close"], volume=df["Volume"])
         df["MFI"] = mfi.money_flow_index()
         
         adx = ADXIndicator(high=df["High"], low=df["Low"], close=df["Close"])
@@ -198,7 +201,7 @@ def calculate_risk_levels(df, model, pipeline):
         mfi_value = df["MFI"].iloc[-1]
         
         risk_params = {
-            'base_atr': df['Average True Range'].iloc[-14:].mean(),
+            'base_atr': df['average_true_range'].iloc[-14:].mean(),
             'trend_strength': adx_value / 100,
             'volume_confirmation': mfi_value / 100
         }
@@ -276,7 +279,7 @@ def main():
                     st.line_chart(df[['Stoch_%K', 'Stoch_%D']].iloc[-100:])
 
     try:
-        live_data = yf.download(crypto_symbol, period='1d', interval='1m')
+        live_data = yf.download(crypto_symbol, period='1d', interval='1m', auto_adjust=True)
         if not live_data.empty:
             st.subheader("🔴 Live Market Dashboard")
             current = live_data.iloc[-1]

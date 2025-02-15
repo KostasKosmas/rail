@@ -198,6 +198,9 @@ def main():
     for timeframe, df in data.items():
         df, model_rf, model_gb = train_model(df)
         confidence = np.random.uniform(70, 95)
+        if df.empty or len(df) == 0:
+            st.error("❌ DataFrame is empty, cannot generate price points.")
+            st.stop()
         future_price_points = generate_price_points(df, df["Close"].iloc[-1], future_days=15)
         future_dates = pd.date_range(df.index[-1], periods=15, freq="D")
         if future_price_points is None or len(future_price_points) == 0:

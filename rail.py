@@ -63,10 +63,13 @@ def load_enhanced_data(symbol, interval="1d", period="5y"):
             df[f"Return_{lag}d"] = df["Close"].pct_change(lag)
             df[f"Volatility_{lag}d"] = df["Close"].pct_change().rolling(lag).std()
         
-        # Target variable with explicit 1D conversion
+        # Target variable
         future_returns = df["Close"].pct_change(THRESHOLD_DAYS).shift(-THRESHOLD_DAYS)
-        df["Target"] = np.where(future_returns > 0.015, 1, 0)
-        df["Target"] = df["Target"].astype(np.int8).values.ravel()  # Double ensure 1D
+        df["Target"] = np.where(future_returns > 0.015, 1, 0).astype(np.int8).ravel()
+        
+        # Feature engineering
+        df["RSI_Volume"] = df["rsi"] * df["volume_adi"]
+        df["MACD_Signal_Ratio"] = df["macd"] / (df["macd_signal"] + 1e-10)
         
         # Clean data
         df = df.dropna().iloc[-MAX_DATA_POINTS:]
@@ -89,14 +92,8 @@ def train_enhanced_model(df, crypto_symbol):
         if df is None or len(df) < 300:
             raise ValueError("Insufficient training data")
             
-        # Explicit 1D conversion for target
-        y = df["Target"].to_numpy().ravel()  # Triple ensure 1D
         X = df.drop(columns=["Target"])
-        
-        # Validation check
-        if y.ndim != 1:
-            y = np.squeeze(y)
-            st.warning(f"Target shape corrected from {y.shape} to 1D")
+        y = np.ravel(df["Target"].values)
         
         tscv = TimeSeriesSplit(n_splits=3)
         feature_pipeline = create_feature_pipeline()
@@ -167,12 +164,14 @@ def generate_enhanced_forecast(df):
         volatility = returns.rolling(21).std().iloc[-1]
         last_price = df['Close'].iloc[-1].item()
         
+        # Fixed parentheses closure
         simulations = np.exp(
             np.random.normal(
                 loc=0, 
                 scale=volatility, 
                 size=(SIMULATIONS, FORECAST_DAYS)
             ).cumsum(axis=1)
+        )
         
         price_paths = last_price * simulations
         
@@ -258,7 +257,7 @@ def main():
                 cond_cols[2].metric("MFI Status", levels['mfi_status'])
                 
                 st.subheader("🔮 Price Forecast")
-                st.line_chart(forecast.set_index('Day')[['Median', 'Upper_95', 'Lower_95']})
+                st.line_chart(forecast.set_index('Day')[['Median', 'Upper_95', 'Lower_95']])
                 
                 st.subheader("📉 Technical Overview")
                 tab1, tab2, tab3 = st.tabs(["Bollinger Bands", "MACD", "Stochastic"])

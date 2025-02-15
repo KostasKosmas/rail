@@ -160,11 +160,14 @@ def generate_enhanced_forecast(df):
         volatility = returns.rolling(21).std().iloc[-1]
         last_price = df['Close'].iloc[-1].item()
         
-        simulations = np.exp(np.random.normal(
-            loc=0, 
-            scale=volatility, 
-            size=(SIMULATIONS, FORECAST_DAYS)
-        ).cumsum(axis=1)
+        # Corrected syntax with proper parentheses
+        simulations = np.exp(
+            np.random.normal(
+                loc=0, 
+                scale=volatility, 
+                size=(SIMULATIONS, FORECAST_DAYS)
+            ).cumsum(axis=1)
+        )
         
         price_paths = last_price * simulations
         

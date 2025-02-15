@@ -217,10 +217,11 @@ def main():
 
     st.subheader("📌 Trade Setup")
     for timeframe, levels in trade_levels.items():
-        st.write(f"⏰ {timeframe}:")
-        st.write(f"✅ Entry Point: {levels[0]:.2f}")
-        st.write(f"🚨 Stop Loss: {levels[1]:.2f}")
-        st.write(f"🎯 Take Profit: {levels[2]:.2f}")
+        if levels is not None:
+            st.write(f"⏰ {timeframe}:")
+            st.write(f"✅ Entry Point: {levels[0]:.2f}")
+            st.write(f"🚨 Stop Loss: {levels[1]:.2f}")
+            st.write(f"🎯 Take Profit: {levels[2]:.2f}")
 
     # Continuously update data and retrain model
     while True:

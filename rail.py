@@ -63,9 +63,10 @@ def load_enhanced_data(symbol, interval="1d", period="5y"):
             df[f"Return_{lag}d"] = df["Close"].pct_change(lag)
             df[f"Volatility_{lag}d"] = df["Close"].pct_change().rolling(lag).std()
         
-        # Target variable
+        # Target variable - Fixed dimensionality issue
         future_returns = df["Close"].pct_change(THRESHOLD_DAYS).shift(-THRESHOLD_DAYS)
-        df["Target"] = np.where(future_returns > 0.015, 1, 0).astype(np.int8).ravel()
+        future_returns_values = future_returns.to_numpy().ravel()  # Ensure 1D array
+        df["Target"] = np.where(future_returns_values > 0.015, 1, 0).astype(np.int8)
         
         # Feature engineering
         df["RSI_Volume"] = df["rsi"] * df["volume_adi"]
@@ -164,7 +165,6 @@ def generate_enhanced_forecast(df):
         volatility = returns.rolling(21).std().iloc[-1]
         last_price = df['Close'].iloc[-1].item()
         
-        # Fixed parentheses closure
         simulations = np.exp(
             np.random.normal(
                 loc=0, 

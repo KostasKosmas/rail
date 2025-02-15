@@ -243,7 +243,7 @@ def main():
         if actual_price is not None:
             # Compare predicted price with actual price and retrain if necessary
             predicted_price = future_price_points.pop(0)
-            if abs(predicted_price - actual_price) / actual_price > 0.01:  # 1% threshold
+            if abs(predicted_price - actual_price) / actual_price > 0.001:  # 0.1% threshold
                 df = load_data(crypto_symbol, interval="1d", period="5y")
                 if df is None:
                     st.error(f"❌ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {crypto_symbol}.")

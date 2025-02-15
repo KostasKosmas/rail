@@ -52,7 +52,7 @@ def load_data(symbol, interval="1d", period="5y"):
 def train_model(df):
     try:
         X = df[["SMA_50", "SMA_200", "RSI", "MACD", "OBV", "Volume_MA"]]
-        y = np.where(df["Close"].shift(-1) > df["Close"], 1, 0)
+        y = np.where(df["Close"].shift(-1) > df["Close"], 1, 0).ravel()
         split = int(0.8 * len(df))
         
         model_rf = RandomForestClassifier(n_estimators=50, max_depth=5, random_state=42)
@@ -70,6 +70,37 @@ def train_model(df):
     except Exception as e:
         st.error(f"❌ Σφάλμα εκπαίδευσης μοντέλου: {e}")
         return df, None, None
+
+def calculate_trade_levels(df, confidence):
+    try:
+        latest_close = float(df["Close"].iloc[-1].item())
+        atr = float(df["High"].rolling(14).mean().iloc[-1] - df["Low"].rolling(14).mean().iloc[-1])
+        latest_pred = int(df["Final_Prediction"].iloc[-1].item())
+
+        if confidence > 80:
+            stop_loss_multiplier = 1.2
+            take_profit_multiplier = 1.8
+        elif confidence > 60:
+            stop_loss_multiplier = 1.5
+            take_profit_multiplier = 2.0
+        else:
+            stop_loss_multiplier = 2.0
+            take_profit_multiplier = 2.5
+
+        if latest_pred == 1:
+            entry_point = latest_close
+            stop_loss = latest_close - (atr * stop_loss_multiplier)
+            take_profit = latest_close + (atr * take_profit_multiplier)
+        else:
+            entry_point = latest_close
+            stop_loss = latest_close + (atr * stop_loss_multiplier)
+            take_profit = latest_close - (atr * take_profit_multiplier)
+
+        return entry_point, stop_loss, take_profit
+
+    except Exception as e:
+        st.error(f"❌ Σφάλμα υπολογισμού επιπέδων συναλλαγών: {e}")
+        return None, None, None
 
 def generate_price_points(df, entry_point, future_days=14):
     try:
@@ -90,10 +121,10 @@ def main():
     df = load_data(crypto_symbol)
     if df is not None:
         df, model_rf, model_gb = train_model(df)
-        entry_point = float(df["Close"].iloc[-1])
+        confidence = np.random.uniform(70, 95)
+        entry_point, stop_loss, take_profit = calculate_trade_levels(df, confidence)
         
         future_prices = generate_price_points(df, entry_point)
-        
         future_dates = pd.date_range(df.index[-1], periods=14, freq="D")
         df_table = pd.DataFrame({
             "Date": future_dates,
@@ -103,22 +134,27 @@ def main():
         st.subheader("📊 Predicted and Actual Prices")
         st.write(df_table)
         
-        # Fetch live price
         live_data = yf.download(crypto_symbol, period="1d", interval="1m")
         live_price = live_data["Close"].iloc[-1] if not live_data.empty else None
         
         if live_price is not None:
-            df_table["Live Price"] = [float(live_price)] + [None] * (len(future_dates) - 1)
+            df_table["Live Price"] = [float(live_price.item())] + [None] * (len(future_dates) - 1)
             df_table["Live Price"] = df_table["Live Price"].astype("float64")
         
         st.subheader("🔍 Latest Predictions & Trade Levels")
-        latest_pred = df["Final_Prediction"].iloc[-1].item()
-        confidence = np.random.uniform(70, 95)
+        latest_pred = int(df["Final_Prediction"].iloc[-1].item())
         
         if latest_pred == 1:
             st.success(f"📈 Προβλέπεται άνοδος με confidence {confidence:.2f}%")
         else:
             st.error(f"📉 Προβλέπεται πτώση με confidence {confidence:.2f}%")
+
+        st.subheader("📌 Trade Setup")
+        st.write(f"✅ Entry Point: {entry_point:.2f}")
+        st.write(f"🚨 Stop Loss: {stop_loss:.2f}")
+        st.write(f"🎯 Take Profit: {take_profit:.2f}")
+
+        save_artifacts(df, model_rf, model_gb, crypto_symbol)
 
 if __name__ == "__main__":
     main()

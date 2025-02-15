@@ -63,10 +63,11 @@ def load_enhanced_data(symbol, interval="1d", period="5y"):
             df[f"Return_{lag}d"] = df["Close"].pct_change(lag)
             df[f"Volatility_{lag}d"] = df["Close"].pct_change().rolling(lag).std()
         
-        # Target variable - Fixed dimensionality issue
+        # Target variable - Explicit 1D conversion
         future_returns = df["Close"].pct_change(THRESHOLD_DAYS).shift(-THRESHOLD_DAYS)
-        future_returns_values = future_returns.to_numpy().ravel()  # Ensure 1D array
-        df["Target"] = np.where(future_returns_values > 0.015, 1, 0).astype(np.int8)
+        future_returns_values = future_returns.to_numpy().reshape(-1)  # Force 1D
+        target_values = np.where(future_returns_values > 0.015, 1, 0).astype(np.int8)
+        df["Target"] = target_values.reshape(-1)  # Ensure 1D shape
         
         # Feature engineering
         df["RSI_Volume"] = df["rsi"] * df["volume_adi"]
@@ -74,7 +75,8 @@ def load_enhanced_data(symbol, interval="1d", period="5y"):
         
         # Clean data
         df = df.dropna().iloc[-MAX_DATA_POINTS:]
-        df = df.astype(np.float32)
+        df = df.astype({col: np.float32 for col in df.columns if col != "Target"})
+        df["Target"] = df["Target"].astype(np.int8)
         
         return df
     

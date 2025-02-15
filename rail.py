@@ -3,7 +3,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from sklearn.model_selection import GridSearchCV, cross_val_score
+from sklearn.model_selection import GridSearchCV
 from sklearn.metrics import accuracy_score
 import time
 import joblib
@@ -225,16 +225,15 @@ def main():
     # Continuously update data and retrain model
     while True:
         time.sleep(60)
-        for timeframe, params in timeframes.items():
-            df = load_data(crypto_symbol, interval=params["interval"], period=params["period"])
-            if df is None:
-                st.error(f"❌ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {crypto_symbol}.")
-                st.stop()
-            data[timeframe] = df
-            data[timeframe], model_rf, model_gb = train_model(data[timeframe])
-            confidence = np.random.uniform(70, 95)
-            trade_levels[timeframe] = calculate_trade_levels(data[timeframe], timeframe, confidence)
-            save_artifacts(df, model_rf, model_gb, crypto_symbol)  # Save artifacts
+        df = load_data(crypto_symbol, interval="1d", period="5y")
+        if df is None:
+            st.error(f"❌ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {crypto_symbol}.")
+            st.stop()
+        data["1d"] = df
+        data["1d"], model_rf, model_gb = train_model(data["1d"])
+        confidence = np.random.uniform(70, 95)
+        trade_levels["1d"] = calculate_trade_levels(data["1d"], "1d", confidence)
+        save_artifacts(df, model_rf, model_gb, crypto_symbol)  # Save artifacts
         st.rerun()
 
 if __name__ == "__main__":

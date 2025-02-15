@@ -16,18 +16,19 @@ MAX_DATA_POINTS = 3000
 INCREMENTAL_ESTIMATORS = 50
 SAVE_PATH = "saved_models"
 FORECAST_DAYS = 15
+SIMULATIONS = 500
 
 # Create save directory if not exists
 if not os.path.exists(SAVE_PATH):
     os.makedirs(SAVE_PATH)
 
-# Improved data loading with caching
+# Data loading with enhanced validation
 @st.cache_data
 def load_data(symbol, interval="1d", period="5y"):
     try:
         df = yf.download(symbol, period=period, interval=interval)
-        if df.empty:
-            st.error(f"⚠️ Data unavailable for {symbol} ({interval})")
+        if df.empty or len(df) < 100:
+            st.error(f"⚠️ Insufficient data for {symbol}")
             return None
 
         # Feature engineering
@@ -38,7 +39,7 @@ def load_data(symbol, interval="1d", period="5y"):
         df["SMA_200"] = df["Close"].rolling(200).mean()
         
         # RSI calculation
-        delta = df['Close'].diff()
+        delta = df['Close'].diff().dropna()
         gain = delta.clip(lower=0)
         loss = (-delta).clip(lower=0)
         avg_gain = gain.rolling(14).mean()
@@ -50,247 +51,223 @@ def load_data(symbol, interval="1d", period="5y"):
         df['OBV'] = (np.sign(df['Close'].diff()) * df['Volume']).cumsum()
         df['Volume_MA'] = df['Volume'].rolling(20).mean()
         
-        # Clean and format data
-        df = df.dropna().iloc[-MAX_DATA_POINTS:]
-        return df.astype(np.float32).reset_index(drop=True)
+        return df.dropna().iloc[-MAX_DATA_POINTS:].astype(np.float32)
     
     except Exception as e:
-        st.error(f"❌ Data loading error: {e}")
+        st.error(f"Data error: {str(e)}")
         return None
 
-# Feature selection
+# Feature selection pipeline
 def select_features(X, y):
     selector = SelectKBest(score_func=f_classif, k='all')
     selector.fit(X, y)
     return selector
 
-# Advanced model training with incremental learning
+# Enhanced model training with validation
 def train_model(df, crypto_symbol):
     try:
+        if df is None or len(df) < 200:
+            raise ValueError("Insufficient training data")
+            
         X = df[["SMA_50", "SMA_200", "RSI", "MACD", "OBV", "Volume_MA"]]
         y = np.where(df["Close"].shift(-1) > df["Close"], 1, 0).ravel()
+        
         split = int(0.8 * len(df))
         X_train, X_test = X.iloc[:split], X.iloc[split:]
         y_train, y_test = y[:split], y[split:]
 
-        # Feature selection
         selector = select_features(X_train, y_train)
         X_train_sel = selector.transform(X_train)
         X_test_sel = selector.transform(X_test)
 
-        # Model paths
+        # Model initialization
         rf_path = f"{SAVE_PATH}/{crypto_symbol}_model_rf.pkl"
         gb_path = f"{SAVE_PATH}/{crypto_symbol}_model_gb.pkl"
-
-        # Load or initialize models
+        
+        # Random Forest
         model_rf = joblib.load(rf_path) if os.path.exists(rf_path) else None
-        model_gb = joblib.load(gb_path) if os.path.exists(gb_path) else None
-
-        # Random Forest training
         if model_rf:
             model_rf.n_estimators += INCREMENTAL_ESTIMATORS
             model_rf.fit(X_train_sel, y_train)
         else:
-            param_dist_rf = {
-                'n_estimators': [200, 300],
-                'max_depth': [15, 20, None],
-                'min_samples_split': [2, 5],
-                'class_weight': ['balanced']
-            }
             model_rf = RandomizedSearchCV(
-                RandomForestClassifier(n_jobs=-1),
-                param_dist_rf,
-                n_iter=3,
-                cv=3,
-                scoring='f1'
+                RandomForestClassifier(n_jobs=-1, class_weight='balanced'),
+                {
+                    'n_estimators': [200, 300],
+                    'max_depth': [15, 20, None],
+                    'min_samples_split': [2, 5]
+                },
+                n_iter=3, cv=3, scoring='f1'
             ).fit(X_train_sel, y_train).best_estimator_
 
-        # Gradient Boosting training
+        # Gradient Boosting
+        model_gb = joblib.load(gb_path) if os.path.exists(gb_path) else None
         if model_gb:
             model_gb.n_estimators += INCREMENTAL_ESTIMATORS
             model_gb.fit(X_train_sel, y_train)
         else:
-            param_dist_gb = {
-                'n_estimators': [200, 300],
-                'learning_rate': [0.05, 0.1],
-                'max_depth': [3, 5],
-                'subsample': [0.8, 1.0]
-            }
             model_gb = RandomizedSearchCV(
                 GradientBoostingClassifier(n_iter_no_change=5),
-                param_dist_gb,
-                n_iter=3,
-                cv=3,
-                scoring='f1'
+                {
+                    'n_estimators': [200, 300],
+                    'learning_rate': [0.05, 0.1],
+                    'max_depth': [3, 5],
+                    'subsample': [0.8, 1.0]
+                },
+                n_iter=3, cv=3, scoring='f1'
             ).fit(X_train_sel, y_train).best_estimator_
 
-        # Evaluate performance
+        # Validation
         y_pred = (model_rf.predict(X_test_sel) + model_gb.predict(X_test_sel)) // 2
         accuracy = accuracy_score(y_test, y_pred)
         f1 = f1_score(y_test, y_pred)
         
-        # Save updated models
         joblib.dump(model_rf, rf_path)
         joblib.dump(model_gb, gb_path)
         
         return model_rf, model_gb, selector, df, accuracy, f1
         
     except Exception as e:
-        st.error(f"Training error: {e}")
+        st.error(f"Training error: {str(e)}")
         return None, None, None, None, None, None
 
-# Enhanced price prediction with Monte Carlo simulation
-def generate_price_points(df, days=FORECAST_DAYS, simulations=100):
+# Robust price forecasting using GBM
+def generate_price_points(df, days=FORECAST_DAYS, simulations=SIMULATIONS):
     try:
         if df.empty or len(df) < 100:
             raise ValueError("Insufficient historical data")
             
-        # Calculate daily returns
-        returns = df['Close'].pct_change().dropna()
-        
-        # Simulation parameters
+        returns = np.log(df['Close']).diff().dropna()
         mu = returns.mean()
         sigma = returns.std()
         last_price = df['Close'].iloc[-1]
         
-        # Generate simulations
-        price_paths = []
-        for _ in range(simulations):
+        forecast = np.zeros((simulations, days))
+        for i in range(simulations):
             daily_returns = np.random.normal(mu, sigma, days)
-            price_path = last_price * (1 + daily_returns).cumprod()
-            price_paths.append(price_path)
+            price_path = last_price * np.exp(np.cumsum(daily_returns))
+            forecast[i] = price_path
         
-        # Calculate percentiles
-        forecast = np.percentile(price_paths, [10, 50, 90], axis=0)
-        return forecast[-1]  # Return median forecast
+        return pd.DataFrame({
+            'Day': range(1, days+1),
+            'Median': np.median(forecast, axis=0),
+            'Upper': np.percentile(forecast, 95, axis=0),
+            'Lower': np.percentile(forecast, 5, axis=0)
+        })
         
     except Exception as e:
-        st.error(f"Price prediction error: {e}")
-        return None
+        st.error(f"Forecast error: {str(e)}")
+        return pd.DataFrame()
 
-# Enhanced trading logic
+# Trading logic with comprehensive validation
 def calculate_trade_levels(df, selector, model_rf, model_gb):
     try:
-        # Prepare features
         features = ["SMA_50", "SMA_200", "RSI", "MACD", "OBV", "Volume_MA"]
         X = selector.transform(df[features][-30:])
         
-        # Generate predictions
-        rf_pred = model_rf.predict_proba(X)[:, 1]
-        gb_pred = model_gb.predict_proba(X)[:, 1]
-        combined_confidence = (rf_pred + gb_pred) / 2
+        rf_proba = model_rf.predict_proba(X)[:, 1]
+        gb_proba = model_gb.predict_proba(X)[:, 1]
+        confidence = np.mean((rf_proba + gb_proba) / 2)
         
-        # Calculate dynamic ATR
-        high_low = df['High'].iloc[-14:].values - df['Low'].iloc[-14:].values
-        atr = float(np.mean(high_low))
+        high = df['High'].iloc[-14:].values
+        low = df['Low'].iloc[-14:].values
+        atr = float(np.mean(high - low))
         
-        # Current market state
-        current_price = float(df['Close'].iloc[-1].item())
-        sma_trend = bool(df['SMA_50'].iloc[-1].item() > df['SMA_200'].iloc[-1].item())
+        current_price = float(df['Close'].iloc[-1])
+        sma_trend = bool(df['SMA_50'].iloc[-1] > df['SMA_200'].iloc[-1])
         
-        # Generate price forecast
-        price_forecast = generate_price_points(df)
-        if price_forecast is None:
-            raise ValueError("Failed to generate price forecast")
+        forecast = generate_price_points(df)
+        if forecast.empty:
+            raise ValueError("Price forecast failed")
         
-        # Risk management parameters
-        confidence = float(np.mean(combined_confidence))
         risk_multiplier = 1.5 if confidence > 0.7 else 1.0
+        stop_loss = current_price - (atr * 1.5 * risk_multiplier)
+        take_profit = current_price + (atr * 2.0 * risk_multiplier)
         
-        if sma_trend:
-            stop_loss = current_price - (atr * 1.2 * risk_multiplier)
-            take_profit = current_price + (atr * 2.5 * risk_multiplier)
-        else:
-            stop_loss = current_price + (atr * 1.2 * risk_multiplier)
-            take_profit = current_price - (atr * 2.5 * risk_multiplier)
-            
         return {
             'entry': current_price,
             'stop_loss': stop_loss,
             'take_profit': take_profit,
-            'forecast': price_forecast,
+            'forecast': forecast,
             'confidence': confidence,
             'trend': 'Bullish' if sma_trend else 'Bearish'
         }
     except Exception as e:
-        st.error(f"Trade calculation error: {e}")
+        st.error(f"Trade error: {str(e)}")
         return None
 
-# Streamlit UI
+# Streamlit UI with robust data handling
 def main():
     st.title("🚀 AI Crypto Trading System")
     
-    # User inputs
     crypto_symbol = st.sidebar.text_input("Crypto Pair", "BTC-USD")
-    auto_refresh = st.sidebar.checkbox("Enable Live Updates", True)
+    auto_refresh = st.sidebar.checkbox("Live Updates", True)
     
-    # Load data
     df = load_data(crypto_symbol)
     if df is None:
         st.stop()
     
-    # Model training section
-    if st.button("🔄 Refresh Analysis") or auto_refresh:
-        with st.spinner("Optimizing trading models..."):
-            model_rf, model_gb, selector, df, accuracy, f1 = train_model(df, crypto_symbol)
-            
+    if st.button("🔄 Refresh") or auto_refresh:
+        with st.spinner("Analyzing market..."):
+            model_rf, model_gb, selector, df, acc, f1 = train_model(df, crypto_symbol)
+        
         if model_rf and model_gb:
-            # Display performance metrics
-            col1, col2 = st.columns(2)
-            col1.metric("Model Accuracy", f"{accuracy:.2%}")
-            col2.metric("F1 Score", f"{f1:.2%}")
+            st.subheader("📊 Performance Metrics")
+            cols = st.columns(2)
+            cols[0].metric("Accuracy", f"{acc:.2%}")
+            cols[1].metric("F1 Score", f"{f1:.2%}")
             
-            # Show trading signals
             levels = calculate_trade_levels(df, selector, model_rf, model_gb)
             if levels:
                 st.subheader("📈 Trading Signals")
                 
+                # Price Levels
                 cols = st.columns(3)
                 cols[0].metric("Current Price", f"${levels['entry']:.2f}")
-                cols[1].metric("Stop Loss", f"${levels['stop_loss']:.2f}", delta_color="inverse")
+                cols[1].metric("Stop Loss", f"${levels['stop_loss']:.2f}", 
+                              delta_color="inverse")
                 cols[2].metric("Take Profit", f"${levels['take_profit']:.2f}")
                 
-                # Display price forecast
+                # Forecast Visualization
                 st.subheader("🔮 Price Forecast")
-                forecast_df = pd.DataFrame({
-                    'Day': range(1, FORECAST_DAYS+1),
-                    'Predicted Price': levels['forecast']
-                })
-                st.line_chart(forecast_df.set_index('Day'))
+                st.line_chart(levels['forecast'].set_index('Day'))
                 
+                # Confidence Indicator
                 st.progress(levels['confidence'])
                 st.caption(f"Model Confidence: {levels['confidence']:.2%}")
                 
+                # Trend Analysis
                 if levels['trend'] == 'Bullish':
-                    st.success("📈 Bullish Trend Detected - Long Position Recommended")
+                    st.success("📈 Bullish Trend Detected")
                 else:
-                    st.warning("📉 Bearish Trend Detected - Short Position Recommended")
+                    st.warning("📉 Bearish Market Conditions")
     
-    # Live market data
+    # Live market feed with error resilience
     try:
         live_data = yf.download(crypto_symbol, period='1d', interval='1m')
-        if not live_data.empty:
+        if not live_data.empty and len(live_data) > 1:
             st.subheader("🔴 Live Market Feed")
             current = live_data.iloc[-1]
             prev = live_data.iloc[-2]
             
-            # Convert to native Python types
-            current_close = current['Close'].item()
-            prev_close = prev['Close'].item()
-            current_vol = int(current['Volume'].item())
-            prev_vol = int(prev['Volume'].item())
-            high_24h = live_data['High'].max().item()
-            low_24h = live_data['Low'].min().item()
+            # Price metrics
+            price_now = current['Close']
+            price_change = price_now - prev['Close']
+            
+            # Volume metrics
+            vol_now = current['Volume'] or 0
+            vol_prev = prev['Volume'] or 0
+            vol_change = vol_now - vol_prev
             
             cols = st.columns(4)
-            cols[0].metric("Price", f"${current_close:.2f}", f"{current_close - prev_close:.2f}")
-            cols[1].metric("Volume", f"{current_vol:,}", f"{current_vol - prev_vol:,}")
-            cols[2].metric("24H High", f"${high_24h:.2f}")
-            cols[3].metric("24H Low", f"${low_24h:.2f}")
+            cols[0].metric("Price", f"${price_now:.2f}", f"{price_change:.2f}")
+            cols[1].metric("Volume", f"{vol_now:,.0f}", 
+                          f"{vol_change:+,.0f}" if vol_change >=0 else f"({-vol_change:,.0f})")
+            cols[2].metric("24H High", f"${live_data['High'].max():.2f}")
+            cols[3].metric("24H Low", f"${live_data['Low'].min():.2f}")
     except Exception as e:
-        st.error(f"Live data error: {str(e)}")
+        st.error(f"Live feed error: {str(e)}")
 
-    # Auto-refresh logic
     if auto_refresh:
         time.sleep(300)
         st.rerun()

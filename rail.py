@@ -63,7 +63,7 @@ def load_enhanced_data(symbol, interval="1d", period="5y"):
             df[f"Return_{lag}d"] = df["Close"].pct_change(lag)
             df[f"Volatility_{lag}d"] = df["Close"].pct_change().rolling(lag).std()
         
-        # Target variable with explicit 1D conversion
+        # Target variable
         future_returns = df["Close"].pct_change(THRESHOLD_DAYS).shift(-THRESHOLD_DAYS)
         df["Target"] = np.where(future_returns > 0.015, 1, 0).astype(np.int32).flatten()
         
@@ -71,13 +71,10 @@ def load_enhanced_data(symbol, interval="1d", period="5y"):
         df["RSI_Volume"] = df["rsi"] * df["volume_adi"]
         df["MACD_Signal_Ratio"] = df["macd"] / (df["macd_signal"] + 1e-10)
         
-        # Clean data and ensure 1D target
+        # Clean data
         df = df.dropna().iloc[-MAX_DATA_POINTS:]
         df = df.astype(np.float32)
         
-        if df["Target"].ndim != 1:
-            df["Target"] = df["Target"].squeeze()
-            
         return df
     
     except Exception as e:
@@ -95,14 +92,8 @@ def train_enhanced_model(df, crypto_symbol):
         if df is None or len(df) < 300:
             raise ValueError("Insufficient training data")
             
-        # Explicit 1D conversion for target
-        y = np.ravel(df["Target"].values)
         X = df.drop(columns=["Target"])
-        
-        # Validation check
-        if y.ndim != 1:
-            st.error(f"Invalid target shape: {y.shape}. Must be 1D.")
-            return None, None, None, None
+        y = np.ravel(df["Target"].values)
         
         tscv = TimeSeriesSplit(n_splits=3)
         feature_pipeline = create_feature_pipeline()
@@ -173,12 +164,14 @@ def generate_enhanced_forecast(df):
         volatility = returns.rolling(21).std().iloc[-1]
         last_price = df['Close'].iloc[-1].item()
         
+        # Fixed parentheses closure
         simulations = np.exp(
             np.random.normal(
                 loc=0, 
                 scale=volatility, 
                 size=(SIMULATIONS, FORECAST_DAYS)
             ).cumsum(axis=1)
+        )  # Added closing parenthesis here
         
         price_paths = last_price * simulations
         

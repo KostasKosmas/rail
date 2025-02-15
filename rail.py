@@ -195,7 +195,7 @@ def main():
 
     # Generate price points for the next 15 minutes
     entry_point, stop_loss, take_profit, expected_profit_time = trade_levels["1d"]
-    future_dates = pd.date_range(data["1d"].index[-1], periods=15, freq="T")
+    future_dates = pd.date_range(data["1d"].index[-1], periods=15, freq="min")
     future_price_points = generate_price_points(data["1d"], entry_point, future_minutes=15)
     if future_price_points is None or len(future_price_points) == 0:
         st.error("❌ Failed to generate future price points.")

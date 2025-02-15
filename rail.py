@@ -235,8 +235,8 @@ def main():
     for timeframe, levels in trade_levels.items():
         if levels is not None:
             entry_point, stop_loss, take_profit, expected_profit_time = levels
-            now_utc = pd.Timestamp.utcnow().tz_convert(utc)
-            expected_profit_time_eet = (now_utc + pd.Timedelta(minutes=int(expected_profit_time))).tz_convert(timezone('Europe/Athens'))
+            now_utc = pd.Timestamp.utcnow().tz_localize(utc)
+            expected_profit_time_eet = (now_utc + pd.Timedelta(minutes=int(expected_profit_time))).astimezone(timezone('Europe/Athens'))
             st.write(f"⏰ {timeframe}:")
             st.write(f"✅ Entry Point: {entry_point:.2f}")
             st.write(f"🚨 Stop Loss: {stop_loss:.2f}")

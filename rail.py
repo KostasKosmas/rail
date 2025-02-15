@@ -191,8 +191,8 @@ def generate_price_points(df, entry_point, future_days=15):
 
 def main():
     timeframes = {
-        "1d": {"interval": "1d", "period": "1y"},
-        "1w": {"interval": "1wk", "period": "1y"},
+        "1d": {"interval": "1d", "period": "5y"},
+        "1w": {"interval": "1wk", "period": "5y"},
     }
     data = {}
     for timeframe, params in timeframes.items():
@@ -284,7 +284,7 @@ def main():
             if future_price_points and len(future_price_points) > 0:
                 predicted_price = future_price_points.pop(0)
                 if abs(predicted_price - actual_price) / actual_price > 0.001:  # 0.1% threshold
-                    df = load_data(crypto_symbol, interval="1d", period="1y")
+                    df = load_data(crypto_symbol, interval="1d", period="5y")
                     if df is None:
                         st.error(f"❌ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {crypto_symbol}.")
                         st.stop()

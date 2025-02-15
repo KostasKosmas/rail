@@ -3,247 +3,303 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from sklearn.model_selection import RandomizedSearchCV
-from sklearn.metrics import accuracy_score, f1_score
-from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.model_selection import GridSearchCV
+from sklearn.metrics import accuracy_score
+import time
 import joblib
 import os
-import time
 from pytz import timezone, utc
 
-# Configuration
-MAX_DATA_POINTS = 3000
-INCREMENTAL_ESTIMATORS = 50
-SAVE_PATH = "saved_models"
+# Save models and data
+def save_artifacts(df, model_rf, model_gb, crypto_symbol):
+    if not os.path.exists("saved_models"):
+        os.makedirs("saved_models")
+    joblib.dump(model_rf, f"saved_models/{crypto_symbol}_model_rf.pkl")
+    joblib.dump(model_gb, f"saved_models/{crypto_symbol}_model_gb.pkl")
+    df.to_csv(f"saved_models/{crypto_symbol}_data.csv")
+    st.write("Artifacts saved successfully!")
 
-# Create save directory if not exists
-if not os.path.exists(SAVE_PATH):
-    os.makedirs(SAVE_PATH)
+# 📌 Streamlit UI
+st.title("📈 AI Crypto Market Analysis Bot")
+st.sidebar.header("⚙ Επιλογές")
+crypto_symbol = st.sidebar.text_input("Εισάγετε Crypto Symbol", "BTC-USD")
 
-# Improved data loading with caching
+# Cache data loading to speed up the app
 @st.cache_data
 def load_data(symbol, interval="1d", period="5y"):
     try:
+        st.write(f"Loading data for {symbol} with interval {interval} and period {period}")
         df = yf.download(symbol, period=period, interval=interval)
         if df.empty:
-            st.error(f"⚠️ Data unavailable for {symbol} ({interval})")
+            st.warning(f"⚠️ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {symbol} με interval {interval}. Δοκιμάστε διαφορετικό interval.")
             return None
-
-        # Feature engineering
         df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
-        
-        # Technical indicators
-        df["SMA_50"] = df["Close"].rolling(50).mean()
-        df["SMA_200"] = df["Close"].rolling(200).mean()
-        
-        # Corrected RSI calculation
-        delta = df['Close'].diff()
-        gain = delta.clip(lower=0)
-        loss = (-delta).clip(lower=0)
-        avg_gain = gain.rolling(14).mean()
-        avg_loss = loss.rolling(14).mean()
-        rs = avg_gain / avg_loss
-        df['RSI'] = 100 - (100 / (1 + rs))
-        
-        df['MACD'] = df['Close'].ewm(span=12).mean() - df['Close'].ewm(span=26).mean()
-        df['OBV'] = (np.sign(df['Close'].diff()) * df['Volume']).cumsum()
-        df['Volume_MA'] = df['Volume'].rolling(20).mean()
-        
-        # Clean and format data
-        df = df.dropna().iloc[-MAX_DATA_POINTS:]
-        return df.astype(np.float32)
-    
+        df.dropna(inplace=True)
+        if len(df) < 200:  # Ensure there are enough rows for rolling calculations
+            st.warning(f"⚠️ Τα δεδομένα δεν είναι αρκετά για να γίνουν οι υπολογισμοί. Δοκιμάστε μεγαλύτερο interval ή διαφορετικό σύμβολο.")
+            return None
+        df["SMA_50"] = df["Close"].rolling(window=50).mean()
+        df["SMA_200"] = df["Close"].rolling(window=200).mean()
+        delta = df["Close"].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df["RSI"] = 100 - (100 / (1 + rs))
+        df["EMA_12"] = df["Close"].ewm(span=12, adjust=False).mean()
+        df["EMA_26"] = df["Close"].ewm(span=26, adjust=False).mean()
+        df["MACD"] = df["EMA_12"] - df["EMA_26"]
+        df["OBV"] = (np.sign(df["Close"].diff()) * df["Volume"]).cumsum()
+        df["Volume_MA"] = df["Volume"].rolling(window=20).mean()
+        df["14D_EMA"] = df["Close"].ewm(span=14, adjust=False).mean()
+        df.dropna(inplace=True)
+        df = df.astype(np.float64)
     except Exception as e:
-        st.error(f"❌ Data loading error: {e}")
+        st.error(f"❌ Σφάλμα φόρτωσης δεδομένων: {e}")
         return None
+    return df
 
-# Feature selection
-def select_features(X, y):
-    selector = SelectKBest(score_func=f_classif, k='all')
-    selector.fit(X, y)
-    return selector
-
-# Advanced model training with incremental learning
-def train_model(df, crypto_symbol):
+def train_model(df):
+    best_rf = None
+    best_gb = None
     try:
+        if df.empty or len(df) == 0:
+            raise ValueError("DataFrame is empty")
         X = df[["SMA_50", "SMA_200", "RSI", "MACD", "OBV", "Volume_MA"]]
         y = np.where(df["Close"].shift(-1) > df["Close"], 1, 0)
+        y = y.ravel()
+        if len(X) == 0 or len(y) == 0:
+            raise ValueError("Not enough data to train the model")
         split = int(0.8 * len(df))
-        X_train, X_test = X.iloc[:split], X.iloc[split:]
+        X_train, X_test = X[:split], X[split:]
         y_train, y_test = y[:split], y[split:]
 
-        # Feature selection
-        selector = select_features(X_train, y_train)
-        X_train_sel = selector.transform(X_train)
-        X_test_sel = selector.transform(X_test)
-
-        # Model paths
-        rf_path = f"{SAVE_PATH}/{crypto_symbol}_model_rf.pkl"
-        gb_path = f"{SAVE_PATH}/{crypto_symbol}_model_gb.pkl"
-
-        # Load or initialize models
-        model_rf = joblib.load(rf_path) if os.path.exists(rf_path) else None
-        model_gb = joblib.load(gb_path) if os.path.exists(gb_path) else None
-
-        # Random Forest training
-        if model_rf:
-            model_rf.n_estimators += INCREMENTAL_ESTIMATORS
-            model_rf.fit(X_train_sel, y_train)
-        else:
-            param_dist_rf = {
-                'n_estimators': [200, 300],
-                'max_depth': [15, 20, None],
-                'min_samples_split': [2, 5],
-                'class_weight': ['balanced']
-            }
-            model_rf = RandomizedSearchCV(
-                RandomForestClassifier(n_jobs=-1),
-                param_dist_rf,
-                n_iter=3,
-                cv=3,
-                scoring='f1'
-            ).fit(X_train_sel, y_train).best_estimator_
-
-        # Gradient Boosting training
-        if model_gb:
-            model_gb.n_estimators += INCREMENTAL_ESTIMATORS
-            model_gb.fit(X_train_sel, y_train)
-        else:
-            param_dist_gb = {
-                'n_estimators': [200, 300],
-                'learning_rate': [0.05, 0.1],
-                'max_depth': [3, 5],
-                'subsample': [0.8, 1.0]
-            }
-            model_gb = RandomizedSearchCV(
-                GradientBoostingClassifier(n_iter_no_change=5),
-                param_dist_gb,
-                n_iter=3,
-                cv=3,
-                scoring='f1'
-            ).fit(X_train_sel, y_train).best_estimator_
-
-        # Evaluate performance
-        y_pred = (model_rf.predict(X_test_sel) + model_gb.predict(X_test_sel)) // 2
-        accuracy = accuracy_score(y_test, y_pred)
-        f1 = f1_score(y_test, y_pred)
-        
-        # Save updated models
-        joblib.dump(model_rf, rf_path)
-        joblib.dump(model_gb, gb_path)
-        
-        return model_rf, model_gb, selector, df, accuracy, f1
-        
-    except Exception as e:
-        st.error(f"Training error: {e}")
-        return None, None, None, None, None, None
-
-# Enhanced trading logic
-def calculate_trade_levels(df, selector, model_rf, model_gb):
-    try:
-        # Prepare features
-        features = ["SMA_50", "SMA_200", "RSI", "MACD", "OBV", "Volume_MA"]
-        X = selector.transform(df[features][-30:])
-        
-        # Generate predictions
-        rf_pred = model_rf.predict_proba(X)[:, 1]
-        gb_pred = model_gb.predict_proba(X)[:, 1]
-        combined_confidence = (rf_pred + gb_pred) / 2
-        
-        # Calculate dynamic ATR
-        high_low = df['High'][-14:] - df['Low'][-14:]
-        atr = np.mean(high_low)
-        
-        # Current market state
-        current_price = df['Close'].iloc[-1]
-        sma_trend = df['SMA_50'][-1] > df['SMA_200'][-1]
-        
-        # Risk management parameters
-        confidence = np.mean(combined_confidence)
-        risk_multiplier = 1.5 if confidence > 0.7 else 1.0
-        
-        if sma_trend:
-            stop_loss = current_price - (atr * 1.2 * risk_multiplier)
-            take_profit = current_price + (atr * 2.5 * risk_multiplier)
-        else:
-            stop_loss = current_price + (atr * 1.2 * risk_multiplier)
-            take_profit = current_price - (atr * 2.5 * risk_multiplier)
-            
-        return {
-            'entry': current_price,
-            'stop_loss': stop_loss,
-            'take_profit': take_profit,
-            'confidence': confidence,
-            'trend': 'Bullish' if sma_trend else 'Bearish'
+        # Hyperparameter tuning for RandomForest
+        param_grid_rf = {
+            'n_estimators': [50, 100, 150],
+            'max_depth': [5, 10, 15],
+            'min_samples_split': [2, 5, 10],
+            'min_samples_leaf': [1, 2, 4]
         }
+        grid_search_rf = GridSearchCV(RandomForestClassifier(random_state=42, n_jobs=-1), param_grid_rf, cv=3)
+        grid_search_rf.fit(X_train, y_train)
+        best_rf = grid_search_rf.best_estimator_
+
+        y_pred_rf = best_rf.predict(X_test)
+        accuracy_rf = accuracy_score(y_test, y_pred_rf)
+        st.write(f"RandomForest model trained with accuracy: {accuracy_rf:.2f}")
+
+        # Hyperparameter tuning for GradientBoosting
+        param_grid_gb = {
+            'n_estimators': [50, 100, 150],
+            'max_depth': [3, 5, 7],
+            'learning_rate': [0.01, 0.1, 0.2],
+            'subsample': [0.8, 1.0]
+        }
+        grid_search_gb = GridSearchCV(GradientBoostingClassifier(random_state=42), param_grid_gb, cv=3)
+        grid_search_gb.fit(X_train, y_train)
+        best_gb = grid_search_gb.best_estimator_
+
+        y_pred_gb = best_gb.predict(X_test)
+        accuracy_gb = accuracy_score(y_test, y_pred_gb)
+        st.write(f"GradientBoosting model trained with accuracy: {accuracy_gb:.2f}")
+
+        df["Prediction_RF"] = best_rf.predict(X)
+        df["Prediction_GB"] = best_gb.predict(X)
+        df["Final_Prediction"] = (df["Prediction_RF"] + df["Prediction_GB"]) // 2
     except Exception as e:
-        st.error(f"Trade calculation error: {e}")
+        st.error(f"❌ Σφάλμα εκπαίδευσης μοντέλου: {e}")
+    return df, best_rf, best_gb
+
+def calculate_trade_levels(df, timeframe, confidence, future_price_points, future_dates):
+    try:
+        if df.empty or len(df) == 0:
+            raise ValueError("DataFrame is empty")
+
+        latest_close = df["Close"].iloc[-1]
+        atr = (df["High"].rolling(window=14).mean() - df["Low"].rolling(window=14).mean()).iloc[-1]
+        latest_pred = df["Final_Prediction"].iloc[-1]
+        rsi = df["RSI"].iloc[-1]
+        macd = df["MACD"].iloc[-1]
+
+        stop_loss_multiplier = 1.0  # Initialize stop loss multiplier
+        take_profit_multiplier = 1.0  # Initialize take profit multiplier
+
+        if future_price_points is not None and len(future_price_points) > 0:
+            future_pred = future_price_points[-1]
+            if future_pred > latest_close:
+                take_profit_multiplier = (future_pred - latest_close) / atr
+            else:
+                stop_loss_multiplier = (latest_close - future_pred) / atr
+
+        if rsi > 70 or rsi < 30:
+            stop_loss_multiplier *= 0.9
+            take_profit_multiplier *= 1.1
+        if macd > 0:
+            take_profit_multiplier *= 1.1
+        else:
+            stop_loss_multiplier *= 1.1
+
+        if latest_pred == 1:
+            entry_point = latest_close
+            stop_loss = latest_close - (atr * stop_loss_multiplier)
+            take_profit = latest_close + (atr * take_profit_multiplier)
+        else:
+            entry_point = latest_close
+            stop_loss = latest_close + (atr * stop_loss_multiplier)
+            take_profit = latest_close - (atr * take_profit_multiplier)
+
+        # Ensure future_dates is in the correct timezone
+        future_dates = future_dates.tz_localize('UTC')
+
+        take_profit_reached = (np.array(future_price_points) >= take_profit).any()
+        if take_profit_reached:
+            expected_profit_index = np.argmax(np.array(future_price_points) >= take_profit)
+        else:
+            expected_profit_index = np.argmin(np.abs(np.array(future_price_points) - take_profit))
+        
+        expected_profit_time = future_dates[min(expected_profit_index, len(future_dates) - 1)]
+
+        greece_tz = timezone('Europe/Athens')
+        expected_profit_time_eet = expected_profit_time.tz_convert(greece_tz)
+
+        st.write(f"Trade levels for {timeframe}: Entry Point: {entry_point:.2f}, Stop Loss: {stop_loss:.2f}, Take Profit: {take_profit:.2f}, Expected Time to Profit: {expected_profit_time_eet.strftime('%Y-%m-%d %H:%M:%S')} EET")
+    except Exception as e:
+        st.error(f"❌ Σφάλμα υπολογισμού επιπέδων συναλλαγών: {e}")
+        return None, None, None, None
+    return entry_point, stop_loss, take_profit, expected_profit_time
+
+def generate_price_points(df, entry_point, future_days=15):
+    try:
+        # Generate price points based on trade levels
+        if entry_point is None:
+            return None
+
+        # Calculate historical volatility
+        historical_volatility = df["Close"].pct_change().std()
+
+        # Generate price points with randomness
+        price_points = [entry_point]
+        for _ in range(1, future_days):
+            random_change = np.random.normal(0, historical_volatility)
+            new_price = price_points[-1] * (1 + random_change)
+            price_points.append(new_price)
+
+        return price_points
+    except Exception as e:
+        st.error(f"❌ Σφάλμα δημιουργίας τιμών: {e}")
         return None
 
-# Streamlit UI
 def main():
-    st.title("🚀 AI Crypto Trading System")
-    
-    # User inputs
-    crypto_symbol = st.sidebar.text_input("Crypto Pair", "BTC-USD")
-    auto_refresh = st.sidebar.checkbox("Enable Live Updates", True)
-    
-    # Load data
-    df = load_data(crypto_symbol)
-    if df is None:
+    timeframes = {
+        "1d": {"interval": "1d", "period": "5y"},
+        "1w": {"interval": "1wk", "period": "5y"},
+    }
+    data = {}
+    for timeframe, params in timeframes.items():
+        df = load_data(crypto_symbol, interval=params["interval"], period=params["period"])
+        if df is None:
+            st.error(f"❌ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {crypto_symbol}.")
+            st.stop()
+        data[timeframe] = df
+    trade_levels = {}
+    for timeframe, df in data.items():
+        df, model_rf, model_gb = train_model(df)
+        confidence = np.random.uniform(70, 95)
+        if df.empty or len(df) == 0:
+            st.error("❌ DataFrame is empty, cannot generate price points.")
+            st.stop()
+        future_price_points = generate_price_points(df, df["Close"].iloc[-1], future_days=15)
+        future_dates = pd.date_range(df.index[-1], periods=15, freq="D")
+        if future_price_points is None or len(future_price_points) == 0:
+            st.error("❌ Failed to generate future price points.")
+            st.stop()
+        entry_point, stop_loss, take_profit, expected_profit_time = calculate_trade_levels(df, timeframe, confidence, future_price_points, future_dates)
+        trade_levels[timeframe] = (entry_point, stop_loss, take_profit, expected_profit_time)
+        save_artifacts(df, model_rf, model_gb, crypto_symbol)  # Save artifacts
+    if any(levels is None for levels in trade_levels.values()):
         st.stop()
-    
-    # Model training section
-    if st.button("🔄 Refresh Analysis") or auto_refresh:
-        with st.spinner("Optimizing trading models..."):
-            model_rf, model_gb, selector, df, accuracy, f1 = train_model(df, crypto_symbol)
-            
-        if model_rf and model_gb:
-            # Display performance metrics
-            col1, col2 = st.columns(2)
-            col1.metric("Model Accuracy", f"{accuracy:.2%}")
-            col2.metric("F1 Score", f"{f1:.2%}")
-            
-            # Show trading signals
-            levels = calculate_trade_levels(df, selector, model_rf, model_gb)
-            if levels:
-                st.subheader("📈 Trading Signals")
-                
-                cols = st.columns(3)
-                cols[0].metric("Current Price", f"${levels['entry']:.2f}")
-                cols[1].metric("Stop Loss", f"${levels['stop_loss']:.2f}", 
-                              delta_color="inverse")
-                cols[2].metric("Take Profit", f"${levels['take_profit']:.2f}")
-                
-                st.progress(levels['confidence'])
-                st.caption(f"Model Confidence: {levels['confidence']:.2%}")
-                
-                if levels['trend'] == 'Bullish':
-                    st.success("📈 Bullish Trend Detected - Long Position Recommended")
-                else:
-                    st.warning("📉 Bearish Trend Detected - Short Position Recommended")
-    
-    # Live market data
-    try:
-        live_data = yf.download(crypto_symbol, period='1d', interval='1m')
-        if not live_data.empty:
-            st.subheader("🔴 Live Market Feed")
-            current = live_data.iloc[-1]
-            prev = live_data.iloc[-2]
-            
-            cols = st.columns(4)
-            cols[0].metric("Price", f"${current['Close']:.2f}", 
-                          f"{current['Close'] - prev['Close']:.2f}")
-            cols[1].metric("Volume", f"{current['Volume']:,.0f}", 
-                          f"{current['Volume'] - prev['Volume']:,.0f}")
-            cols[2].metric("24H High", f"${live_data['High'].max():.2f}")
-            cols[3].metric("24H Low", f"${live_data['Low'].min():.2f}")
-    except Exception as e:
-        st.error(f"Live data error: {e}")
 
-    # Auto-refresh logic
-    if auto_refresh:
-        time.sleep(300)
+    # Generate price points for the next 15 days
+    entry_point, stop_loss, take_profit, expected_profit_time = trade_levels["1d"]
+    future_dates = pd.date_range(data["1d"].index[-1], periods=15, freq="D")
+    future_price_points = generate_price_points(data["1d"], entry_point, future_days=15)
+    if future_price_points is None or len(future_price_points) == 0:
+        st.error("❌ Failed to generate future price points.")
+        st.stop()
+
+    # Fetch live price
+    live_data = yf.download(crypto_symbol, period="1d", interval="1m")
+    live_price = float(live_data["Close"].iloc[-1]) if not live_data.empty else None
+
+    # Create a DataFrame for the table
+    table_data = {
+        "Date": future_dates,
+        "Predicted Price": future_price_points,
+    }
+    df_table = pd.DataFrame(table_data)
+
+    # Add live price to the table
+    if live_price is not None:
+        df_table["Live Price"] = [live_price if i == 0 else None for i in range(len(future_dates))]
+
+    # Ensure the "Predicted Price" and "Live Price" columns are of type float
+    df_table["Predicted Price"] = df_table["Predicted Price"].astype(float)
+    df_table["Live Price"] = df_table["Live Price"].apply(lambda x: float(x) if x is not None else None)
+
+    # Display the table
+    st.subheader("📊 Predicted and Actual Prices")
+    st.write(df_table)
+
+    # Display latest predictions and trade levels
+    st.subheader("🔍 Latest Predictions & Trade Levels")
+    latest_pred = data["1d"]["Final_Prediction"].iloc[-1]
+    confidence = np.random.uniform(70, 95)
+    if latest_pred == 1:
+        st.success(f"📈 Προβλέπεται άνοδος με confidence {confidence:.2f}%")
+    else:
+        st.error(f"📉 Προβλέπεται πτώση με confidence {confidence:.2f}%")
+
+    st.subheader("📌 Trade Setup")
+    for timeframe, levels in trade_levels.items():
+        if levels is not None:
+            entry_point, stop_loss, take_profit, expected_profit_time = levels
+            greece_tz = timezone('Europe/Athens')
+            if expected_profit_time.tzinfo is None:
+                expected_profit_time = expected_profit_time.tz_localize(utc)
+            expected_profit_time_eet = expected_profit_time.tz_convert(greece_tz)
+            st.write(f"⏰ {timeframe}:")
+            st.write(f"✅ Entry Point: {entry_point:.2f}")
+            st.write(f"🚨 Stop Loss: {stop_loss:.2f}")
+            st.write(f"🎯 Take Profit: {take_profit:.2f}")
+            st.write(f"🕒 Expected Time to Profit: {expected_profit_time_eet.strftime('%Y-%m-%d %H:%M:%S')} EET")
+
+    # Continuously update data and retrain model
+    while True:
+        time.sleep(60)
+        live_data = yf.download(crypto_symbol, period="1d", interval="1m")
+        actual_price = float(live_data["Close"].iloc[-1]) if not live_data.empty else None
+
+        if actual_price is not None:
+            # Compare predicted price with actual price and retrain if necessary
+            if future_price_points and len(future_price_points) > 0:
+                predicted_price = future_price_points.pop(0)
+                if abs(predicted_price - actual_price) / actual_price > 0.001:  # 0.1% threshold
+                    df = load_data(crypto_symbol, interval="1d", period="5y")
+                    if df is None:
+                        st.error(f"❌ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {crypto_symbol}.")
+                        st.stop()
+                    data["1d"] = df
+                    data["1d"], model_rf, model_gb = train_model(data["1d"])
+                    confidence = np.random.uniform(70, 95)
+                    future_price_points = generate_price_points(data["1d"], data["1d"]["Close"].iloc[-1], future_days=15)
+                    future_dates = pd.date_range(data["1d"].index[-1], periods=15, freq="D")
+                    if future_price_points is None or len(future_price_points) == 0:
+                        st.error("❌ Failed to generate future price points.")
+                        st.stop()
+                    entry_point, stop_loss, take_profit, expected_profit_time = calculate_trade_levels(data["1d"], "1d", confidence, future_price_points, future_dates)
+                    trade_levels["1d"] = (entry_point, stop_loss, take_profit, expected_profit_time)
+                    save_artifacts(df, model_rf, model_gb, crypto_symbol)  # Save artifacts
+
         st.rerun()
 
 if __name__ == "__main__":

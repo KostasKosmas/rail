@@ -75,10 +75,10 @@ def train_model(df):
 
         # Hyperparameter tuning for RandomForest
         param_grid_rf = {
-            'n_estimators': [50, 100],
-            'max_depth': [5, 10],
-            'min_samples_split': [2, 5],
-            'min_samples_leaf': [1, 2]
+            'n_estimators': [50, 100, 150],
+            'max_depth': [5, 10, 15],
+            'min_samples_split': [2, 5, 10],
+            'min_samples_leaf': [1, 2, 4]
         }
         grid_search_rf = GridSearchCV(RandomForestClassifier(random_state=42, n_jobs=-1), param_grid_rf, cv=3)
         grid_search_rf.fit(X_train, y_train)
@@ -90,9 +90,9 @@ def train_model(df):
 
         # Hyperparameter tuning for GradientBoosting
         param_grid_gb = {
-            'n_estimators': [50, 100],
-            'max_depth': [3, 5],
-            'learning_rate': [0.01, 0.1],
+            'n_estimators': [50, 100, 150],
+            'max_depth': [3, 5, 7],
+            'learning_rate': [0.01, 0.1, 0.2],
             'subsample': [0.8, 1.0]
         }
         grid_search_gb = GridSearchCV(GradientBoostingClassifier(random_state=42), param_grid_gb, cv=3)

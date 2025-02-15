@@ -125,7 +125,7 @@ def calculate_trade_levels(df, timeframe, confidence, future_price_points):
         st.write(f"Future Price Points: {future_price_points}")
 
         if future_price_points is not None and len(future_price_points) > 0:
-            future_pred = future_price_points[-1]
+            future_pred = float(future_price_points[-1])
             st.write(f"Future Prediction: {future_pred}")
             if future_pred > latest_close:
                 take_profit_multiplier = (future_pred - latest_close) / atr
@@ -149,7 +149,7 @@ def calculate_trade_levels(df, timeframe, confidence, future_price_points):
             stop_loss = latest_close + (atr * stop_loss_multiplier)
             take_profit = latest_close - (atr * take_profit_multiplier)
         
-        expected_profit_time = np.argmin(np.abs(np.array(future_price_points) - take_profit))
+        expected_profit_time = np.argmin(np.abs(np.array(future_price_points, dtype=float) - take_profit))
 
         st.write(f"Trade levels for {timeframe}: Entry Point: {entry_point:.2f}, Stop Loss: {stop_loss:.2f}, Take Profit: {take_profit:.2f}, Expected Time to Profit: {expected_profit_time} minutes")
     except Exception as e:

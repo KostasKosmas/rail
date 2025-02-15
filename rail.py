@@ -61,16 +61,20 @@ def train_model(df):
         split = int(0.8 * len(df))
         X_train, X_test = X[:split], X[split:]
         y_train, y_test = y[:split], y[split:]
-        model_rf = RandomForestClassifier(n_estimators=50, max_depth=5, random_state=42)
+        
+        # Reduce the number of estimators and limit the depth of trees
+        model_rf = RandomForestClassifier(n_estimators=20, max_depth=3, random_state=42, n_jobs=-1)
         model_rf.fit(X_train, y_train)
         y_pred_rf = model_rf.predict(X_test)
         accuracy_rf = accuracy_score(y_test, y_pred_rf)
         st.write(f"RandomForest model trained with accuracy: {accuracy_rf:.2f}")
-        model_gb = GradientBoostingClassifier(n_estimators=50, max_depth=5, random_state=42)
+        
+        model_gb = GradientBoostingClassifier(n_estimators=20, max_depth=3, random_state=42)
         model_gb.fit(X_train, y_train)
         y_pred_gb = model_gb.predict(X_test)
         accuracy_gb = accuracy_score(y_test, y_pred_gb)
         st.write(f"GradientBoosting model trained with accuracy: {accuracy_gb:.2f}")
+        
         df["Prediction_RF"] = model_rf.predict(X)
         df["Prediction_GB"] = model_gb.predict(X)
         df["Final_Prediction"] = (df["Prediction_RF"] + df["Prediction_GB"]) // 2

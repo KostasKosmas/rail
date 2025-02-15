@@ -169,9 +169,10 @@ def main():
     for timeframe, df in data.items():
         df, model_rf, model_gb = train_model(df)
         confidence = np.random.uniform(70, 95)
-        trade_levels[timeframe] = calculate_trade_levels(df, timeframe, confidence)
+        entry_point, stop_loss, take_profit = calculate_trade_levels(df, timeframe, confidence)
+        trade_levels[timeframe] = (entry_point, stop_loss, take_profit)
         save_artifacts(df, model_rf, model_gb, crypto_symbol)  # Save artifacts
-    if any(None in levels for levels in trade_levels.values()):
+    if any(levels is None for levels in trade_levels.values()):
         st.stop()
 
     # Generate price points for the next 15 minutes
@@ -217,10 +218,11 @@ def main():
     st.subheader("📌 Trade Setup")
     for timeframe, levels in trade_levels.items():
         if levels is not None:
+            entry_point, stop_loss, take_profit = levels
             st.write(f"⏰ {timeframe}:")
-            st.write(f"✅ Entry Point: {levels[0]:.2f}")
-            st.write(f"🚨 Stop Loss: {levels[1]:.2f}")
-            st.write(f"🎯 Take Profit: {levels[2]:.2f}")
+            st.write(f"✅ Entry Point: {entry_point:.2f}")
+            st.write(f"🚨 Stop Loss: {stop_loss:.2f}")
+            st.write(f"🎯 Take Profit: {take_profit:.2f}")
 
     # Continuously update data and retrain model
     while True:

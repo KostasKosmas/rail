@@ -3,6 +3,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.model_selection import GridSearchCV, cross_val_score
 from sklearn.metrics import accuracy_score
 import time
 import joblib
@@ -62,25 +63,38 @@ def train_model(df):
         X_train, X_test = X[:split], X[split:]
         y_train, y_test = y[:split], y[split:]
         
-        # Reduce the number of estimators and limit the depth of trees
-        model_rf = RandomForestClassifier(n_estimators=20, max_depth=3, random_state=42, n_jobs=-1)
-        model_rf.fit(X_train, y_train)
-        y_pred_rf = model_rf.predict(X_test)
+        # Hyperparameter tuning for RandomForest
+        param_grid_rf = {
+            'n_estimators': [20, 50, 100],
+            'max_depth': [3, 5, 7]
+        }
+        grid_search_rf = GridSearchCV(RandomForestClassifier(random_state=42, n_jobs=-1), param_grid_rf, cv=3)
+        grid_search_rf.fit(X_train, y_train)
+        best_rf = grid_search_rf.best_estimator_
+        
+        y_pred_rf = best_rf.predict(X_test)
         accuracy_rf = accuracy_score(y_test, y_pred_rf)
         st.write(f"RandomForest model trained with accuracy: {accuracy_rf:.2f}")
         
-        model_gb = GradientBoostingClassifier(n_estimators=20, max_depth=3, random_state=42)
-        model_gb.fit(X_train, y_train)
-        y_pred_gb = model_gb.predict(X_test)
+        # Hyperparameter tuning for GradientBoosting
+        param_grid_gb = {
+            'n_estimators': [20, 50, 100],
+            'max_depth': [3, 5, 7]
+        }
+        grid_search_gb = GridSearchCV(GradientBoostingClassifier(random_state=42), param_grid_gb, cv=3)
+        grid_search_gb.fit(X_train, y_train)
+        best_gb = grid_search_gb.best_estimator_
+        
+        y_pred_gb = best_gb.predict(X_test)
         accuracy_gb = accuracy_score(y_test, y_pred_gb)
         st.write(f"GradientBoosting model trained with accuracy: {accuracy_gb:.2f}")
         
-        df["Prediction_RF"] = model_rf.predict(X)
-        df["Prediction_GB"] = model_gb.predict(X)
+        df["Prediction_RF"] = best_rf.predict(X)
+        df["Prediction_GB"] = best_gb.predict(X)
         df["Final_Prediction"] = (df["Prediction_RF"] + df["Prediction_GB"]) // 2
     except Exception as e:
         st.error(f"❌ Σφάλμα εκπαίδευσης μοντέλου: {e}")
-    return df, model_rf, model_gb
+    return df, best_rf, best_gb
 
 def calculate_trade_levels(df, timeframe, confidence):
     try:

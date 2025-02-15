@@ -35,6 +35,9 @@ def load_data(symbol, interval="1d", period="1y"):
             return None
         df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
         df.dropna(inplace=True)
+        if len(df) < 200:  # Ensure there are enough rows for rolling calculations
+            st.warning(f"⚠️ Τα δεδομένα δεν είναι αρκετά για να γίνουν οι υπολογισμοί. Δοκιμάστε μεγαλύτερο interval ή διαφορετικό σύμβολο.")
+            return None
         df["SMA_50"] = df["Close"].rolling(window=50).mean()
         df["SMA_200"] = df["Close"].rolling(window=200).mean()
         delta = df["Close"].diff()
@@ -59,9 +62,13 @@ def train_model(df):
     best_rf = None
     best_gb = None
     try:
+        if df.empty or len(df) == 0:
+            raise ValueError("DataFrame is empty")
         X = df[["SMA_50", "SMA_200", "RSI", "MACD", "OBV", "Volume_MA"]]
         y = np.where(df["Close"].shift(-1) > df["Close"], 1, 0)
         y = y.ravel()
+        if len(X) == 0 or len(y) == 0:
+            raise ValueError("Not enough data to train the model")
         split = int(0.8 * len(df))
         X_train, X_test = X[:split], X[split:]
         y_train, y_test = y[:split], y[split:]

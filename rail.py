@@ -26,7 +26,7 @@ crypto_symbol = st.sidebar.text_input("Εισάγετε Crypto Symbol", "BTC-USD
 
 # Cache data loading to speed up the app
 @st.cache_data
-def load_data(symbol, interval="1d", period="5y"):
+def load_data(symbol, interval="1d", period="1y"):
     try:
         st.write(f"Loading data for {symbol} with interval {interval} and period {period}")
         df = yf.download(symbol, period=period, interval=interval)
@@ -66,10 +66,10 @@ def train_model(df):
 
         # Hyperparameter tuning for RandomForest
         param_grid_rf = {
-            'n_estimators': [50, 100, 200],
-            'max_depth': [5, 10, 20],
-            'min_samples_split': [2, 5, 10],
-            'min_samples_leaf': [1, 2, 4]
+            'n_estimators': [50, 100],
+            'max_depth': [5, 10],
+            'min_samples_split': [2, 5],
+            'min_samples_leaf': [1, 2]
         }
         grid_search_rf = GridSearchCV(RandomForestClassifier(random_state=42, n_jobs=-1), param_grid_rf, cv=3)
         grid_search_rf.fit(X_train, y_train)
@@ -81,9 +81,9 @@ def train_model(df):
 
         # Hyperparameter tuning for GradientBoosting
         param_grid_gb = {
-            'n_estimators': [50, 100, 200],
-            'max_depth': [3, 5, 7],
-            'learning_rate': [0.01, 0.1, 0.2],
+            'n_estimators': [50, 100],
+            'max_depth': [3, 5],
+            'learning_rate': [0.01, 0.1],
             'subsample': [0.8, 1.0]
         }
         grid_search_gb = GridSearchCV(GradientBoostingClassifier(random_state=42), param_grid_gb, cv=3)
@@ -139,8 +139,10 @@ def calculate_trade_levels(df, timeframe, confidence, future_price_points, futur
         # Ensure future_dates is in the correct timezone
         future_dates = future_dates.tz_localize('UTC')
 
-        expected_profit_index = np.argmax(np.array(future_price_points) >= take_profit)
-        if not (np.array(future_price_points) >= take_profit).any():
+        take_profit_reached = (np.array(future_price_points) >= take_profit).any()
+        if take_profit_reached:
+            expected_profit_index = np.argmax(np.array(future_price_points) >= take_profit)
+        else:
             expected_profit_index = np.argmin(np.abs(np.array(future_price_points) - take_profit))
         
         expected_profit_time = future_dates[expected_profit_index]
@@ -177,8 +179,8 @@ def generate_price_points(df, entry_point, future_days=15):
 
 def main():
     timeframes = {
-        "1d": {"interval": "1d", "period": "5y"},
-        "1w": {"interval": "1wk", "period": "5y"},
+        "1d": {"interval": "1d", "period": "1y"},
+        "1w": {"interval": "1wk", "period": "1y"},
     }
     data = {}
     for timeframe, params in timeframes.items():
@@ -267,7 +269,7 @@ def main():
             if future_price_points and len(future_price_points) > 0:
                 predicted_price = future_price_points.pop(0)
                 if abs(predicted_price - actual_price) / actual_price > 0.001:  # 0.1% threshold
-                    df = load_data(crypto_symbol, interval="1d", period="5y")
+                    df = load_data(crypto_symbol, interval="1d", period="1y")
                     if df is None:
                         st.error(f"❌ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {crypto_symbol}.")
                         st.stop()

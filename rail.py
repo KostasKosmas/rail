@@ -115,7 +115,7 @@ def calculate_trade_levels(df, timeframe, confidence):
         entry_point, stop_loss, take_profit = None, None, None
     return entry_point, stop_loss, take_profit
 
-def generate_price_points(entry_point, stop_loss, take_profit, future_days=14):
+def generate_price_points(df, entry_point, stop_loss, take_profit, future_days=14):
     try:
         # Generate price points based on trade levels
         if entry_point is None or stop_loss is None or take_profit is None:
@@ -160,7 +160,7 @@ def main():
     # Generate price points for the next 14 days
     entry_point, stop_loss, take_profit = trade_levels["1d"]
     future_dates = pd.date_range(data["1d"].index[-1], periods=14, freq="D")
-    future_price_points = generate_price_points(entry_point, stop_loss, take_profit)
+    future_price_points = generate_price_points(data["1d"], entry_point, stop_loss, take_profit)  # Pass df here
     if future_price_points is None:
         st.error("❌ Failed to generate future price points.")
         st.stop()

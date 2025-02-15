@@ -15,6 +15,7 @@ from pytz import timezone, utc
 MAX_DATA_POINTS = 3000
 INCREMENTAL_ESTIMATORS = 50
 SAVE_PATH = "saved_models"
+FORECAST_DAYS = 15
 
 # Create save directory if not exists
 if not os.path.exists(SAVE_PATH):
@@ -36,7 +37,7 @@ def load_data(symbol, interval="1d", period="5y"):
         df["SMA_50"] = df["Close"].rolling(50).mean()
         df["SMA_200"] = df["Close"].rolling(200).mean()
         
-        # Corrected RSI calculation
+        # RSI calculation
         delta = df['Close'].diff()
         gain = delta.clip(lower=0)
         loss = (-delta).clip(lower=0)
@@ -138,7 +139,36 @@ def train_model(df, crypto_symbol):
         st.error(f"Training error: {e}")
         return None, None, None, None, None, None
 
-# Enhanced trading logic with explicit scalar conversion
+# Enhanced price prediction with Monte Carlo simulation
+def generate_price_points(df, days=FORECAST_DAYS, simulations=100):
+    try:
+        if df.empty or len(df) < 100:
+            raise ValueError("Insufficient historical data")
+            
+        # Calculate daily returns
+        returns = df['Close'].pct_change().dropna()
+        
+        # Simulation parameters
+        mu = returns.mean()
+        sigma = returns.std()
+        last_price = df['Close'].iloc[-1]
+        
+        # Generate simulations
+        price_paths = []
+        for _ in range(simulations):
+            daily_returns = np.random.normal(mu, sigma, days)
+            price_path = last_price * (1 + daily_returns).cumprod()
+            price_paths.append(price_path)
+        
+        # Calculate percentiles
+        forecast = np.percentile(price_paths, [10, 50, 90], axis=0)
+        return forecast[-1]  # Return median forecast
+        
+    except Exception as e:
+        st.error(f"Price prediction error: {e}")
+        return None
+
+# Enhanced trading logic
 def calculate_trade_levels(df, selector, model_rf, model_gb):
     try:
         # Prepare features
@@ -150,13 +180,18 @@ def calculate_trade_levels(df, selector, model_rf, model_gb):
         gb_pred = model_gb.predict_proba(X)[:, 1]
         combined_confidence = (rf_pred + gb_pred) / 2
         
-        # Calculate dynamic ATR with explicit scalar conversion
+        # Calculate dynamic ATR
         high_low = df['High'].iloc[-14:].values - df['Low'].iloc[-14:].values
         atr = float(np.mean(high_low))
         
-        # Current market state with proper scalar extraction
+        # Current market state
         current_price = float(df['Close'].iloc[-1].item())
         sma_trend = bool(df['SMA_50'].iloc[-1].item() > df['SMA_200'].iloc[-1].item())
+        
+        # Generate price forecast
+        price_forecast = generate_price_points(df)
+        if price_forecast is None:
+            raise ValueError("Failed to generate price forecast")
         
         # Risk management parameters
         confidence = float(np.mean(combined_confidence))
@@ -173,6 +208,7 @@ def calculate_trade_levels(df, selector, model_rf, model_gb):
             'entry': current_price,
             'stop_loss': stop_loss,
             'take_profit': take_profit,
+            'forecast': price_forecast,
             'confidence': confidence,
             'trend': 'Bullish' if sma_trend else 'Bearish'
         }
@@ -180,7 +216,7 @@ def calculate_trade_levels(df, selector, model_rf, model_gb):
         st.error(f"Trade calculation error: {e}")
         return None
 
-# Streamlit UI with robust value handling
+# Streamlit UI
 def main():
     st.title("🚀 AI Crypto Trading System")
     
@@ -211,9 +247,16 @@ def main():
                 
                 cols = st.columns(3)
                 cols[0].metric("Current Price", f"${levels['entry']:.2f}")
-                cols[1].metric("Stop Loss", f"${levels['stop_loss']:.2f}", 
-                             delta_color="inverse")
+                cols[1].metric("Stop Loss", f"${levels['stop_loss']:.2f}", delta_color="inverse")
                 cols[2].metric("Take Profit", f"${levels['take_profit']:.2f}")
+                
+                # Display price forecast
+                st.subheader("🔮 Price Forecast")
+                forecast_df = pd.DataFrame({
+                    'Day': range(1, FORECAST_DAYS+1),
+                    'Predicted Price': levels['forecast']
+                })
+                st.line_chart(forecast_df.set_index('Day'))
                 
                 st.progress(levels['confidence'])
                 st.caption(f"Model Confidence: {levels['confidence']:.2%}")
@@ -223,7 +266,7 @@ def main():
                 else:
                     st.warning("📉 Bearish Trend Detected - Short Position Recommended")
     
-    # Live market data with explicit scalar conversion
+    # Live market data
     try:
         live_data = yf.download(crypto_symbol, period='1d', interval='1m')
         if not live_data.empty:
@@ -231,19 +274,17 @@ def main():
             current = live_data.iloc[-1]
             prev = live_data.iloc[-2]
             
-            # Convert to native Python types using .item()
+            # Convert to native Python types
             current_close = current['Close'].item()
             prev_close = prev['Close'].item()
-            current_vol = current['Volume'].item()
-            prev_vol = prev['Volume'].item()
+            current_vol = int(current['Volume'].item())
+            prev_vol = int(prev['Volume'].item())
             high_24h = live_data['High'].max().item()
             low_24h = live_data['Low'].min().item()
             
             cols = st.columns(4)
-            cols[0].metric("Price", f"${current_close:.2f}", 
-                          f"{current_close - prev_close:.2f}")
-            cols[1].metric("Volume", f"{current_vol:,}", 
-                          f"{current_vol - prev_vol:,}")
+            cols[0].metric("Price", f"${current_close:.2f}", f"{current_close - prev_close:.2f}")
+            cols[1].metric("Volume", f"{current_vol:,}", f"{current_vol - prev_vol:,}")
             cols[2].metric("24H High", f"${high_24h:.2f}")
             cols[3].metric("24H Low", f"${low_24h:.2f}")
     except Exception as e:

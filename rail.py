@@ -146,10 +146,10 @@ def calculate_trade_levels(df, timeframe, confidence, future_price_points):
         return None, None, None, None
     return entry_point, stop_loss, take_profit, expected_profit_time
 
-def generate_price_points(df, entry_point, stop_loss, take_profit, future_minutes=15):
+def generate_price_points(df, entry_point, future_minutes=15):
     try:
         # Generate price points based on trade levels
-        if entry_point is None or stop_loss is None or take_profit is None:
+        if entry_point is None:
             return None
 
         # Calculate historical volatility
@@ -183,7 +183,10 @@ def main():
     for timeframe, df in data.items():
         df, model_rf, model_gb = train_model(df)
         confidence = np.random.uniform(70, 95)
-        future_price_points = generate_price_points(df, df["Close"].iloc[-1], None, None, future_minutes=15)
+        future_price_points = generate_price_points(df, df["Close"].iloc[-1], future_minutes=15)
+        if future_price_points is None:
+            st.error("❌ Failed to generate future price points.")
+            st.stop()
         entry_point, stop_loss, take_profit, expected_profit_time = calculate_trade_levels(df, timeframe, confidence, future_price_points)
         trade_levels[timeframe] = (entry_point, stop_loss, take_profit, expected_profit_time)
         save_artifacts(df, model_rf, model_gb, crypto_symbol)  # Save artifacts
@@ -193,7 +196,7 @@ def main():
     # Generate price points for the next 15 minutes
     entry_point, stop_loss, take_profit, expected_profit_time = trade_levels["1d"]
     future_dates = pd.date_range(data["1d"].index[-1], periods=15, freq="min")
-    future_price_points = generate_price_points(data["1d"], entry_point, stop_loss, take_profit, future_minutes=15)
+    future_price_points = generate_price_points(data["1d"], entry_point, future_minutes=15)
     if future_price_points is None:
         st.error("❌ Failed to generate future price points.")
         st.stop()
@@ -248,19 +251,23 @@ def main():
         
         if actual_price is not None:
             # Compare predicted price with actual price and retrain if necessary
-            predicted_price = future_price_points.pop(0)
-            if abs(predicted_price - actual_price) / actual_price > 0.001:  # 0.1% threshold
-                df = load_data(crypto_symbol, interval="1d", period="5y")
-                if df is None:
-                    st.error(f"❌ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {crypto_symbol}.")
-                    st.stop()
-                data["1d"] = df
-                data["1d"], model_rf, model_gb = train_model(data["1d"])
-                confidence = np.random.uniform(70, 95)
-                future_price_points = generate_price_points(data["1d"], data["1d"]["Close"].iloc[-1], None, None, future_minutes=15)
-                entry_point, stop_loss, take_profit, expected_profit_time = calculate_trade_levels(data["1d"], "1d", confidence, future_price_points)
-                trade_levels["1d"] = (entry_point, stop_loss, take_profit, expected_profit_time)
-                save_artifacts(df, model_rf, model_gb, crypto_symbol)  # Save artifacts
+            if future_price_points:
+                predicted_price = future_price_points.pop(0)
+                if abs(predicted_price - actual_price) / actual_price > 0.001:  # 0.1% threshold
+                    df = load_data(crypto_symbol, interval="1d", period="5y")
+                    if df is None:
+                        st.error(f"❌ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {crypto_symbol}.")
+                        st.stop()
+                    data["1d"] = df
+                    data["1d"], model_rf, model_gb = train_model(data["1d"])
+                    confidence = np.random.uniform(70, 95)
+                    future_price_points = generate_price_points(data["1d"], data["1d"]["Close"].iloc[-1], future_minutes=15)
+                    if future_price_points is None:
+                        st.error("❌ Failed to generate future price points.")
+                        st.stop()
+                    entry_point, stop_loss, take_profit, expected_profit_time = calculate_trade_levels(data["1d"], "1d", confidence, future_price_points)
+                    trade_levels["1d"] = (entry_point, stop_loss, take_profit, expected_profit_time)
+                    save_artifacts(df, model_rf, model_gb, crypto_symbol)  # Save artifacts
 
         st.rerun()
 

@@ -133,7 +133,7 @@ def calculate_trade_levels(df, timeframe, confidence):
         entry_point, stop_loss, take_profit = None, None, None
     return entry_point, stop_loss, take_profit
 
-def generate_price_points(df, entry_point, stop_loss, take_profit, future_days=14):
+def generate_price_points(df, entry_point, stop_loss, take_profit, future_minutes=15):
     try:
         # Generate price points based on trade levels
         if entry_point is None or stop_loss is None or take_profit is None:
@@ -144,7 +144,7 @@ def generate_price_points(df, entry_point, stop_loss, take_profit, future_days=1
 
         # Generate price points with randomness
         price_points = [entry_point]
-        for _ in range(1, future_days):
+        for _ in range(1, future_minutes):
             random_change = np.random.normal(0, historical_volatility)
             new_price = price_points[-1] * (1 + random_change)
             price_points.append(new_price)
@@ -175,10 +175,10 @@ def main():
     if any(None in levels for levels in trade_levels.values()):
         st.stop()
 
-    # Generate price points for the next 14 days
+    # Generate price points for the next 15 minutes
     entry_point, stop_loss, take_profit = trade_levels["1d"]
-    future_dates = pd.date_range(data["1d"].index[-1], periods=14, freq="D")
-    future_price_points = generate_price_points(data["1d"], entry_point, stop_loss, take_profit)  # Pass df here
+    future_dates = pd.date_range(data["1d"].index[-1], periods=15, freq="T")
+    future_price_points = generate_price_points(data["1d"], entry_point, stop_loss, take_profit, future_minutes=15)
     if future_price_points is None:
         st.error("❌ Failed to generate future price points.")
         st.stop()
@@ -225,15 +225,23 @@ def main():
     # Continuously update data and retrain model
     while True:
         time.sleep(60)
-        df = load_data(crypto_symbol, interval="1d", period="5y")
-        if df is None:
-            st.error(f"❌ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {crypto_symbol}.")
-            st.stop()
-        data["1d"] = df
-        data["1d"], model_rf, model_gb = train_model(data["1d"])
-        confidence = np.random.uniform(70, 95)
-        trade_levels["1d"] = calculate_trade_levels(data["1d"], "1d", confidence)
-        save_artifacts(df, model_rf, model_gb, crypto_symbol)  # Save artifacts
+        live_data = yf.download(crypto_symbol, period="1d", interval="1m")
+        actual_price = live_data["Close"].iloc[-1] if not live_data.empty else None
+        
+        if actual_price is not None:
+            # Compare predicted price with actual price and retrain if necessary
+            predicted_price = future_price_points.pop(0)
+            if abs(predicted_price - actual_price) / actual_price > 0.01:  # 1% threshold
+                df = load_data(crypto_symbol, interval="1d", period="5y")
+                if df is None:
+                    st.error(f"❌ Τα δεδομένα δεν είναι διαθέσιμα για το σύμβολο {crypto_symbol}.")
+                    st.stop()
+                data["1d"] = df
+                data["1d"], model_rf, model_gb = train_model(data["1d"])
+                confidence = np.random.uniform(70, 95)
+                trade_levels["1d"] = calculate_trade_levels(data["1d"], "1d", confidence)
+                save_artifacts(df, model_rf, model_gb, crypto_symbol)  # Save artifacts
+
         st.rerun()
 
 if __name__ == "__main__":

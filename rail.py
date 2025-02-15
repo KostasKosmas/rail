@@ -96,7 +96,7 @@ def train_model(df):
         st.error(f"❌ Σφάλμα εκπαίδευσης μοντέλου: {e}")
     return df, best_rf, best_gb
 
-def calculate_trade_levels(df, timeframe, confidence):
+def calculate_trade_levels(df, timeframe, confidence, future_price_points):
     try:
         latest_close = df["Close"].iloc[-1]
         atr = (df["High"].rolling(window=14).mean() - df["Low"].rolling(window=14).mean()).iloc[-1]
@@ -111,15 +111,16 @@ def calculate_trade_levels(df, timeframe, confidence):
         rsi = float(rsi)
         macd = float(macd)
 
-        if confidence > 80:
-            stop_loss_multiplier = 1.2
-            take_profit_multiplier = 1.8
-        elif confidence > 60:
-            stop_loss_multiplier = 1.5
-            take_profit_multiplier = 2.0
-        else:
-            stop_loss_multiplier = 2.0
-            take_profit_multiplier = 2.5
+        stop_loss_multiplier = 1.0  # Initialize stop loss multiplier
+        take_profit_multiplier = 1.0  # Initialize take profit multiplier
+
+        if future_price_points:
+            future_pred = future_price_points[-1]
+            if future_pred > latest_close:
+                take_profit_multiplier = (future_pred - latest_close) / atr
+            else:
+                stop_loss_multiplier = (latest_close - future_pred) / atr
+
         if rsi > 70 or rsi < 30:
             stop_loss_multiplier *= 0.9
             take_profit_multiplier *= 1.1
@@ -127,6 +128,7 @@ def calculate_trade_levels(df, timeframe, confidence):
             take_profit_multiplier *= 1.1
         else:
             stop_loss_multiplier *= 1.1
+        
         if latest_pred == 1:
             entry_point = latest_close
             stop_loss = latest_close - (atr * stop_loss_multiplier)
@@ -136,11 +138,13 @@ def calculate_trade_levels(df, timeframe, confidence):
             stop_loss = latest_close + (atr * stop_loss_multiplier)
             take_profit = latest_close - (atr * take_profit_multiplier)
         
-        st.write(f"Trade levels for {timeframe}: Entry Point: {entry_point:.2f}, Stop Loss: {stop_loss:.2f}, Take Profit: {take_profit:.2f}")
+        expected_profit_time = np.argmin(np.abs(np.array(future_price_points) - take_profit))
+
+        st.write(f"Trade levels for {timeframe}: Entry Point: {entry_point:.2f}, Stop Loss: {stop_loss:.2f}, Take Profit: {take_profit:.2f}, Expected Time to Profit: {expected_profit_time} minutes")
     except Exception as e:
         st.error(f"❌ Σφάλμα υπολογισμού επιπέδων συναλλαγών: {e}")
-        return None, None, None
-    return entry_point, stop_loss, take_profit
+        return None, None, None, None
+    return entry_point, stop_loss, take_profit, expected_profit_time
 
 def generate_price_points(df, entry_point, stop_loss, take_profit, future_minutes=15):
     try:
@@ -179,15 +183,16 @@ def main():
     for timeframe, df in data.items():
         df, model_rf, model_gb = train_model(df)
         confidence = np.random.uniform(70, 95)
-        entry_point, stop_loss, take_profit = calculate_trade_levels(df, timeframe, confidence)
-        trade_levels[timeframe] = (entry_point, stop_loss, take_profit)
+        future_price_points = generate_price_points(df, df["Close"].iloc[-1], None, None, future_minutes=15)
+        entry_point, stop_loss, take_profit, expected_profit_time = calculate_trade_levels(df, timeframe, confidence, future_price_points)
+        trade_levels[timeframe] = (entry_point, stop_loss, take_profit, expected_profit_time)
         save_artifacts(df, model_rf, model_gb, crypto_symbol)  # Save artifacts
     if any(levels is None for levels in trade_levels.values()):
         st.stop()
 
     # Generate price points for the next 15 minutes
-    entry_point, stop_loss, take_profit = trade_levels["1d"]
-    future_dates = pd.date_range(data["1d"].index[-1], periods=15, freq="min")  # Changed "T" to "min"
+    entry_point, stop_loss, take_profit, expected_profit_time = trade_levels["1d"]
+    future_dates = pd.date_range(data["1d"].index[-1], periods=15, freq="min")
     future_price_points = generate_price_points(data["1d"], entry_point, stop_loss, take_profit, future_minutes=15)
     if future_price_points is None:
         st.error("❌ Failed to generate future price points.")
@@ -228,11 +233,12 @@ def main():
     st.subheader("📌 Trade Setup")
     for timeframe, levels in trade_levels.items():
         if levels is not None:
-            entry_point, stop_loss, take_profit = levels
+            entry_point, stop_loss, take_profit, expected_profit_time = levels
             st.write(f"⏰ {timeframe}:")
             st.write(f"✅ Entry Point: {entry_point:.2f}")
             st.write(f"🚨 Stop Loss: {stop_loss:.2f}")
             st.write(f"🎯 Take Profit: {take_profit:.2f}")
+            st.write(f"🕒 Expected Time to Profit: {expected_profit_time} minutes")
 
     # Continuously update data and retrain model
     while True:
@@ -251,8 +257,9 @@ def main():
                 data["1d"] = df
                 data["1d"], model_rf, model_gb = train_model(data["1d"])
                 confidence = np.random.uniform(70, 95)
-                entry_point, stop_loss, take_profit = calculate_trade_levels(data["1d"], "1d", confidence)
-                trade_levels["1d"] = (entry_point, stop_loss, take_profit)
+                future_price_points = generate_price_points(data["1d"], data["1d"]["Close"].iloc[-1], None, None, future_minutes=15)
+                entry_point, stop_loss, take_profit, expected_profit_time = calculate_trade_levels(data["1d"], "1d", confidence, future_price_points)
+                trade_levels["1d"] = (entry_point, stop_loss, take_profit, expected_profit_time)
                 save_artifacts(df, model_rf, model_gb, crypto_symbol)  # Save artifacts
 
         st.rerun()

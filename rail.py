@@ -66,8 +66,10 @@ def train_model(df):
 
         # Hyperparameter tuning for RandomForest
         param_grid_rf = {
-            'n_estimators': [20, 50, 100],
-            'max_depth': [3, 5, 7]
+            'n_estimators': [50, 100, 200],
+            'max_depth': [5, 10, 20],
+            'min_samples_split': [2, 5, 10],
+            'min_samples_leaf': [1, 2, 4]
         }
         grid_search_rf = GridSearchCV(RandomForestClassifier(random_state=42, n_jobs=-1), param_grid_rf, cv=3)
         grid_search_rf.fit(X_train, y_train)
@@ -79,8 +81,10 @@ def train_model(df):
 
         # Hyperparameter tuning for GradientBoosting
         param_grid_gb = {
-            'n_estimators': [20, 50, 100],
-            'max_depth': [3, 5, 7]
+            'n_estimators': [50, 100, 200],
+            'max_depth': [3, 5, 7],
+            'learning_rate': [0.01, 0.1, 0.2],
+            'subsample': [0.8, 1.0]
         }
         grid_search_gb = GridSearchCV(GradientBoostingClassifier(random_state=42), param_grid_gb, cv=3)
         grid_search_gb.fit(X_train, y_train)
@@ -109,7 +113,7 @@ def calculate_trade_levels(df, timeframe, confidence, future_price_points, futur
         take_profit_multiplier = 1.0  # Initialize take profit multiplier
 
         if future_price_points is not None and len(future_price_points) > 0:
-            future_pred = future_price_points[-1].item()
+            future_pred = future_price_points[-1]
             if future_pred > latest_close:
                 take_profit_multiplier = (future_pred - latest_close) / atr
             else:

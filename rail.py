@@ -63,7 +63,7 @@ def train_model(df):
         split = int(0.8 * len(df))
         X_train, X_test = X[:split], X[split:]
         y_train, y_test = y[:split], y[split:]
-        
+
         # Hyperparameter tuning for RandomForest
         param_grid_rf = {
             'n_estimators': [20, 50, 100],
@@ -72,11 +72,11 @@ def train_model(df):
         grid_search_rf = GridSearchCV(RandomForestClassifier(random_state=42, n_jobs=-1), param_grid_rf, cv=3)
         grid_search_rf.fit(X_train, y_train)
         best_rf = grid_search_rf.best_estimator_
-        
+
         y_pred_rf = best_rf.predict(X_test)
         accuracy_rf = accuracy_score(y_test, y_pred_rf)
         st.write(f"RandomForest model trained with accuracy: {accuracy_rf:.2f}")
-        
+
         # Hyperparameter tuning for GradientBoosting
         param_grid_gb = {
             'n_estimators': [20, 50, 100],
@@ -85,11 +85,11 @@ def train_model(df):
         grid_search_gb = GridSearchCV(GradientBoostingClassifier(random_state=42), param_grid_gb, cv=3)
         grid_search_gb.fit(X_train, y_train)
         best_gb = grid_search_gb.best_estimator_
-        
+
         y_pred_gb = best_gb.predict(X_test)
         accuracy_gb = accuracy_score(y_test, y_pred_gb)
         st.write(f"GradientBoosting model trained with accuracy: {accuracy_gb:.2f}")
-        
+
         df["Prediction_RF"] = best_rf.predict(X)
         df["Prediction_GB"] = best_gb.predict(X)
         df["Final_Prediction"] = (df["Prediction_RF"] + df["Prediction_GB"]) // 2
@@ -104,7 +104,7 @@ def calculate_trade_levels(df, timeframe, confidence, future_price_points):
         latest_pred = df["Final_Prediction"].iloc[-1]
         rsi = df["RSI"].iloc[-1].item()
         macd = df["MACD"].iloc[-1].item()
-        
+
         stop_loss_multiplier = 1.0  # Initialize stop loss multiplier
         take_profit_multiplier = 1.0  # Initialize take profit multiplier
 
@@ -122,7 +122,7 @@ def calculate_trade_levels(df, timeframe, confidence, future_price_points):
             take_profit_multiplier *= 1.1
         else:
             stop_loss_multiplier *= 1.1
-        
+
         if latest_pred == 1:
             entry_point = latest_close
             stop_loss = latest_close - (atr * stop_loss_multiplier)
@@ -131,7 +131,7 @@ def calculate_trade_levels(df, timeframe, confidence, future_price_points):
             entry_point = latest_close
             stop_loss = latest_close + (atr * stop_loss_multiplier)
             take_profit = latest_close - (atr * take_profit_multiplier)
-        
+
         expected_profit_time = np.argmin(np.abs(np.array(future_price_points, dtype=float) - take_profit))
 
         greece_tz = timezone('Europe/Athens')
@@ -235,7 +235,7 @@ def main():
     for timeframe, levels in trade_levels.items():
         if levels is not None:
             entry_point, stop_loss, take_profit, expected_profit_time = levels
-            now_utc = pd.Timestamp.utcnow().tz_localize(utc)
+            now_utc = pd.Timestamp.utcnow().tz_convert(utc)
             expected_profit_time_eet = (now_utc + pd.Timedelta(minutes=int(expected_profit_time))).tz_convert(timezone('Europe/Athens'))
             st.write(f"⏰ {timeframe}:")
             st.write(f"✅ Entry Point: {entry_point:.2f}")
@@ -248,7 +248,7 @@ def main():
         time.sleep(60)
         live_data = yf.download(crypto_symbol, period="1d", interval="1m")
         actual_price = float(live_data["Close"].iloc[-1]) if not live_data.empty else None
-        
+
         if actual_price is not None:
             # Compare predicted price with actual price and retrain if necessary
             if future_price_points and len(future_price_points) > 0:
@@ -272,4 +272,5 @@ def main():
         st.rerun()
 
 if __name__ == "__main__":
-    main ▋
+    main()
+``` ▋

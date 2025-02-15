@@ -1,3 +1,7 @@
+# First run these commands in your terminal:
+# pip install streamlit yfinance pandas numpy scikit-learn joblib
+# streamlit run crypto_trading.py
+
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -41,7 +45,7 @@ def load_data(symbol, interval="1d", period="5y"):
         loss = (-delta).clip(lower=0)
         avg_gain = gain.rolling(14).mean()
         avg_loss = loss.rolling(14).mean()
-        rs = avg_gain / (avg_loss + 1e-10)  # Avoid division by zero
+        rs = avg_gain / (avg_loss + 1e-10)
         df['RSI'] = 100 - (100 / (1 + rs))
         
         df['MACD'] = df['Close'].ewm(span=12).mean() - df['Close'].ewm(span=26).mean()
@@ -123,7 +127,7 @@ def generate_price_points(df, days=FORECAST_DAYS, simulations=SIMULATIONS):
         returns = np.log(df['Close']).diff().dropna()
         mu = returns.mean()
         sigma = returns.std()
-        last_price = df['Close'].iloc[-1].item()  # Fix 1: Use .item()
+        last_price = df['Close'].iloc[-1].item()
         
         forecast = np.zeros((days, simulations))
         for i in range(simulations):
@@ -136,7 +140,7 @@ def generate_price_points(df, days=FORECAST_DAYS, simulations=SIMULATIONS):
             'Median': np.median(forecast, axis=1),
             'Upper': np.percentile(forecast, 95, axis=1),
             'Lower': np.percentile(forecast, 5, axis=1)
-        }).reset_index(drop=True)  # Fix 2: Reset index
+        }).reset_index(drop=True)
         
     except Exception as e:
         st.error(f"Forecast error: {str(e)}")
@@ -153,9 +157,9 @@ def calculate_trade_levels(df, selector, model_rf, model_gb):
         
         high = df['High'].iloc[-14:].values
         low = df['Low'].iloc[-14:].values
-        atr = np.mean(high - low).item()  # Fix 3: Use .item()
+        atr = np.mean(high - low).item()
         
-        current_price = df['Close'].iloc[-1].item()  # Fix 4: Use .item()
+        current_price = df['Close'].iloc[-1].item()
         sma_trend = df['SMA_50'].iloc[-1].item() > df['SMA_200'].iloc[-1].item()
         
         forecast = generate_price_points(df)
@@ -220,7 +224,7 @@ def main():
     
     try:
         live_data = yf.download(crypto_symbol, period='1d', interval='1m')
-        if not live_data.empty and len(live_data) > 1:  # Fix 5: Proper empty check
+        if not live_data.empty and len(live_data) > 1:
             st.subheader("🔴 Live Market Feed")
             current = live_data.iloc[-1]
             prev = live_data.iloc[-2]

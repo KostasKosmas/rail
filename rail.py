@@ -103,6 +103,14 @@ def calculate_trade_levels(df, timeframe, confidence):
         latest_pred = df["Final_Prediction"].iloc[-1]
         rsi = df["RSI"].iloc[-1]
         macd = df["MACD"].iloc[-1]
+        
+        # Ensure values are scalar before formatting
+        latest_close = float(latest_close)
+        atr = float(atr)
+        latest_pred = int(latest_pred)
+        rsi = float(rsi)
+        macd = float(macd)
+
         if confidence > 80:
             stop_loss_multiplier = 1.2
             take_profit_multiplier = 1.8
@@ -127,11 +135,6 @@ def calculate_trade_levels(df, timeframe, confidence):
             entry_point = latest_close
             stop_loss = latest_close + (atr * stop_loss_multiplier)
             take_profit = latest_close - (atr * take_profit_multiplier)
-        
-        # Ensure values are scalar before formatting
-        entry_point = float(entry_point)
-        stop_loss = float(stop_loss)
-        take_profit = float(take_profit)
         
         st.write(f"Trade levels for {timeframe}: Entry Point: {entry_point:.2f}, Stop Loss: {stop_loss:.2f}, Take Profit: {take_profit:.2f}")
     except Exception as e:
@@ -184,7 +187,7 @@ def main():
 
     # Generate price points for the next 15 minutes
     entry_point, stop_loss, take_profit = trade_levels["1d"]
-    future_dates = pd.date_range(data["1d"].index[-1], periods=15, freq="T")
+    future_dates = pd.date_range(data["1d"].index[-1], periods=15, freq="min")  # Changed "T" to "min"
     future_price_points = generate_price_points(data["1d"], entry_point, stop_loss, take_profit, future_minutes=15)
     if future_price_points is None:
         st.error("❌ Failed to generate future price points.")
@@ -192,7 +195,7 @@ def main():
 
     # Fetch live price
     live_data = yf.download(crypto_symbol, period="1d", interval="1m")
-    live_price = live_data["Close"].iloc[-1] if not live_data.empty else None
+    live_price = float(live_data["Close"].iloc[-1]) if not live_data.empty else None
 
     # Create a DataFrame for the table
     table_data = {
@@ -203,7 +206,7 @@ def main():
 
     # Add live price to the table
     if live_price is not None:
-        df_table["Live Price"] = [float(live_price) if i == 0 else None for i in range(len(future_dates))]
+        df_table["Live Price"] = [live_price if i == 0 else None for i in range(len(future_dates))]
 
     # Ensure the "Predicted Price" and "Live Price" columns are of type float
     df_table["Predicted Price"] = df_table["Predicted Price"].astype(float)
@@ -235,7 +238,7 @@ def main():
     while True:
         time.sleep(60)
         live_data = yf.download(crypto_symbol, period="1d", interval="1m")
-        actual_price = live_data["Close"].iloc[-1] if not live_data.empty else None
+        actual_price = float(live_data["Close"].iloc[-1]) if not live_data.empty else None
         
         if actual_price is not None:
             # Compare predicted price with actual price and retrain if necessary
@@ -248,7 +251,8 @@ def main():
                 data["1d"] = df
                 data["1d"], model_rf, model_gb = train_model(data["1d"])
                 confidence = np.random.uniform(70, 95)
-                trade_levels["1d"] = calculate_trade_levels(data["1d"], "1d", confidence)
+                entry_point, stop_loss, take_profit = calculate_trade_levels(data["1d"], "1d", confidence)
+                trade_levels["1d"] = (entry_point, stop_loss, take_profit)
                 save_artifacts(df, model_rf, model_gb, crypto_symbol)  # Save artifacts
 
         st.rerun()

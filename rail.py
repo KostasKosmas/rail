@@ -1,5 +1,5 @@
 # crypto_trading_advanced.py
-# Install: pip install streamlit yfinance pandas numpy scikit-learn joblib ta arch
+# Install: pip install streamlit yfinance pandas numpy scikit-learn joblib ta
 
 import streamlit as st
 import yfinance as yf
@@ -19,8 +19,7 @@ from ta import add_all_ta_features
 from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.volatility import BollingerBands
 from ta.trend import MACD, ADXIndicator
-from ta.volume import MFIIndicator  # Corrected import
-from arch import arch_model
+from ta.volume import MFIIndicator
 
 # Configuration
 MAX_DATA_POINTS = 5000
@@ -28,7 +27,7 @@ INCREMENTAL_ESTIMATORS = 75
 SAVE_PATH = "saved_models"
 FORECAST_DAYS = 21
 SIMULATIONS = 1000
-THRESHOLD_DAYS = 3  # Days to look ahead for target prediction
+THRESHOLD_DAYS = 3
 
 # Auto-create model directory
 os.makedirs(SAVE_PATH, exist_ok=True)
@@ -36,16 +35,14 @@ os.makedirs(SAVE_PATH, exist_ok=True)
 @st.cache_data
 def load_enhanced_data(symbol, interval="1d", period="5y"):
     try:
-        # Updated yfinance download with explicit auto_adjust
         df = yf.download(symbol, period=period, interval=interval, auto_adjust=True)
         if df.empty or len(df) < 100:
             st.error(f"⚠️ Insufficient data for {symbol}")
             return None
 
-        # Calculate all technical indicators
         df = add_all_ta_features(df, open="Open", high="High", low="Low", close="Close", volume="Volume")
         
-        # Add custom indicators
+        # Custom indicators
         bb = BollingerBands(df["Close"])
         df["BB_upper"] = bb.bollinger_hband()
         df["BB_lower"] = bb.bollinger_lband()
@@ -55,7 +52,6 @@ def load_enhanced_data(symbol, interval="1d", period="5y"):
         df["Stoch_%K"] = stoch.stoch()
         df["Stoch_%D"] = stoch.stoch_signal()
         
-        # Corrected MFI calculation
         mfi = MFIIndicator(high=df["High"], low=df["Low"], close=df["Close"], volume=df["Volume"])
         df["MFI"] = mfi.money_flow_index()
         
@@ -67,11 +63,11 @@ def load_enhanced_data(symbol, interval="1d", period="5y"):
             df[f"Return_{lag}d"] = df["Close"].pct_change(lag)
             df[f"Volatility_{lag}d"] = df["Close"].pct_change().rolling(lag).std()
         
-        # Target: 3-day future return > 1.5%
+        # Target engineering
         future_returns = df["Close"].pct_change(THRESHOLD_DAYS).shift(-THRESHOLD_DAYS)
         df["Target"] = np.where(future_returns > 0.015, 1, 0)
         
-        # Feature engineering
+        # Feature combinations
         df["RSI_Volume"] = df["rsi"] * df["volume_adi"]
         df["MACD_Signal_Ratio"] = df["macd"] / (df["macd_signal"] + 1e-10)
         
@@ -98,7 +94,6 @@ def train_enhanced_model(df, crypto_symbol):
         tscv = TimeSeriesSplit(n_splits=3)
         feature_pipeline = create_feature_pipeline()
         
-        # Split data with time series awareness
         split = int(0.8 * len(df))
         X_train, X_test = X.iloc[:split], X.iloc[split:]
         y_train, y_test = y[:split], y[split:]
@@ -106,11 +101,8 @@ def train_enhanced_model(df, crypto_symbol):
         X_train_trans = feature_pipeline.fit_transform(X_train, y_train)
         X_test_trans = feature_pipeline.transform(X_test)
 
-        # Base models
         rf = RandomForestClassifier(n_jobs=-1, class_weight='balanced')
         gb = GradientBoostingClassifier(n_iter_no_change=10, validation_fraction=0.1)
-        
-        # Meta model
         meta = LogisticRegression()
         
         model_path = f"{SAVE_PATH}/{crypto_symbol}_stacked_model.pkl"
@@ -165,30 +157,26 @@ def train_enhanced_model(df, crypto_symbol):
 def generate_enhanced_forecast(df):
     try:
         returns = np.log(df['Close']).diff().dropna()
-        garch = arch_model(returns, vol='GARCH', p=1, q=1)
-        garch_fit = garch.fit(disp='off')
-        forecasts = garch_fit.forecast(horizon=FORECAST_DAYS)
-        
+        volatility = returns.rolling(21).std().iloc[-1]
         last_price = df['Close'].iloc[-1].item()
-        volatility = np.sqrt(forecasts.variance.values[-1,:][0])
         
         simulations = np.exp(np.random.normal(
             loc=0, 
             scale=volatility, 
             size=(SIMULATIONS, FORECAST_DAYS)
-        ).cumsum(axis=1))
+        ).cumsum(axis=1)
         
         price_paths = last_price * simulations
         
         return pd.DataFrame({
             'Day': range(1, FORECAST_DAYS+1),
             'Median': np.median(price_paths, axis=0),
-            'Upper_95': np.percentile(price_paths, 97.5, axis=0),
-            'Lower_95': np.percentile(price_paths, 2.5, axis=0),
+            'Upper_95': np.percentile(price_paths, 95, axis=0),
+            'Lower_95': np.percentile(price_paths, 5, axis=0),
             'Volatility': volatility
         })
     except Exception as e:
-        st.error(f"Advanced forecast error: {str(e)}")
+        st.error(f"Forecast error: {str(e)}")
         return pd.DataFrame()
 
 def calculate_risk_levels(df, model, pipeline):
@@ -251,10 +239,8 @@ def main():
                 
                 cols = st.columns(4)
                 cols[0].metric("Current Price", f"${levels['entry']:.2f}")
-                cols[1].metric("Stop Loss", f"${levels['stop_loss']:.2f}", 
-                              delta_color="inverse", help="Dynamic ATR-based stop loss")
-                cols[2].metric("Take Profit", f"${levels['take_profit']:.2f}",
-                               help="Volatility-adjusted profit target")
+                cols[1].metric("Stop Loss", f"${levels['stop_loss']:.2f}", delta_color="inverse")
+                cols[2].metric("Take Profit", f"${levels['take_profit']:.2f}")
                 cols[3].metric("Risk Score", f"{levels['confidence']:.2%}")
                 
                 st.subheader("📊 Market Conditions")
@@ -263,7 +249,7 @@ def main():
                 cond_cols[1].metric("Trend Strength", f"{levels['trend_strength']:.1f}/100")
                 cond_cols[2].metric("MFI Status", levels['mfi_status'])
                 
-                st.subheader("🔮 GARCH Volatility Forecast")
+                st.subheader("🔮 Price Forecast")
                 st.line_chart(forecast.set_index('Day')[['Median', 'Upper_95', 'Lower_95']])
                 
                 st.subheader("📉 Technical Overview")
@@ -271,10 +257,8 @@ def main():
                 
                 with tab1:
                     st.line_chart(df[['Close', 'BB_upper', 'BB_lower']].iloc[-100:])
-                
                 with tab2:
                     st.line_chart(df[['macd', 'macd_signal']].iloc[-100:])
-                
                 with tab3:
                     st.line_chart(df[['Stoch_%K', 'Stoch_%D']].iloc[-100:])
 
@@ -285,15 +269,11 @@ def main():
             current = live_data.iloc[-1]
             changes = live_data.pct_change().iloc[-1] * 100
             
-            metric_cols = st.columns(4)
-            metric_cols[0].metric("Price", f"${current['Close']:.2f}", 
-                                 f"{changes['Close']:.2f}%")
-            metric_cols[1].metric("Volume", f"{current['Volume']:,.0f}", 
-                                 f"{changes['Volume']:.2f}%")
-            metric_cols[2].metric("Spread", 
-                                 f"{(current['High'] - current['Low']):.2f}")
-            metric_cols[3].metric("VWAP", 
-                                 f"{np.sum(live_data['Close'] * live_data['Volume']) / np.sum(live_data['Volume']):.2f}")
+            cols = st.columns(4)
+            cols[0].metric("Price", f"${current['Close']:.2f}", f"{changes['Close']:.2f}%")
+            cols[1].metric("Volume", f"{current['Volume']:,.0f}", f"{changes['Volume']:.2f}%")
+            cols[2].metric("Spread", f"{(current['High'] - current['Low']):.2f}")
+            cols[3].metric("VWAP", f"{np.sum(live_data['Close'] * live_data['Volume']) / np.sum(live_data['Volume']):.2f}")
             
     except Exception as e:
         st.error(f"Live feed error: {str(e)}")

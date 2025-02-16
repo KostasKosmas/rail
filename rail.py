@@ -213,37 +213,45 @@ class TradingModel:
             X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
             y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
             
-            if not self.selected_features:
+            # Fix: Check length instead of truth value
+            if len(self.selected_features) == 0:
                 self.feature_selector = SelectFromModel(
                     RandomForestClassifier(n_estimators=100),
                     threshold="median"
                 )
-                X_train_sel = self.feature_selector.fit_transform(X_train, y_train)
+                self.feature_selector.fit(X_train, y_train)
                 self.selected_features = X_train.columns[self.feature_selector.get_support()]
-            else:
-                X_train_sel = X_train[self.selected_features]
+            
+            X_train_sel = X_train[self.selected_features]
+            X_test_sel = X_test[self.selected_features]
             
             X_res, y_res = self.smote.fit_resample(X_train_sel, y_train)
             
-            model.fit(X_res, y_res)
-            X_test_sel = X_test[self.selected_features]
+            sample_weights = compute_sample_weight(class_weight='balanced', y=y_res)
+            
+            model.fit(X_res, y_res, sample_weight=sample_weights)
             scores.append(f1_score(y_test, model.predict(X_test_sel)))
             
         return np.mean(scores)
 
     def train(self, X: pd.DataFrame, y: pd.Series):
         try:
-            self.feature_selector = SelectFromModel(
-                RandomForestClassifier(n_estimators=100),
-                threshold="median"
-            )
-            X_sel = self.feature_selector.fit_transform(X, y)
-            self.selected_features = X.columns[self.feature_selector.get_support()]
+            if len(self.selected_features) == 0:
+                self.feature_selector = SelectFromModel(
+                    RandomForestClassifier(n_estimators=100),
+                    threshold="median"
+                )
+                self.feature_selector.fit(X, y)
+                self.selected_features = X.columns[self.feature_selector.get_support()]
+            
+            X_sel = X[self.selected_features]
             
             X_res, y_res = self.smote.fit_resample(X_sel, y)
             
-            self.model_rf.fit(X_res, y_res)
-            self.model_gb.fit(X_res, y_res)
+            sample_weights = compute_sample_weight(class_weight='balanced', y=y_res)
+            
+            self.model_rf.fit(X_res, y_res, sample_weight=sample_weights)
+            self.model_gb.fit(X_res, y_res, sample_weight=sample_weights)
 
             self.calibrated_rf = CalibratedClassifierCV(
                 self.model_rf,

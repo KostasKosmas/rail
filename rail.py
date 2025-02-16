@@ -11,7 +11,7 @@ from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.feature_selection import SelectFromModel
 from sklearn.calibration import CalibratedClassifierCV
-from sklearn.metrics import f1_score
+from sklearn.metrics import precision_score
 from sklearn.utils.class_weight import compute_sample_weight
 from imblearn.over_sampling import SMOTE
 from datetime import datetime, timedelta
@@ -22,17 +22,14 @@ import warnings
 # ======================
 SYMBOL = 'BTC-USD'
 PRIMARY_INTERVAL = '15m'
-FALLBACK_INTERVAL = '60m'
-LOOKBACK_DAYS = 59
-FALLBACK_LOOKBACK = 180
-TRADE_THRESHOLD_BUY = 0.58
-TRADE_THRESHOLD_SELL = 0.42
-GARCH_WINDOW = 7
-MAX_TRIALS = 20
+TRADE_THRESHOLD_BUY = 0.65  # Higher threshold for fewer but more accurate signals
+TRADE_THRESHOLD_SELL = 0.35
+MAX_TRIALS = 12  # Optimized trial count
+CV_SPLITS = 3
+FEATURE_SELECTION_THRESHOLD = "1.25*median"
 
 # Suppress warnings
 warnings.filterwarnings("ignore", category=UserWarning)
-warnings.filterwarnings("ignore", category=RuntimeWarning)
 logging.basicConfig(level=logging.INFO)
 
 # ======================
@@ -42,344 +39,220 @@ st.set_page_config(page_title="AI Trading System", layout="wide")
 st.title("🚀 AI-Powered Cryptocurrency Trading System")
 st.markdown("Real-time trading signals with machine learning and volatility modeling")
 
-# Initialize session state
 if 'model' not in st.session_state:
     st.session_state.model = None
-if 'last_trained' not in st.session_state:
-    st.session_state.last_trained = None
 if 'training_progress' not in st.session_state:
     st.session_state.training_progress = None
-if 'data_warning' not in st.session_state:
-    st.session_state.data_warning = None
 
 # ======================
-# DATA PIPELINE
+# OPTIMIZED DATA PIPELINE
 # ======================
 @st.cache_data(ttl=300, show_spinner="Fetching market data...")
-def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
-    """Smart data fetching with fallback mechanism"""
+def get_data() -> pd.DataFrame:
+    """Optimized data fetching with essential features only"""
     end = datetime.now()
-    max_days = 60 if interval in ['15m', '30m'] else 730
-    lookback = min(LOOKBACK_DAYS, max_days-1)
+    df = yf.download(
+        SYMBOL, 
+        start=end - timedelta(days=90),
+        end=end,
+        interval=PRIMARY_INTERVAL,
+        progress=False
+    ).ffill()
     
-    try:
-        df = yf.download(
-            symbol, 
-            start=end - timedelta(days=lookback),
-            end=end,
-            interval=interval,
-            progress=False,
-            auto_adjust=False
-        )
-        if df.empty: raise ValueError("Empty dataframe")
-        st.session_state.data_warning = None
-        return df
-    except Exception as e:
-        logging.warning(f"Primary interval failed: {str(e)}")
-        try:
-            df = yf.download(
-                symbol,
-                start=end - timedelta(days=FALLBACK_LOOKBACK),
-                end=end,
-                interval=FALLBACK_INTERVAL,
-                progress=False,
-                auto_adjust=False
-            )
-            st.session_state.data_warning = (
-                f"Using {FALLBACK_INTERVAL} data (last {FALLBACK_LOOKBACK} days) "
-                f"due to {interval} availability limits"
-            )
-            return df
-        except Exception as fallback_error:
-            logging.error(f"Fallback failed: {str(fallback_error)}")
-            st.error("Data unavailable for all intervals")
-            return pd.DataFrame()
-
-def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Manual feature engineering without external dependencies"""
-    df = df.copy()
-    try:
-        # Price features
-        df['Returns'] = df['Close'].pct_change()
-        
-        # Simple Moving Averages
-        df['SMA_20'] = df['Close'].rolling(20).mean()
-        df['SMA_50'] = df['Close'].rolling(50).mean()
-        df['SMA_200'] = df['Close'].rolling(200).mean()
-        
-        # RSI Calculation
-        delta = df['Close'].diff()
-        gain = delta.where(delta > 0, 0).rolling(14).mean()
-        loss = -delta.where(delta < 0, 0).rolling(14).mean()
-        rs = gain / loss
-        df['RSI'] = 100 - (100 / (1 + rs))
-        
-        # MACD Calculation
-        ema12 = df['Close'].ewm(span=12, adjust=False).mean()
-        ema26 = df['Close'].ewm(span=26, adjust=False).mean()
-        df['MACD'] = ema12 - ema26
-        df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-        
-        # Bollinger Bands
-        df['BB_MA20'] = df['Close'].rolling(20).mean()
-        df['BB_STD20'] = df['Close'].rolling(20).std()
-        df['BB_Upper'] = df['BB_MA20'] + (df['BB_STD20'] * 2)
-        df['BB_Lower'] = df['BB_MA20'] - (df['BB_STD20'] * 2)
-        
-        # Volume Features
-        df['OBV'] = (np.sign(df['Close'].diff()) * df['Volume']).cumsum()
-        df['Volume_MA_20'] = df['Volume'].rolling(20).mean()
-        
-        # Volatility Calculation
-        returns = df['Returns'].dropna()
-        if len(returns) > 100:
-            try:
-                scaled_returns = returns * 1000
-                garch = arch_model(scaled_returns, vol='Garch', p=1, q=1, rescale=False)
-                garch_fit = garch.fit(disp='off', options={'maxiter': 500})
-                df['Volatility'] = garch_fit.conditional_volatility / 1000 * 100
-            except Exception:
-                df['Volatility'] = returns.rolling(GARCH_WINDOW).std() * 100
-        else:
-            df['Volatility'] = returns.rolling(GARCH_WINDOW).std() * 100
-        
-        # Target encoding
-        df['Target'] = (df['Returns'].shift(-1) > 0).astype(int)
-        
-        return df.dropna()
-    except Exception as e:
-        logging.error(f"Feature engineering failed: {str(e)}")
-        return pd.DataFrame()
+    # Feature engineering
+    df['Returns'] = df['Close'].pct_change()
+    df['SMA_20'] = df['Close'].rolling(20).mean()
+    df['RSI'] = 100 - (100 / (1 + df['Close'].diff().clip(lower=0).rolling(14).mean() / 
+                           df['Close'].diff().clip(upper=0).abs().rolling(14).mean()))
+    df['MACD'] = df['Close'].ewm(span=12).mean() - df['Close'].ewm(span=26).mean()
+    df['Volatility'] = df['Returns'].rolling(14).std() * np.sqrt(365)
+    df['Target'] = (df['Returns'].shift(-1) > 0).astype(int)
+    
+    return df.dropna()
 
 # ======================
-# MODEL PIPELINE
+# EFFICIENT MODEL PIPELINE
 # ======================
 class TradingModel:
     def __init__(self):
+        self.models = {}
         self.feature_selector = None
         self.selected_features = []
-        self.model_rf = RandomForestClassifier(
-            warm_start=True,
-            class_weight='balanced',
+        self.smote = SMOTE(random_state=42)
+        self.best_score = 0
+        self.calibrators = {}
+
+    def _feature_selection(self, X, y):
+        """Stable feature selection using model-based approach"""
+        self.feature_selector = SelectFromModel(
+            RandomForestClassifier(n_estimators=100, random_state=42),
+            threshold=FEATURE_SELECTION_THRESHOLD
+        )
+        self.feature_selector.fit(X, y)
+        self.selected_features = X.columns[self.feature_selector.get_support()]
+        return X[self.selected_features]
+
+    def optimize_model(self, X, y, model_type):
+        """Optimization with early stopping and time-series validation"""
+        def objective(trial):
+            model = self._create_model(trial, model_type)
+            tscv = TimeSeriesSplit(CV_SPLITS)
+            scores = []
+            
+            for train_idx, test_idx in tscv.split(X):
+                X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+                y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+                
+                # Handle class imbalance
+                X_res, y_res = self.smote.fit_resample(X_train, y_train)
+                
+                model.fit(X_res, y_res)
+                preds = model.predict(X_test)
+                scores.append(precision_score(y_test, preds))
+                
+            return np.mean(scores)
+        
+        study = optuna.create_study(direction='maximize')
+        study.optimize(
+            objective, 
+            n_trials=MAX_TRIALS,
+            timeout=600,
+            callbacks=[self._progress_callback(model_type)]
+        )
+        
+        if study.best_value > self.best_score:
+            self.best_score = study.best_value
+            self.models[model_type] = study.best_params
+            self._update_calibrator(X, y, model_type)
+
+    def _create_model(self, trial, model_type):
+        """Dynamic model creation with optimized parameter ranges"""
+        if model_type == 'rf':
+            return RandomForestClassifier(
+                n_estimators=trial.suggest_int('n_estimators', 200, 600),
+                max_depth=trial.suggest_int('max_depth', 10, 30),
+                min_samples_split=trial.suggest_int('min_samples_split', 5, 20),
+                class_weight='balanced',
+                random_state=42
+            )
+        return GradientBoostingClassifier(
+            n_estimators=trial.suggest_int('n_estimators', 200, 600),
+            learning_rate=trial.suggest_float('learning_rate', 0.05, 0.3),
+            max_depth=trial.suggest_int('max_depth', 3, 10),
+            subsample=trial.suggest_float('subsample', 0.7, 1.0),
             random_state=42
         )
-        self.model_gb = GradientBoostingClassifier(random_state=42)
-        self.calibrated_rf = None
-        self.calibrated_gb = None
-        self.progress = None
-        self.smote = SMOTE(random_state=42)
-        self.study_rf = None
-        self.study_gb = None
 
-    def _progress_callback(self, study, trial):
-        if self.progress:
-            current_model = "Random Forest" if study == self.study_rf else "Gradient Boosting"
-            completed = trial.number + 1
-            total = MAX_TRIALS
-            self.progress.progress(
-                completed / total,
-                text=(
-                    f"{current_model} Trial {completed}/{total} - "
-                    f"Best: {study.best_value:.2%}"
-                )
-            )
-
-    def optimize_hyperparameters(self, X: pd.DataFrame, y: pd.Series):
-        # Random Forest optimization
-        self.study_rf = optuna.create_study(direction='maximize')
-        self.study_rf.optimize(
-            lambda trial: self._rf_objective(trial, X, y), 
-            n_trials=MAX_TRIALS,
-            callbacks=[self._progress_callback]
+    def _update_calibrator(self, X, y, model_type):
+        """Calibrate model on hold-out set"""
+        X_train, X_cal, y_train, y_cal = train_test_split(
+            X, y, test_size=0.2, shuffle=False
         )
-        self.model_rf.set_params(**self.study_rf.best_params)
-
-        # Gradient Boosting optimization
-        self.study_gb = optuna.create_study(direction='maximize')
-        self.study_gb.optimize(
-            lambda trial: self._gb_objective(trial, X, y), 
-            n_trials=MAX_TRIALS,
-            callbacks=[self._progress_callback]
-        )
-        self.model_gb.set_params(**self.study_gb.best_params)
-
-    def _rf_objective(self, trial, X, y):
-        params = {
-            'n_estimators': trial.suggest_int('n_estimators', 200, 1000),
-            'max_depth': trial.suggest_int('max_depth', 10, 50),
-            'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
-            'max_features': trial.suggest_categorical('max_features', ['sqrt', 'log2', None]),
-        }
-        return self._cross_val_score(RandomForestClassifier(**params), X, y)
-
-    def _gb_objective(self, trial, X, y):
-        params = {
-            'n_estimators': trial.suggest_int('n_estimators', 200, 1000),
-            'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.3, log=True),
-            'max_depth': trial.suggest_int('max_depth', 3, 20),
-            'subsample': trial.suggest_float('subsample', 0.6, 1.0),
-        }
-        return self._cross_val_score(GradientBoostingClassifier(**params), X, y)
-
-    def _cross_val_score(self, model, X, y) -> float:
-        tscv = TimeSeriesSplit(n_splits=3)
-        scores = []
+        model = self._create_final_model(model_type)
+        model.fit(X_train, y_train)
         
-        for train_idx, test_idx in tscv.split(X):
-            X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
-            y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
-            
-            if len(self.selected_features) == 0:
-                self.feature_selector = SelectFromModel(
-                    RandomForestClassifier(n_estimators=100),
-                    threshold="median"
-                )
-                self.feature_selector.fit(X_train, y_train)
-                self.selected_features = X_train.columns[self.feature_selector.get_support()]
-                if len(self.selected_features) == 0:
-                    raise ValueError("Feature selection failed - no features selected!")
-            
-            X_train_sel = X_train[self.selected_features]
-            X_test_sel = X_test[self.selected_features]
-            
-            X_res, y_res = self.smote.fit_resample(X_train_sel, y_train)
-            
-            sample_weights = compute_sample_weight(class_weight='balanced', y=y_res)
-            
-            model.fit(X_res, y_res, sample_weight=sample_weights)
-            scores.append(f1_score(y_test, model.predict(X_test_sel)))
-            
-        return np.mean(scores)
+        self.calibrators[model_type] = CalibratedClassifierCV(
+            model, 
+            method='isotonic', 
+            cv='prefit'
+        ).fit(X_cal, y_cal)
 
-    def train(self, X: pd.DataFrame, y: pd.Series):
-        try:
-            if len(self.selected_features) == 0:
-                self.feature_selector = SelectFromModel(
-                    RandomForestClassifier(n_estimators=100),
-                    threshold="median"
-                )
-                self.feature_selector.fit(X, y)
-                self.selected_features = X.columns[self.feature_selector.get_support()]
-            
-            X_sel = X[self.selected_features]
-            
-            X_res, y_res = self.smote.fit_resample(X_sel, y)
-            
-            sample_weights = compute_sample_weight(class_weight='balanced', y=y_res)
-            
-            self.model_rf.fit(X_res, y_res, sample_weight=sample_weights)
-            self.model_gb.fit(X_res, y_res, sample_weight=sample_weights)
+    def _create_final_model(self, model_type):
+        """Create final model instance with best parameters"""
+        params = self.models[model_type]
+        if model_type == 'rf':
+            return RandomForestClassifier(**params)
+        return GradientBoostingClassifier(**params)
 
-            self.calibrated_rf = CalibratedClassifierCV(
-                self.model_rf,
-                method='isotonic',
-                cv=TimeSeriesSplit(3)
-            )
-            self.calibrated_gb = CalibratedClassifierCV(
-                self.model_gb,
-                method='sigmoid',
-                cv=TimeSeriesSplit(3)
-            )
-            self.calibrated_rf.fit(X_res, y_res)
-            self.calibrated_gb.fit(X_res, y_res)
-            
-        except Exception as e:
-            logging.error(f"Training failed: {str(e)}")
-            raise
+    def _progress_callback(self, model_type):
+        """Real-time progress updates with proper completion handling"""
+        def callback(study, trial):
+            if st.session_state.training_progress:
+                progress = (trial.number + 1) / MAX_TRIALS
+                text = (f"{model_type.upper()} Trial {trial.number + 1}/{MAX_TRIALS} - "
+                        f"Best Precision: {study.best_value:.2%}")
+                st.session_state.training_progress.progress(progress, text=text)
+                
+                if trial.number == MAX_TRIALS - 1:
+                    time.sleep(1)
+                    st.session_state.training_progress.progress(1.0, 
+                        f"{model_type.upper()} Optimization Complete!")
+        return callback
 
-    def predict(self, X: pd.DataFrame) -> float:
-        try:
-            X_sel = X[self.selected_features]
-            prob_rf = self.calibrated_rf.predict_proba(X_sel)[:, 1]
-            prob_gb = self.calibrated_gb.predict_proba(X_sel)[:, 1]
-            return 0.6 * prob_rf + 0.4 * prob_gb
-        except KeyError as e:
-            missing = list(set(self.selected_features) - set(X.columns))
-            logging.error(f"Missing features: {missing}")
-            raise ValueError(f"Required features missing: {missing}")
+    def predict(self, X):
+        """Ensemble prediction from both models"""
+        rf_proba = self.calibrators['rf'].predict_proba(X)[:, 1]
+        gb_proba = self.calibrators['gb'].predict_proba(X)[:, 1]
+        return 0.6 * rf_proba + 0.4 * gb_proba
 
 # ======================
 # STREAMLIT INTERFACE
 # ======================
 def main():
-    # Data section
-    raw_data = fetch_data(SYMBOL, PRIMARY_INTERVAL)
-    processed_data = calculate_features(raw_data)
+    df = get_data()
     
-    if st.session_state.data_warning:
-        st.warning(st.session_state.data_warning)
-    
-    if not processed_data.empty:
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            st.subheader("Price Chart")
-            st.line_chart(processed_data['Close'])
-            
-        with col2:
-            try:
-                current_price = processed_data['Close'].iloc[-1].item()
-                current_vol = processed_data['Volatility'].iloc[-1].item()
-                st.metric("Current Price", f"${current_price:,.2f}")
-                st.metric("24h Volatility", f"{current_vol:.2f}%")
-            except Exception as e:
-                st.error(f"Data display error: {str(e)}")
+    # Display market data
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.subheader("Price Chart")
+        st.line_chart(df['Close'])
+    with col2:
+        st.metric("Current Price", f"${df['Close'].iloc[-1]:.2f}")
+        st.metric("Volatility", f"{df['Volatility'].iloc[-1]:.2%}")
 
-    # Model training
-    st.sidebar.header("Model Controls")
-    if st.sidebar.button("🚀 Train New Model"):
-        if processed_data.empty:
-            st.error("No data available for training!")
+    # Model controls
+    if st.sidebar.button("🚀 Train Model"):
+        if len(df) < 100:
+            st.error("Insufficient data for training")
             return
             
         try:
             st.session_state.training_progress = st.progress(0, text="Initializing...")
             model = TradingModel()
-            model.progress = st.session_state.training_progress
             
-            X = processed_data.drop(['Target', 'Returns'], axis=1, errors='ignore')
-            y = processed_data['Target']
+            X = df.drop(['Target', 'Returns'], axis=1)
+            y = df['Target']
             
-            with st.spinner("Optimizing Models (This may take several minutes)..."):
-                model.optimize_hyperparameters(X, y)
-                model.train(X, y)
+            # Feature selection
+            with st.spinner("Selecting important features..."):
+                X_sel = model._feature_selection(X, y)
+            
+            # Optimize models
+            with st.spinner("Optimizing Random Forest..."):
+                model.optimize_model(X_sel, y, 'rf')
                 
+            with st.spinner("Optimizing Gradient Boosting..."):
+                model.optimize_model(X_sel, y, 'gb')
+            
             st.session_state.model = model
-            st.session_state.last_trained = datetime.now()
-            if st.session_state.training_progress:
-                st.session_state.training_progress.progress(1.0, "Training complete!")
-                time.sleep(1)
-                st.session_state.training_progress = None
-            st.success("Model trained successfully!")
+            st.success(f"Model trained successfully! Best Precision: {model.best_score:.2%}")
             
         except Exception as e:
             st.error(f"Training failed: {str(e)}")
-            if st.session_state.training_progress:
-                st.session_state.training_progress = None
+        finally:
+            time.sleep(1)
+            st.session_state.training_progress = None
 
     # Trading signals
-    if st.session_state.model and not processed_data.empty:
+    if st.session_state.model:
         try:
-            required_features = st.session_state.model.selected_features
-            latest_features = processed_data[required_features].iloc[[-1]]
+            X = df.drop(['Target', 'Returns'], axis=1)
+            X_sel = X[st.session_state.model.selected_features]
+            confidence = st.session_state.model.predict(X_sel.iloc[[-1]])[0]
             
-            prediction = st.session_state.model.predict(latest_features)[0]
             st.subheader("Trading Signal")
-            
             col1, col2, col3 = st.columns(3)
-            col1.metric("Confidence Score", f"{prediction:.2%}")
+            col1.metric("Confidence", f"{confidence:.2%}")
             
-            if prediction > TRADE_THRESHOLD_BUY:
-                col2.success("🚦 Strong Buy Signal")
+            if confidence > TRADE_THRESHOLD_BUY:
+                col2.success("🚀 Strong Buy Signal")
                 col3.write(f"Threshold: >{TRADE_THRESHOLD_BUY:.0%}")
-            elif prediction < TRADE_THRESHOLD_SELL:
-                col2.error("🚦 Strong Sell Signal")
+            elif confidence < TRADE_THRESHOLD_SELL:
+                col2.error("🔻 Strong Sell Signal")
                 col3.write(f"Threshold: <{TRADE_THRESHOLD_SELL:.0%}")
             else:
                 col2.info("🛑 Hold Position")
                 col3.write("No clear market signal")
-                
-            if st.session_state.last_trained:
-                st.caption(f"Last trained: {st.session_state.last_trained.strftime('%Y-%m-%d %H:%M')}")
             
         except Exception as e:
             st.error(f"Prediction error: {str(e)}")

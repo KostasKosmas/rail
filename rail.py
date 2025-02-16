@@ -31,6 +31,7 @@ GARCH_WINDOW = 14
 DATA_RETRIES = 3
 MIN_FEATURES = 7
 VOLATILITY_CLUSTERS = 3
+MIN_SAMPLES_FOR_SMOTE = 10  # New safety threshold
 
 warnings.filterwarnings("ignore", category=UserWarning)
 logging.basicConfig(level=logging.INFO)
@@ -104,7 +105,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
             df[f'RSI_{window}'] = 100 - (100 / (1 + (
                 df['Close'].diff().clip(lower=0).rolling(window).mean() / 
                 df['Close'].diff().clip(upper=0).abs().rolling(window).mean()
-            )))
+            ))
         
         # MACD features
         ema12 = df['Close'].ewm(span=12, adjust=False).mean()
@@ -136,14 +137,16 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
                             bins=[-np.inf, -0.01, 0.01, np.inf],
                             labels=[0, 1, 2])
         
-        # Clean up columns
-        return df.dropna().reset_index(drop=True)
+        # Clean up data
+        df = df.replace([np.inf, -np.inf], np.nan)
+        df = df.dropna()
+        return df.reset_index(drop=True)
     except Exception as e:
         logging.error(f"Feature engineering failed: {str(e)}")
         return pd.DataFrame()
 
 # ======================
-# ADVANCED MODEL PIPELINE
+# ROBUST MODEL PIPELINE
 # ======================
 class TradingModel:
     def __init__(self):
@@ -187,12 +190,13 @@ class TradingModel:
 
     def optimize_models(self, X: pd.DataFrame, y: pd.Series):
         try:
+            # Clean data before processing
             valid_idx = y.dropna().index
             X = X.loc[valid_idx].copy()
             y = y.loc[valid_idx].copy()
             
-            if X.empty or y.empty:
-                raise ValueError("Empty training data after cleaning")
+            if X.empty or y.empty or len(y.unique()) < 2:
+                raise ValueError("Insufficient training data after cleaning")
                 
             X_sel = self._safe_feature_selection(X, y)
             
@@ -233,10 +237,15 @@ class TradingModel:
                 X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
                 y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
                 
-                if X_train.empty or X_test.empty:
+                # Skip small sample sizes
+                if len(X_train) < MIN_SAMPLES_FOR_SMOTE or len(X_test) == 0:
                     continue
                 
-                X_res, y_res = self.smote.fit_resample(X_train, y_train)
+                # Dynamic SMOTE configuration
+                smote = SMOTE(
+                    random_state=42,
+                    k_neighbors=min(5, len(X_train) - 1)
+                X_res, y_res = smote.fit_resample(X_train, y_train)
                 
                 rf = RandomForestClassifier(**rf_params).fit(X_res, y_res)
                 gb = GradientBoostingClassifier(**gb_params).fit(X_res, y_res)
@@ -256,11 +265,16 @@ class TradingModel:
             X = X.loc[valid_idx].copy()
             y = y.loc[valid_idx].copy()
             
-            if X.empty or y.empty:
-                raise ValueError("Empty training data after cleaning")
+            if X.empty or y.empty or len(y.unique()) < 2:
+                raise ValueError("Insufficient training data after cleaning")
                 
             X_sel = X[self.selected_features]
-            X_res, y_res = self.smote.fit_resample(X_sel, y)
+            
+            # Dynamic SMOTE for final training
+            smote = SMOTE(
+                random_state=42,
+                k_neighbors=min(5, len(X_sel) - 1)
+            X_res, y_res = smote.fit_resample(X_sel, y)
             
             best_params = self.study.best_params
             rf_params = {k[3:]: v for k, v in best_params.items() if k.startswith('rf_')}
@@ -279,19 +293,22 @@ class TradingModel:
 
     def predict(self, X: pd.DataFrame) -> float:
         try:
-            if not self.selected_features:
-                raise ValueError("No features selected for prediction")
+            if not self.selected_features or X.empty:
+                raise ValueError("Invalid prediction input")
                 
             valid_features = [f for f in self.selected_features if f in X.columns]
-            X_sel = X[valid_features].copy()
+            X_sel = X[valid_features].copy().reset_index(drop=True)
             
+            if X_sel.empty:
+                return 0.5  # Fallback neutral prediction
+                
             prob_rf = self.calibrated_rf.predict_proba(X_sel)
             prob_gb = self.calibrated_gb.predict_proba(X_sel)
             ensemble_probs = 0.6*prob_rf + 0.4*prob_gb
-            return ensemble_probs[0][2]  # Return scalar value directly
+            return ensemble_probs[0][2]  # Direct scalar return
         except Exception as e:
             logging.error(f"Prediction failed: {str(e)}")
-            return 0.5  # Neutral prediction
+            return 0.5  # Neutral fallback
 
 # ======================
 # STREAMLIT INTERFACE
@@ -314,7 +331,6 @@ def main():
             
         with col2:
             try:
-                # Fixed scalar value extraction
                 current_price = processed_data['Close'].iloc[-1].item()
                 current_vol = processed_data['Volatility'].iloc[-1].item()
                 st.metric("Current Price", f"${current_price:,.2f}")
@@ -351,7 +367,8 @@ def main():
 
     if st.session_state.model and not processed_data.empty:
         try:
-            latest_data = processed_data.drop(columns=['Target'], errors='ignore').iloc[[-1]]
+            latest_data = processed_data.drop(columns=['Target'], errors='ignore')
+            latest_data = latest_data.iloc[[-1]].reset_index(drop=True)
             confidence = st.session_state.model.predict(latest_data)
             
             st.subheader("Trading Signal")

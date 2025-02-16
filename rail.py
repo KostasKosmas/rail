@@ -52,7 +52,7 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
             progress=False,
             auto_adjust=True
         )
-        return df.dropna() if not df.empty else pd.DataFrame()
+        return df.dropna().reset_index(drop=True) if not df.empty else pd.DataFrame()
     except Exception as e:
         logging.error(f"Data fetch failed: {str(e)}")
         st.error(f"Failed to fetch data for {symbol}")
@@ -62,7 +62,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or len(df) < 100:
         return pd.DataFrame()
         
-    df = df.copy()
+    df = df.copy().reset_index(drop=True)
     try:
         df['Returns'] = df['Close'].pct_change()
         df['Log_Returns'] = np.log(df['Close']).diff()
@@ -80,7 +80,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
                             bins=[-np.inf, -0.01, 0.01, np.inf],
                             labels=[0, 1, 2])
         
-        return df.replace([np.inf, -np.inf], np.nan).dropna()
+        return df.replace([np.inf, -np.inf], np.nan).dropna().reset_index(drop=True)
     except Exception as e:
         logging.error(f"Feature engineering failed: {str(e)}")
         return pd.DataFrame()
@@ -103,7 +103,7 @@ class TradingModel:
                 threshold="1.25*median"
             )
             self.feature_selector.fit(X, y)
-            self.selected_features = X.columns[self.feature_selector.get_support()]
+            self.selected_features = X.columns[self.feature_selector.get_support()].tolist()
             return X[self.selected_features]
         except Exception as e:
             logging.error(f"Feature selection failed: {str(e)}")
@@ -154,7 +154,6 @@ class TradingModel:
             gb = GradientBoostingClassifier(**gb_params).fit(X_res, y_res)
             
             preds = 0.6*rf.predict_proba(X_test) + 0.4*gb.predict_proba(X_test)
-            # Fixed f1_score syntax
             scores.append(f1_score(y_test, np.argmax(preds, axis=1), average='weighted'))
             
         return np.mean(scores) if scores else 0.0
@@ -182,6 +181,13 @@ class TradingModel:
 
     def predict(self, X: pd.DataFrame) -> float:
         try:
+            if not self.selected_features or X.empty:
+                return 0.5
+                
+            # Handle MultiIndex explicitly
+            if isinstance(X.index, pd.MultiIndex):
+                X = X.reset_index(drop=True)
+                
             X_sel = X[self.selected_features]
             prob_rf = self.calibrated_rf.predict_proba(X_sel)
             prob_gb = self.calibrated_gb.predict_proba(X_sel)
@@ -227,7 +233,7 @@ def main():
             st.error(f"Training failed: {str(e)}")
 
     if st.session_state.model and not processed_data.empty:
-        latest_data = processed_data.drop(columns=['Target']).iloc[[-1]]
+        latest_data = processed_data.drop(columns=['Target']).iloc[[-1]].reset_index(drop=True)
         confidence = st.session_state.model.predict(latest_data)
         
         st.subheader("Trading Signal")

@@ -20,11 +20,12 @@ import warnings
 # CONFIGURATION
 # ======================
 SYMBOL = 'BTC-USD'
-INTERVAL = '5m'
-LOOKBACK_DAYS = 60
-TRADE_THRESHOLD_BUY = 0.65
-TRADE_THRESHOLD_SELL = 0.35
-GARCH_WINDOW = 21
+INTERVAL = '15m'  # Increased from 5m to reduce noise
+LOOKBACK_DAYS = 180  # Extended from 60 days
+TRADE_THRESHOLD_BUY = 0.55  # Adjusted for low volatility
+TRADE_THRESHOLD_SELL = 0.45
+GARCH_WINDOW = 7  # Reduced from 21
+MAX_TRIALS = 15  # Reduced from 20
 
 # Suppress warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="arch")
@@ -43,6 +44,8 @@ if 'model' not in st.session_state:
     st.session_state.model = None
 if 'last_trained' not in st.session_state:
     st.session_state.last_trained = None
+if 'training_progress' not in st.session_state:
+    st.session_state.training_progress = None
 
 # ======================
 # DATA PIPELINE
@@ -58,16 +61,16 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
         end=end, 
         interval=interval, 
         progress=False,
-        auto_adjust=False  # Explicitly set to maintain column names
+        auto_adjust=False
     )
 
 def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Robust feature engineering with fallback mechanisms"""
+    """Enhanced feature engineering"""
     df = df.copy()
     try:
         # Price features
-        df['SMA_20'] = df['Close'].rolling(20).mean()
         df['SMA_50'] = df['Close'].rolling(50).mean()
+        df['SMA_200'] = df['Close'].rolling(200).mean()
         df['Returns'] = df['Close'].pct_change()
         
         # Momentum indicators
@@ -77,28 +80,18 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         rs = np.where(loss != 0, gain / loss, 1)
         df['RSI'] = 100 - (100 / (1 + rs))
         
-        # Volume features
-        df['OBV'] = (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
-        df['Volume_MA_20'] = df['Volume'].rolling(20).mean()
-        
-        # MACD
-        ema12 = df['Close'].ewm(span=12, adjust=False).mean()
-        ema26 = df['Close'].ewm(span=26, adjust=False).mean()
-        df['MACD'] = ema12 - ema26
-        df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-        
         # Volatility with GARCH fallback
         returns = df['Returns'].dropna()
         if len(returns) > 100:
             try:
                 scaled_returns = returns * 1000
                 garch = arch_model(scaled_returns, vol='Garch', p=1, q=1, rescale=False)
-                garch_fit = garch.fit(disp='off', options={'maxiter': 1000})
-                df['Volatility'] = garch_fit.conditional_volatility / 1000
+                garch_fit = garch.fit(disp='off', options={'maxiter': 500})
+                df['Volatility'] = garch_fit.conditional_volatility / 1000 * 100  # Percentage format
             except Exception:
-                df['Volatility'] = returns.rolling(GARCH_WINDOW).std()
+                df['Volatility'] = returns.rolling(GARCH_WINDOW).std() * 100
         else:
-            df['Volatility'] = returns.rolling(GARCH_WINDOW).std()
+            df['Volatility'] = returns.rolling(GARCH_WINDOW).std() * 100
         
         # Target encoding
         df['Target'] = (df['Returns'].shift(-1) > 0).astype(int)
@@ -122,37 +115,50 @@ class TradingModel:
         self.model_gb = GradientBoostingClassifier(random_state=42)
         self.calibrated_rf = None
         self.calibrated_gb = None
+        self.progress = None
+
+    def _progress_callback(self, study, trial):
+        """Update training progress in real-time"""
+        if self.progress:
+            self.progress.progress(
+                (trial.number + 1) / MAX_TRIALS,
+                text=f"Trial {trial.number + 1}/{MAX_TRIALS} - Current Best: {study.best_value:.2%}"
+            )
 
     def optimize_hyperparameters(self, X: pd.DataFrame, y: pd.Series):
-        """Bayesian optimization with Optuna"""
+        """Efficient Bayesian optimization"""
         def objective_rf(trial):
             params = {
-                'n_estimators': trial.suggest_int('n_estimators', 100, 500),
-                'max_depth': trial.suggest_int('max_depth', 5, 30),
-                'min_samples_split': trial.suggest_int('min_samples_split', 2, 10),
+                'n_estimators': trial.suggest_int('n_estimators', 200, 800),
+                'max_depth': trial.suggest_int('max_depth', 10, 40),
+                'min_samples_split': trial.suggest_int('min_samples_split', 2, 15),
+                'max_features': trial.suggest_categorical('max_features', ['sqrt', 'log2'])
             }
             return self._cross_val_score(RandomForestClassifier(**params), X, y)
 
         def objective_gb(trial):
             params = {
-                'n_estimators': trial.suggest_int('n_estimators', 100, 500),
-                'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3),
-                'max_depth': trial.suggest_int('max_depth', 3, 10),
+                'n_estimators': trial.suggest_int('n_estimators', 200, 800),
+                'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.2),
+                'max_depth': trial.suggest_int('max_depth', 3, 15),
+                'subsample': trial.suggest_float('subsample', 0.6, 1.0)
             }
             return self._cross_val_score(GradientBoostingClassifier(**params), X, y)
 
         # Optimize RF
         study_rf = optuna.create_study(direction='maximize')
-        study_rf.optimize(objective_rf, n_trials=20)
+        study_rf.optimize(objective_rf, n_trials=MAX_TRIALS, 
+                        callbacks=[self._progress_callback])
         self.model_rf.set_params(**study_rf.best_params)
 
         # Optimize GB
         study_gb = optuna.create_study(direction='maximize')
-        study_gb.optimize(objective_gb, n_trials=20)
+        study_gb.optimize(objective_gb, n_trials=MAX_TRIALS,
+                        callbacks=[self._progress_callback])
         self.model_gb.set_params(**study_gb.best_params)
 
     def _cross_val_score(self, model, X, y) -> float:
-        """Time-series aware cross-validation"""
+        """Optimized time-series validation"""
         tscv = TimeSeriesSplit(n_splits=3)
         scores = []
         
@@ -180,7 +186,7 @@ class TradingModel:
         return np.mean(scores)
 
     def train(self, X: pd.DataFrame, y: pd.Series):
-        """Full training pipeline with calibration"""
+        """Streamlined training pipeline"""
         try:
             # Feature selection
             self.feature_selector = SelectFromModel(
@@ -214,7 +220,7 @@ class TradingModel:
             raise
 
     def predict(self, X: pd.DataFrame) -> float:
-        """Ensemble prediction with dynamic weighting"""
+        """Ensemble prediction"""
         X_sel = self.feature_selector.transform(X)
         prob_rf = self.calibrated_rf.predict_proba(X_sel)[:, 1]
         prob_gb = self.calibrated_gb.predict_proba(X_sel)[:, 1]
@@ -236,14 +242,12 @@ def main():
             
         with col2:
             try:
-                # Explicit type conversion for formatting
-                current_price = float(processed_data['Close'].iloc[-1])
-                current_vol = float(processed_data['Volatility'].iloc[-1]) * 100
-                st.metric("Current Price", f"${current_price:.2f}")
+                current_price = processed_data['Close'].iloc[-1].item()
+                current_vol = processed_data['Volatility'].iloc[-1].item()
+                st.metric("Current Price", f"${current_price:,.2f}")
                 st.metric("24h Volatility", f"{current_vol:.2f}%")
             except (IndexError, KeyError, ValueError) as e:
                 st.error(f"Data display error: {str(e)}")
-                logging.error(f"Data display failed: {str(e)}")
 
     # Model training
     st.sidebar.header("Model Controls")
@@ -252,21 +256,31 @@ def main():
             st.error("No data available for training!")
             return
             
-        with st.spinner("Training AI model (this may take a few minutes)..."):
-            try:
-                X = processed_data.drop(['Target', 'Returns'], axis=1, errors='ignore')
-                y = processed_data['Target']
+        try:
+            st.session_state.training_progress = st.progress(0, text="Initializing training...")
+            model = TradingModel()
+            model.progress = st.session_state.training_progress
+            
+            X = processed_data.drop(['Target', 'Returns'], axis=1, errors='ignore')
+            y = processed_data['Target']
+            
+            with st.spinner("Optimizing Random Forest..."):
+                model.optimize_hyperparameters(X, y)
                 
-                if st.session_state.model is None:
-                    st.session_state.model = TradingModel()
+            with st.spinner("Finalizing Model Calibration..."):
+                model.train(X, y)
                 
-                st.session_state.model.optimize_hyperparameters(X, y)
-                st.session_state.model.train(X, y)
-                st.session_state.last_trained = datetime.now()
-                st.success("Model trained successfully!")
-                
-            except Exception as e:
-                st.error(f"Training failed: {str(e)}")
+            st.session_state.model = model
+            st.session_state.last_trained = datetime.now()
+            st.session_state.training_progress.progress(1.0, "Training complete!")
+            time.sleep(1)
+            st.session_state.training_progress = None
+            st.success("Model trained successfully!")
+            
+        except Exception as e:
+            st.error(f"Training failed: {str(e)}")
+            if st.session_state.training_progress:
+                st.session_state.training_progress = None
 
     # Trading signals
     if st.session_state.model and not processed_data.empty:

@@ -14,8 +14,11 @@ from sklearn.metrics import f1_score
 from imblearn.over_sampling import SMOTE
 from datetime import datetime, timedelta
 import warnings
+from sklearn.cluster import KMeans
 
-# Configuration
+# ======================
+# CONFIGURATION
+# ======================
 DEFAULT_SYMBOL = 'BTC-USD'
 PRIMARY_INTERVAL = '15m'
 TRADE_THRESHOLD_BUY = 0.58
@@ -23,12 +26,15 @@ TRADE_THRESHOLD_SELL = 0.42
 MAX_TRIALS = 50
 GARCH_WINDOW = 14
 MIN_FEATURES = 7
+VOLATILITY_CLUSTERS = 3
 MIN_SAMPLES_FOR_SMOTE = 10
 
 warnings.filterwarnings("ignore", category=UserWarning)
 logging.basicConfig(level=logging.INFO)
 
-# Streamlit UI
+# ======================
+# STREAMLIT UI
+# ======================
 st.set_page_config(page_title="AI Trading System", layout="wide")
 st.title("🚀 AI-Powered Cryptocurrency Trading System")
 
@@ -36,8 +42,12 @@ if 'model' not in st.session_state:
     st.session_state.model = None
 if 'last_trained' not in st.session_state:
     st.session_state.last_trained = None
+if 'training_progress' not in st.session_state:
+    st.session_state.training_progress = None
 
-# Data Pipeline
+# ======================
+# DATA PIPELINE
+# ======================
 @st.cache_data(ttl=300, show_spinner="Fetching market data...")
 def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
     end = datetime.now()
@@ -52,7 +62,9 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
             progress=False,
             auto_adjust=True
         )
-        return df.dropna().reset_index(drop=True) if not df.empty else pd.DataFrame()
+        if not df.empty:
+            return df.reset_index(drop=True)
+        return pd.DataFrame()
     except Exception as e:
         logging.error(f"Data fetch failed: {str(e)}")
         st.error(f"Failed to fetch data for {symbol}")
@@ -61,31 +73,50 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
 def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or len(df) < 100:
         return pd.DataFrame()
-        
+    
     df = df.copy().reset_index(drop=True)
     try:
+        # Core features
         df['Returns'] = df['Close'].pct_change()
         df['Log_Returns'] = np.log(df['Close']).diff()
         
-        windows = [20, 50, 100]
+        # Technical Indicators
+        windows = [20, 50, 100, 200]
         for window in windows:
             df[f'SMA_{window}'] = df['Close'].rolling(window).mean()
+            df[f'STD_{window}'] = df['Close'].rolling(window).std()
             df[f'RSI_{window}'] = 100 - (100 / (1 + (
                 df['Close'].diff().clip(lower=0).rolling(window).mean() / 
                 df['Close'].diff().clip(upper=0).abs().rolling(window).mean()
             )))
         
+        # Volatility Features
         df['Volatility'] = df['Log_Returns'].rolling(GARCH_WINDOW).std()
+        
+        # Volatility Clustering
+        vol_series = df['Volatility'].dropna()
+        if len(vol_series) >= VOLATILITY_CLUSTERS:
+            kmeans = KMeans(n_clusters=VOLATILITY_CLUSTERS)
+            clusters = kmeans.fit_predict(vol_series.values.reshape(-1, 1))
+            df['Vol_Cluster'] = pd.Series(clusters, index=vol_series.index).reindex(df.index, fill_value=-1)
+        
+        # Momentum Features
+        for period in [3, 7, 14]:
+            df[f'Momentum_{period}'] = df['Close'].pct_change(period)
+        
+        # Target Engineering
         df['Target'] = pd.cut(df['Returns'].shift(-1), 
                             bins=[-np.inf, -0.01, 0.01, np.inf],
                             labels=[0, 1, 2])
         
-        return df.replace([np.inf, -np.inf], np.nan).dropna().reset_index(drop=True)
+        return df.dropna().reset_index(drop=True)
     except Exception as e:
         logging.error(f"Feature engineering failed: {str(e)}")
         return pd.DataFrame()
 
-# Model Pipeline
+# ======================
+# MODEL PIPELINE
+# ======================
 class TradingModel:
     def __init__(self):
         self.feature_selector = None
@@ -104,6 +135,8 @@ class TradingModel:
             )
             self.feature_selector.fit(X, y)
             self.selected_features = X.columns[self.feature_selector.get_support()].tolist()
+            if len(self.selected_features) < MIN_FEATURES:
+                self.selected_features = X.columns[:MIN_FEATURES].tolist()
             return X[self.selected_features]
         except Exception as e:
             logging.error(f"Feature selection failed: {str(e)}")
@@ -153,7 +186,7 @@ class TradingModel:
             rf = RandomForestClassifier(**rf_params).fit(X_res, y_res)
             gb = GradientBoostingClassifier(**gb_params).fit(X_res, y_res)
             
-            preds = 0.6*rf.predict_proba(X_test) + 0.4*gb.predict_proba(X_test)
+            preds = 0.6 * rf.predict_proba(X_test) + 0.4 * gb.predict_proba(X_test)
             scores.append(f1_score(y_test, np.argmax(preds, axis=1), average='weighted'))
             
         return np.mean(scores) if scores else 0.0
@@ -168,8 +201,12 @@ class TradingModel:
             )
             X_res, y_res = smote.fit_resample(X_sel, y)
             
-            self.model_rf.set_params(**self.study.best_params).fit(X_res, y_res)
-            self.model_gb.set_params(**self.study.best_params).fit(X_res, y_res)
+            best_params = self.study.best_params
+            rf_params = {k[3:]: v for k, v in best_params.items() if k.startswith('rf_')}
+            gb_params = {k[3:]: v for k, v in best_params.items() if k.startswith('gb_')}
+            
+            self.model_rf.set_params(**rf_params).fit(X_res, y_res)
+            self.model_gb.set_params(**gb_params).fit(X_res, y_res)
             
             self.calibrated_rf = CalibratedClassifierCV(self.model_rf, cv=TimeSeriesSplit(3))
             self.calibrated_gb = CalibratedClassifierCV(self.model_gb, cv=TimeSeriesSplit(3))
@@ -184,19 +221,17 @@ class TradingModel:
             if not self.selected_features or X.empty:
                 return 0.5
                 
-            # Handle MultiIndex explicitly
-            if isinstance(X.index, pd.MultiIndex):
-                X = X.reset_index(drop=True)
-                
-            X_sel = X[self.selected_features]
+            X_sel = X[self.selected_features].reset_index(drop=True)
             prob_rf = self.calibrated_rf.predict_proba(X_sel)
             prob_gb = self.calibrated_gb.predict_proba(X_sel)
-            return (0.6*prob_rf + 0.4*prob_gb)[0][2]
+            return (0.6 * prob_rf + 0.4 * prob_gb)[0][2]
         except Exception as e:
             logging.error(f"Prediction failed: {str(e)}")
             return 0.5
 
-# Interface
+# ======================
+# INTERFACE
+# ======================
 def main():
     st.sidebar.header("Settings")
     symbol = st.sidebar.text_input("Cryptocurrency Symbol", DEFAULT_SYMBOL).upper()
@@ -218,6 +253,7 @@ def main():
 
     if st.sidebar.button("🚀 Train Model") and not processed_data.empty:
         try:
+            st.session_state.training_progress = st.progress(0, text="Initializing...")
             model = TradingModel()
             X = processed_data.drop(['Target'], axis=1)
             y = processed_data['Target']
@@ -228,9 +264,10 @@ def main():
                 st.session_state.model = model
                 st.session_state.last_trained = datetime.now()
                 st.success(f"Model trained! Best F1: {model.study.best_value:.2%}")
-                
         except Exception as e:
             st.error(f"Training failed: {str(e)}")
+        finally:
+            st.session_state.training_progress = None
 
     if st.session_state.model and not processed_data.empty:
         latest_data = processed_data.drop(columns=['Target']).iloc[[-1]].reset_index(drop=True)

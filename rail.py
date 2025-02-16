@@ -9,7 +9,7 @@ import optuna
 from arch import arch_model
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.feature_selection import SelectFromModel
+from sklearn.feature_selection import SelectFromModel, SelectKBest, f_classif
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import f1_score
 from sklearn.utils.class_weight import compute_sample_weight
@@ -154,7 +154,7 @@ class TradingModel:
         self.model_gb = GradientBoostingClassifier(random_state=42)
         self.calibrated_rf = None
         self.calibrated_gb = None
-        self.smote = SMOTE(random_state=42, k_neighbors=3)  # Reduced neighbors
+        self.smote = SMOTE(random_state=42, k_neighbors=3)
         self.study = None
         self.best_score = 0
 
@@ -167,8 +167,8 @@ class TradingModel:
             st.session_state.training_progress.progress(progress, text=text)
 
     def _safe_feature_selection(self, X, y):
-        """Robust feature selection with fallbacks"""
-        # First attempt with default threshold
+        """Robust four-stage feature selection with final fallback"""
+        # Stage 1: Default threshold
         self.feature_selector = SelectFromModel(
             RandomForestClassifier(n_estimators=100),
             threshold="1.25*median"
@@ -176,22 +176,24 @@ class TradingModel:
         self.feature_selector.fit(X, y)
         self.selected_features = X.columns[self.feature_selector.get_support()]
         
-        # Fallback to lower threshold if no features selected
+        # Stage 2: Lower threshold
         if len(self.selected_features) < MIN_FEATURES:
             logging.warning("Initial feature selection failed, trying lower threshold")
             self.feature_selector.threshold = "median"
             self.feature_selector.fit(X, y)
             self.selected_features = X.columns[self.feature_selector.get_support()]
             
-        # Final fallback to top 5 features
+        # Stage 3: Top 5 features
         if len(self.selected_features) < MIN_FEATURES:
             logging.warning("Using top 5 features as fallback")
-            self.feature_selector = SelectFromModel(
-                RandomForestClassifier(n_estimators=100),
-                max_features=5
-            )
+            self.feature_selector = SelectKBest(f_classif, k=min(5, X.shape[1]))
             self.feature_selector.fit(X, y)
             self.selected_features = X.columns[self.feature_selector.get_support()]
+        
+        # Stage 4: Ultimate fallback to first 5 columns
+        if len(self.selected_features) < MIN_FEATURES:
+            logging.error("All feature selection failed, using first 5 columns")
+            self.selected_features = X.columns[:min(5, X.shape[1])]
         
         return X[self.selected_features]
 
@@ -205,8 +207,11 @@ class TradingModel:
             if X_sel.shape[1] == 0:
                 raise ValueError("No features available after selection")
                 
-            # Optimization study
-            self.study = optuna.create_study(direction='maximize')
+            # Optimization study with named study
+            self.study = optuna.create_study(
+                direction='maximize',
+                study_name='TradingModelOptimization'
+            )
             self.study.optimize(
                 lambda trial: self._objective(trial, X_sel, y),
                 n_trials=MAX_TRIALS,
@@ -218,7 +223,7 @@ class TradingModel:
             raise
 
     def _objective(self, trial, X, y):
-        """Objective function with error handling"""
+        """Objective function with enhanced error handling"""
         try:
             # Random Forest parameters
             rf_params = {
@@ -243,10 +248,12 @@ class TradingModel:
                 X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
                 y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
                 
-                # Handle class imbalance with validation
-                if len(np.unique(y_train)) < 2:
-                    raise ValueError("Insufficient class variety for SMOTE")
+                # Validate data for SMOTE
+                unique_classes = np.unique(y_train)
+                if len(unique_classes) < 2:
+                    raise ValueError(f"Insufficient classes for SMOTE: {unique_classes}")
                     
+                # Handle class imbalance
                 X_res, y_res = self.smote.fit_resample(X_train, y_train)
                 
                 # Train models
@@ -258,7 +265,7 @@ class TradingModel:
                         0.4 * gb.predict_proba(X_test)[:, 1])
                 scores.append(f1_score(y_test, (preds >= 0.5).astype(int)))
                 
-            return np.mean(scores)
+            return np.nanmean(scores)  # Handle potential NaN values
         except Exception as e:
             logging.warning(f"Trial failed: {str(e)}")
             return 0.0  # Return minimum score for failed trials
@@ -269,8 +276,9 @@ class TradingModel:
             X_sel = X[self.selected_features]
             
             # Final SMOTE validation
-            if len(np.unique(y)) < 2:
-                raise ValueError("Insufficient class distribution for training")
+            unique_classes = np.unique(y)
+            if len(unique_classes) < 2:
+                raise ValueError(f"Insufficient class distribution: {unique_classes}")
                 
             X_res, y_res = self.smote.fit_resample(X_sel, y)
             
@@ -294,8 +302,11 @@ class TradingModel:
             raise
 
     def predict(self, X: pd.DataFrame) -> float:
-        """Safe prediction method"""
+        """Safe prediction method with fallback"""
         try:
+            if not self.selected_features:
+                raise ValueError("No features selected for prediction")
+                
             X_sel = X[self.selected_features]
             prob_rf = self.calibrated_rf.predict_proba(X_sel)[:, 1]
             prob_gb = self.calibrated_gb.predict_proba(X_sel)[:, 1]
@@ -373,14 +384,23 @@ def main():
             col1, col2, col3 = st.columns(3)
             col1.metric("Confidence Score", f"{confidence:.2%}")
             
-            if confidence > TRADE_THRESHOLD_BUY:
-                col2.success("🚀 Strong Buy Signal")
-                col3.write(f"Threshold: >{TRADE_THRESHOLD_BUY:.0%}")
-            elif confidence < TRADE_THRESHOLD_SELL:
-                col2.error("🔻 Strong Sell Signal")
-                col3.write(f"Threshold: <{TRADE_THRESHOLD_SELL:.0%}")
+            signal_config = {
+                "buy": ("🚀 Strong Buy", "#28a745", TRADE_THRESHOLD_BUY),
+                "sell": ("🔻 Strong Sell", "#dc3545", TRADE_THRESHOLD_SELL),
+                "hold": ("🛑 Hold Position", "#17a2b8", None)
+            }
+            
+            if confidence > signal_config["buy"][2]:
+                col2.markdown(f"<h3 style='color:{signal_config['buy'][1]}'>{signal_config['buy'][0]}</h3>", 
+                            unsafe_allow_html=True)
+                col3.write(f"Threshold: >{signal_config['buy'][2]:.0%}")
+            elif confidence < signal_config["sell"][2]:
+                col2.markdown(f"<h3 style='color:{signal_config['sell'][1]}'>{signal_config['sell'][0]}</h3>", 
+                            unsafe_allow_html=True)
+                col3.write(f"Threshold: <{signal_config['sell'][2]:.0%}")
             else:
-                col2.info("🛑 Hold Position")
+                col2.markdown(f"<h3 style='color:{signal_config['hold'][1]}'>{signal_config['hold'][0]}</h3>", 
+                            unsafe_allow_html=True)
                 col3.write("No clear market signal")
             
             if st.session_state.last_trained:

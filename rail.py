@@ -6,13 +6,12 @@ import pandas as pd
 import yfinance as yf
 import streamlit as st
 import optuna
-import ta
 from arch import arch_model
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.feature_selection import SelectFromModel
 from sklearn.calibration import CalibratedClassifierCV
-from sklearn.metrics import accuracy_score, f1_score
+from sklearn.metrics import f1_score
 from sklearn.utils.class_weight import compute_sample_weight
 from imblearn.over_sampling import SMOTE
 from datetime import datetime, timedelta
@@ -30,14 +29,9 @@ TRADE_THRESHOLD_BUY = 0.58
 TRADE_THRESHOLD_SELL = 0.42
 GARCH_WINDOW = 7
 MAX_TRIALS = 20
-INITIAL_FEATURES = [
-    'SMA_20', 'SMA_50', 'SMA_200', 'RSI', 'MACD', 'MACD_hist',
-    'BBL_20_2.0', 'BBM_20_2.0', 'BBU_20_2.0', 'ATRr_14', 
-    'VWAP', 'Volume_MA_20', 'Volatility', 'OBV'
-]
 
 # Suppress warnings
-warnings.filterwarnings("ignore", category=UserWarning, module="arch")
+warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 logging.basicConfig(level=logging.INFO)
 
@@ -102,35 +96,41 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
             return pd.DataFrame()
 
 def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Advanced feature engineering with ta indicators"""
+    """Manual feature engineering without external dependencies"""
     df = df.copy()
     try:
-        # Initialize technical analysis indicators
-        indicator = ta.TechnicalAnalysis(
-            high=df['High'],
-            low=df['Low'],
-            close=df['Close'],
-            volume=df['Volume']
-        )
-        
         # Price features
-        df['SMA_20'] = indicator.sma(window=20)
-        df['SMA_50'] = indicator.sma(window=50)
-        df['SMA_200'] = indicator.sma(window=200)
         df['Returns'] = df['Close'].pct_change()
         
+        # Simple Moving Averages
+        df['SMA_20'] = df['Close'].rolling(20).mean()
+        df['SMA_50'] = df['Close'].rolling(50).mean()
+        df['SMA_200'] = df['Close'].rolling(200).mean()
+        
+        # RSI Calculation
+        delta = df['Close'].diff()
+        gain = delta.where(delta > 0, 0).rolling(14).mean()
+        loss = -delta.where(delta < 0, 0).rolling(14).mean()
+        rs = gain / loss
+        df['RSI'] = 100 - (100 / (1 + rs))
+        
+        # MACD Calculation
+        ema12 = df['Close'].ewm(span=12, adjust=False).mean()
+        ema26 = df['Close'].ewm(span=26, adjust=False).mean()
+        df['MACD'] = ema12 - ema26
+        df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+        
         # Bollinger Bands
-        bb = indicator.bollinger_bands(window=20, window_dev=2)
-        df = pd.concat([df, bb.add_suffix('_20_2.0')], axis=1)
+        df['BB_MA20'] = df['Close'].rolling(20).mean()
+        df['BB_STD20'] = df['Close'].rolling(20).std()
+        df['BB_Upper'] = df['BB_MA20'] + (df['BB_STD20'] * 2)
+        df['BB_Lower'] = df['BB_MA20'] - (df['BB_STD20'] * 2)
         
-        # Momentum indicators
-        df['RSI'] = indicator.rsi(window=14)
-        macd = indicator.macd(fast=12, slow=26, signal=9)
-        df['MACD'] = macd['MACD']
-        df['MACD_hist'] = macd['MACD_hist']
+        # Volume Features
+        df['OBV'] = (np.sign(df['Close'].diff()) * df['Volume']).cumsum()
+        df['Volume_MA_20'] = df['Volume'].rolling(20).mean()
         
-        # Volatility features
-        df['ATRr_14'] = indicator.atr(window=14)
+        # Volatility Calculation
         returns = df['Returns'].dropna()
         if len(returns) > 100:
             try:
@@ -143,15 +143,10 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         else:
             df['Volatility'] = returns.rolling(GARCH_WINDOW).std() * 100
         
-        # Volume features
-        df['VWAP'] = (df['Volume'] * (df['High'] + df['Low'] + df['Close']) / 3).cumsum() / df['Volume'].cumsum()
-        df['OBV'] = indicator.on_balance_volume()
-        df['Volume_MA_20'] = df['Volume'].rolling(20).mean()
-        
         # Target encoding
         df['Target'] = (df['Returns'].shift(-1) > 0).astype(int)
         
-        return df[INITIAL_FEATURES + ['Target']].dropna()
+        return df.dropna()
     except Exception as e:
         logging.error(f"Feature engineering failed: {str(e)}")
         return pd.DataFrame()
@@ -188,7 +183,6 @@ class TradingModel:
                 'max_depth': trial.suggest_int('max_depth', 10, 50),
                 'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
                 'max_features': trial.suggest_categorical('max_features', ['sqrt', 'log2', None]),
-                'class_weight': trial.suggest_categorical('class_weight', ['balanced', 'balanced_subsample'])
             }
             return self._cross_val_score(RandomForestClassifier(**params), X, y)
 
@@ -198,7 +192,6 @@ class TradingModel:
                 'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.3, log=True),
                 'max_depth': trial.suggest_int('max_depth', 3, 20),
                 'subsample': trial.suggest_float('subsample', 0.6, 1.0),
-                'min_samples_split': trial.suggest_int('min_samples_split', 2, 20)
             }
             return self._cross_val_score(GradientBoostingClassifier(**params), X, y)
 
@@ -318,7 +311,7 @@ def main():
             model = TradingModel()
             model.progress = st.session_state.training_progress
             
-            X = processed_data.drop(['Target'], axis=1, errors='ignore')
+            X = processed_data.drop(['Target', 'Returns'], axis=1, errors='ignore')
             y = processed_data['Target']
             
             with st.spinner("Optimizing Random Forest..."):

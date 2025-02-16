@@ -15,9 +15,7 @@ from imblearn.over_sampling import SMOTE
 from datetime import datetime, timedelta
 import warnings
 
-# ======================
-# CONFIGURATION
-# ======================
+# Configuration
 DEFAULT_SYMBOL = 'BTC-USD'
 PRIMARY_INTERVAL = '15m'
 TRADE_THRESHOLD_BUY = 0.58
@@ -30,9 +28,7 @@ MIN_SAMPLES_FOR_SMOTE = 10
 warnings.filterwarnings("ignore", category=UserWarning)
 logging.basicConfig(level=logging.INFO)
 
-# ======================
-# STREAMLIT UI
-# ======================
+# Streamlit UI
 st.set_page_config(page_title="AI Trading System", layout="wide")
 st.title("🚀 AI-Powered Cryptocurrency Trading System")
 
@@ -41,9 +37,7 @@ if 'model' not in st.session_state:
 if 'last_trained' not in st.session_state:
     st.session_state.last_trained = None
 
-# ======================
-# DATA PIPELINE
-# ======================
+# Data Pipeline
 @st.cache_data(ttl=300, show_spinner="Fetching market data...")
 def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
     end = datetime.now()
@@ -70,11 +64,9 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         
     df = df.copy()
     try:
-        # Core features
         df['Returns'] = df['Close'].pct_change()
         df['Log_Returns'] = np.log(df['Close']).diff()
         
-        # Technical indicators
         windows = [20, 50, 100]
         for window in windows:
             df[f'SMA_{window}'] = df['Close'].rolling(window).mean()
@@ -83,10 +75,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
                 df['Close'].diff().clip(upper=0).abs().rolling(window).mean()
             )))
         
-        # Volatility features
         df['Volatility'] = df['Log_Returns'].rolling(GARCH_WINDOW).std()
-        
-        # Target engineering
         df['Target'] = pd.cut(df['Returns'].shift(-1), 
                             bins=[-np.inf, -0.01, 0.01, np.inf],
                             labels=[0, 1, 2])
@@ -96,9 +85,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         logging.error(f"Feature engineering failed: {str(e)}")
         return pd.DataFrame()
 
-# ======================
-# MODEL PIPELINE
-# ======================
+# Model Pipeline
 class TradingModel:
     def __init__(self):
         self.feature_selector = None
@@ -157,10 +144,9 @@ class TradingModel:
             if len(X_train) < MIN_SAMPLES_FOR_SMOTE:
                 continue
                 
-            # Fixed SMOTE initialization with proper syntax
             smote = SMOTE(
                 random_state=42,
-                k_neighbors=min(5, len(X_train) - 1)  # Fixed line with proper parentheses
+                k_neighbors=min(5, len(X_train) - 1)
             )
             X_res, y_res = smote.fit_resample(X_train, y_train)
             
@@ -168,7 +154,8 @@ class TradingModel:
             gb = GradientBoostingClassifier(**gb_params).fit(X_res, y_res)
             
             preds = 0.6*rf.predict_proba(X_test) + 0.4*gb.predict_proba(X_test)
-            scores.append(f1_score(y_test, np.argmax(preds, axis=1, average='weighted'))
+            # Fixed f1_score syntax
+            scores.append(f1_score(y_test, np.argmax(preds, axis=1), average='weighted'))
             
         return np.mean(scores) if scores else 0.0
 
@@ -176,11 +163,10 @@ class TradingModel:
         try:
             X_sel = X[self.selected_features]
             
-            # Fixed SMOTE initialization in training
             smote = SMOTE(
                 random_state=42,
-                k_neighbors=min(5, len(X_sel) - 1)  # Proper syntax here
-            
+                k_neighbors=min(5, len(X_sel) - 1)
+            )
             X_res, y_res = smote.fit_resample(X_sel, y)
             
             self.model_rf.set_params(**self.study.best_params).fit(X_res, y_res)
@@ -204,9 +190,7 @@ class TradingModel:
             logging.error(f"Prediction failed: {str(e)}")
             return 0.5
 
-# ======================
-# INTERFACE
-# ======================
+# Interface
 def main():
     st.sidebar.header("Settings")
     symbol = st.sidebar.text_input("Cryptocurrency Symbol", DEFAULT_SYMBOL).upper()

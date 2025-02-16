@@ -101,8 +101,11 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         for window in windows:
             df[f'SMA_{window}'] = df['Close'].rolling(window).mean()
             df[f'STD_{window}'] = df['Close'].rolling(window).std()
-            df[f'RSI_{window}'] = 100 - (100 / (1 + (df['Close'].diff().clip(lower=0).rolling(window).mean() / 
-                                                   df['Close'].diff().clip(upper=0).abs().rolling(window).mean()))
+            # Fixed RSI calculation with proper parenthesis
+            df[f'RSI_{window}'] = 100 - (100 / (1 + (
+                df['Close'].diff().clip(lower=0).rolling(window).mean() / 
+                df['Close'].diff().clip(upper=0).abs().rolling(window).mean()
+            )))
         
         # MACD features
         ema12 = df['Close'].ewm(span=12, adjust=False).mean()
@@ -306,7 +309,6 @@ def main():
             
         with col2:
             try:
-                # Ensure we're accessing scalar values
                 current_price = float(processed_data['Close'].iloc[-1])
                 current_vol = float(processed_data['Volatility'].iloc[-1])
                 st.metric("Current Price", f"${current_price:,.2f}")

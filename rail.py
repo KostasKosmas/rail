@@ -71,7 +71,7 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
         
         if not df.empty and len(df) > 100:
             st.session_state.data_warning = None
-            return df.set_index('Datetime')
+            return df.set_index('Datetime', drop=True)
     except Exception as e:
         logging.warning(f"Primary data fetch failed: {str(e)}")
     
@@ -81,7 +81,7 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
         df.columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'Close time']
         df['Date'] = pd.to_datetime(df['Close time'], unit='ms')
         st.session_state.data_warning = f"Using Binance {interval} data"
-        return df.set_index('Date')
+        return df.set_index('Date', drop=True)
     except Exception as e:
         st.error(f"Data unavailable for {symbol}")
         return pd.DataFrame()
@@ -90,7 +90,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or len(df) < 100:
         return pd.DataFrame()
         
-    df = df.copy().reset_index()
+    df = df.copy().reset_index(drop=True)
     try:
         # Core price features
         df['Returns'] = df['Close'].pct_change()
@@ -131,16 +131,13 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         for period in [3, 7, 14]:
             df[f'Momentum_{period}'] = df['Close'].pct_change(period)
         
-        # Target engineering (don't dropna here)
+        # Target engineering
         df['Target'] = pd.cut(df['Returns'].shift(-1), 
                             bins=[-np.inf, -0.01, 0.01, np.inf],
                             labels=[0, 1, 2])
         
         # Clean up columns
-        if 'index' in df.columns:
-            df = df.drop(columns=['index'])
-            
-        return df.set_index('Datetime') if 'Datetime' in df.columns else df
+        return df.dropna().reset_index(drop=True)
     except Exception as e:
         logging.error(f"Feature engineering failed: {str(e)}")
         return pd.DataFrame()
@@ -190,10 +187,9 @@ class TradingModel:
 
     def optimize_models(self, X: pd.DataFrame, y: pd.Series):
         try:
-            # Handle NaN in target
             valid_idx = y.dropna().index
-            X = X.loc[valid_idx]
-            y = y.loc[valid_idx]
+            X = X.loc[valid_idx].copy()
+            y = y.loc[valid_idx].copy()
             
             if X.empty or y.empty:
                 raise ValueError("Empty training data after cleaning")
@@ -257,8 +253,8 @@ class TradingModel:
     def train(self, X: pd.DataFrame, y: pd.Series):
         try:
             valid_idx = y.dropna().index
-            X = X.loc[valid_idx]
-            y = y.loc[valid_idx]
+            X = X.loc[valid_idx].copy()
+            y = y.loc[valid_idx].copy()
             
             if X.empty or y.empty:
                 raise ValueError("Empty training data after cleaning")
@@ -286,17 +282,16 @@ class TradingModel:
             if not self.selected_features:
                 raise ValueError("No features selected for prediction")
                 
-            # Ensure we're using the latest valid features
             valid_features = [f for f in self.selected_features if f in X.columns]
-            X_sel = X[valid_features]
+            X_sel = X[valid_features].copy()
             
             prob_rf = self.calibrated_rf.predict_proba(X_sel)
             prob_gb = self.calibrated_gb.predict_proba(X_sel)
-            ensemble_probs = 0.6*prob_rf + 0.4*gb.predict_proba(X_sel)
-            return ensemble_probs[:, 2]
+            ensemble_probs = 0.6*prob_rf + 0.4*prob_gb
+            return ensemble_probs[0][2]  # Return scalar value directly
         except Exception as e:
             logging.error(f"Prediction failed: {str(e)}")
-            return np.zeros(len(X))
+            return 0.5  # Neutral prediction
 
 # ======================
 # STREAMLIT INTERFACE
@@ -319,8 +314,9 @@ def main():
             
         with col2:
             try:
-                current_price = float(processed_data['Close'].iloc[-1])
-                current_vol = float(processed_data['Volatility'].iloc[-1])
+                # Fixed scalar value extraction
+                current_price = processed_data['Close'].iloc[-1].item()
+                current_vol = processed_data['Volatility'].iloc[-1].item()
                 st.metric("Current Price", f"${current_price:,.2f}")
                 st.metric("Volatility", f"{current_vol:.2%}")
             except Exception as e:
@@ -355,15 +351,14 @@ def main():
 
     if st.session_state.model and not processed_data.empty:
         try:
-            # Use most recent data with all features
-            latest_data = processed_data.iloc[[-1]].drop(columns=['Target'], errors='ignore')
-            confidence = st.session_state.model.predict(latest_data)[0]
+            latest_data = processed_data.drop(columns=['Target'], errors='ignore').iloc[[-1]]
+            confidence = st.session_state.model.predict(latest_data)
             
             st.subheader("Trading Signal")
             col1, col2, col3 = st.columns(3)
             col1.metric("Confidence Score", f"{confidence:.2%}")
             
-            current_vol = processed_data['Volatility'].iloc[-1]
+            current_vol = processed_data['Volatility'].iloc[-1].item()
             adj_buy = TRADE_THRESHOLD_BUY + (current_vol * 0.1)
             adj_sell = TRADE_THRESHOLD_SELL - (current_vol * 0.1)
             

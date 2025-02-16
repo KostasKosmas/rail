@@ -1,4 +1,4 @@
-treamlit==1.32.2
+streamlit==1.32.2
 yfinance==0.2.37
 pandas==2.2.1
 numpy==1.26.4

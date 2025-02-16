@@ -1,5 +1,5 @@
 # crypto_trading.py
-# Install dependencies: pip install streamlit yfinance pandas numpy scikit-learn joblib
+# Install dependencies: pip install -r requirements.txt
 
 import streamlit as st
 import yfinance as yf
@@ -47,10 +47,11 @@ def load_data(symbol, interval="1d", period="5y"):
         df['RSI'] = 100 - (100 / (1 + rs))
         
         df['MACD'] = df['Close'].ewm(span=12).mean() - df['Close'].ewm(span=26).mean()
-        df['OBV'] = (np.sign(df['Close'].diff()) * df['Volume']).cumsum()
+        df['OBV'] = (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
         df['Volume_MA'] = df['Volume'].rolling(20).mean()
         
-        return df.dropna().iloc[-MAX_DATA_POINTS:].astype(np.float32)
+        df = df.dropna().iloc[-MAX_DATA_POINTS:].astype(np.float64)
+        return df
     
     except Exception as e:
         st.error(f"Data error: {str(e)}")
@@ -99,7 +100,7 @@ def train_model(df, crypto_symbol):
             model_gb.fit(X_train_sel, y_train)
         else:
             model_gb = RandomizedSearchCV(
-                GradientBoostingClassifier(n_iter_no_change=5),
+                GradientBoostingClassifier(),
                 {'n_estimators': [200, 300], 'learning_rate': [0.05, 0.1], 'max_depth': [3, 5], 'subsample': [0.8, 1.0]},
                 n_iter=3, cv=3, scoring='f1'
             ).fit(X_train_sel, y_train).best_estimator_
@@ -133,12 +134,14 @@ def generate_price_points(df, days=FORECAST_DAYS, simulations=SIMULATIONS):
             price_path = last_price * np.exp(np.cumsum(daily_returns))
             forecast[:, i] = price_path
         
-        return pd.DataFrame({
+        forecast_df = pd.DataFrame({
             'Day': range(1, days+1),
             'Median': np.median(forecast, axis=1),
             'Upper': np.percentile(forecast, 95, axis=1),
             'Lower': np.percentile(forecast, 5, axis=1)
-        }).reset_index(drop=True)
+        }).astype({'Day': 'int32', 'Median': 'float64', 'Upper': 'float64', 'Lower': 'float64'})
+        
+        return forecast_df.reset_index(drop=True)
         
     except Exception as e:
         st.error(f"Forecast error: {str(e)}")
@@ -210,9 +213,10 @@ def main():
                 cols[2].metric("Take Profit", f"${levels['take_profit']:.2f}")
                 
                 st.subheader("🔮 Price Forecast")
-                st.line_chart(levels['forecast'].set_index('Day'))
+                forecast_df = levels['forecast'].set_index('Day').astype('float64')
+                st.line_chart(forecast_df)
                 
-                st.progress(levels['confidence'])
+                st.progress(float(levels['confidence']))
                 st.caption(f"Model Confidence: {levels['confidence']:.2%}")
                 
                 if levels['trend'] == 'Bullish':

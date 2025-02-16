@@ -167,7 +167,7 @@ class TradingModel:
         self.model_rf.fit(X_sel, y, sample_weight=sample_weights)
         self.model_gb.fit(X_sel, y, sample_weight=sample_weights)
 
-        # Calibration
+        # Calibration (Fixed Syntax)
         self.calibrated_rf = CalibratedClassifierCV(
             self.model_rf, 
             method='isotonic', 
@@ -177,6 +177,7 @@ class TradingModel:
             self.model_gb,
             method='sigmoid',
             cv=TimeSeriesSplit(3)
+        )
         
         self.calibrated_rf.fit(X_sel, y)
         self.calibrated_gb.fit(X_sel, y)

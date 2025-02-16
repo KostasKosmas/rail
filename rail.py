@@ -1,8 +1,10 @@
+# crypto_trading_app.py
 import logging
 import time
 import numpy as np
 import pandas as pd
 import yfinance as yf
+import streamlit as st
 from arch import arch_model
 import optuna
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
@@ -23,28 +25,21 @@ TRADE_THRESHOLD_BUY = 0.65
 TRADE_THRESHOLD_SELL = 0.35
 
 # ======================
-# LOGGING SETUP
+# STREAMLIT UI
 # ======================
-logging.basicConfig(
-    filename='crypto_trading.log',
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+st.title("AI Crypto Trading System")
+st.subheader("Real-time Trading Signals with Machine Learning")
 
-def safe_execute(func):
-    """Decorator for centralized error handling"""
-    def wrapper(*args, **kwargs):
-        try:
-            return func(*args, **kwargs)
-        except Exception as e:
-            logging.error(f"Error in {func.__name__}: {str(e)}", exc_info=True)
-            return None
-    return wrapper
+# Initialize session state
+if 'model' not in st.session_state:
+    st.session_state.model = None
+if 'last_trained' not in st.session_state:
+    st.session_state.last_trained = None
 
 # ======================
 # DATA PIPELINE
 # ======================
-@safe_execute
+@st.cache_data(ttl=300)
 def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
     """Fetch historical data with yfinance"""
     end = datetime.now()
@@ -79,7 +74,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     
     # Volatility (GARCH)
     returns = df['Returns'].dropna()
-    if len(returns) > 10:  # Minimum data check
+    if len(returns) > 10:
         garch = arch_model(returns, vol='Garch', p=1, q=1)
         garch_fit = garch.fit(disp='off')
         df['Volatility'] = garch_fit.conditional_volatility
@@ -106,7 +101,6 @@ class TradingModel:
 
     def optimize_hyperparameters(self, X, y):
         """Optuna-based hyperparameter tuning"""
-        # Random Forest optimization
         def objective_rf(trial):
             params = {
                 'n_estimators': trial.suggest_int('n_estimators', 100, 500),
@@ -116,7 +110,6 @@ class TradingModel:
             model = RandomForestClassifier(**params, warm_start=True)
             return self._cross_val_score(model, X, y)
 
-        # Gradient Boosting optimization
         def objective_gb(trial):
             params = {
                 'n_estimators': trial.suggest_int('n_estimators', 100, 500),
@@ -176,9 +169,14 @@ class TradingModel:
 
         # Calibration
         self.calibrated_rf = CalibratedClassifierCV(
-            self.model_rf, method='isotonic', cv=TimeSeriesSplit(3)
+            self.model_rf, 
+            method='isotonic', 
+            cv=TimeSeriesSplit(3)
+        )
         self.calibrated_gb = CalibratedClassifierCV(
-            self.model_gb, method='sigmoid', cv=TimeSeriesSplit(3))
+            self.model_gb,
+            method='sigmoid',
+            cv=TimeSeriesSplit(3)
         
         self.calibrated_rf.fit(X_sel, y)
         self.calibrated_gb.fit(X_sel, y)
@@ -194,62 +192,54 @@ class TradingModel:
         return 0.6 * prob_rf + 0.4 * prob_gb
 
 # ======================
-# TRADING EXECUTION
+# MAIN APPLICATION
 # ======================
-@safe_execute
-def execute_trade(signal: str):
-    """Placeholder for actual trading logic"""
-    logging.info(f"Executing {signal} order")
-    # Implement your exchange API integration here
-    print(f"{datetime.now()}: {signal} signal triggered")
-
-# ======================
-# MAIN LOOP
-# ======================
-def trading_loop():
-    model = TradingModel()
-    last_trained = datetime.now()
+def main():
+    # Data loading section
+    with st.spinner('Fetching market data...'):
+        raw_data = fetch_data(SYMBOL, INTERVAL)
+        processed_data = calculate_features(raw_data)
     
-    while True:
-        try:
-            # Fetch and prepare data
-            raw_data = fetch_data(SYMBOL, INTERVAL)
-            processed_data = calculate_features(raw_data)
-            
-            if len(processed_data) < 100:  # Minimum data check
-                time.sleep(300)
-                continue
+    if processed_data is not None:
+        st.subheader("Latest Market Data")
+        st.dataframe(processed_data.tail(5), use_container_width=True)
 
-            # Prepare features and target
+    # Model training
+    if st.button("Train/Retrain Model"):
+        with st.spinner('Training AI model...'):
             X = processed_data.drop(['Target', 'Returns'], axis=1, errors='ignore')
             y = processed_data['Target']
             
-            # Retrain models periodically
-            if (datetime.now() - last_trained).hours > 6:
-                model.optimize_hyperparameters(X, y)
-                model.train(X, y)
-                last_trained = datetime.now()
-                logging.info("Model retrained successfully")
-
-            # Make prediction
-            latest_features = X.iloc[[-1]]
-            prediction = model.predict(latest_features)[0]
+            if st.session_state.model is None:
+                st.session_state.model = TradingModel()
             
-            # Trading logic
+            st.session_state.model.optimize_hyperparameters(X, y)
+            st.session_state.model.train(X, y)
+            st.session_state.last_trained = datetime.now()
+            st.success("Model trained successfully!")
+
+    # Prediction and trading
+    if st.session_state.model and processed_data is not None:
+        latest_features = processed_data.drop(['Target', 'Returns'], axis=1, errors='ignore').iloc[[-1]]
+        prediction = st.session_state.model.predict(latest_features)[0]
+        
+        st.subheader("Trading Signal")
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric("Prediction Score", f"{prediction:.2%}")
+        
+        with col2:
             if prediction > TRADE_THRESHOLD_BUY:
-                execute_trade('BUY')
+                st.success("BUY SIGNAL")
             elif prediction < TRADE_THRESHOLD_SELL:
-                execute_trade('SELL')
+                st.error("SELL SIGNAL")
+            else:
+                st.info("HOLD SIGNAL")
 
-            # Sleep until next interval
-            time.sleep(300 - (time.time() % 300))  # Align to 5m intervals
-
-        except KeyboardInterrupt:
-            logging.info("Trading stopped by user")
-            break
-        except Exception as e:
-            logging.error(f"Critical error in main loop: {str(e)}")
-            time.sleep(600)  # Backoff on critical errors
+        with col3:
+            st.write("Last Trained:", st.session_state.last_trained.strftime("%Y-%m-%d %H:%M") 
+                     if st.session_state.last_trained else "Never")
 
 if __name__ == "__main__":
-    trading_loop()
+    main()

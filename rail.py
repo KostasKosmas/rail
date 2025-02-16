@@ -52,7 +52,14 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
     """Optimized data fetching with yfinance"""
     end = datetime.now()
     start = end - timedelta(days=LOOKBACK_DAYS)
-    return yf.download(symbol, start=start, end=end, interval=interval, progress=False)
+    return yf.download(
+        symbol, 
+        start=start, 
+        end=end, 
+        interval=interval, 
+        progress=False,
+        auto_adjust=False  # Explicitly set to maintain column names
+    )
 
 def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     """Robust feature engineering with fallback mechanisms"""
@@ -84,7 +91,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         returns = df['Returns'].dropna()
         if len(returns) > 100:
             try:
-                scaled_returns = returns * 1000  # Fix scaling issues
+                scaled_returns = returns * 1000
                 garch = arch_model(scaled_returns, vol='Garch', p=1, q=1, rescale=False)
                 garch_fit = garch.fit(disp='off', options={'maxiter': 1000})
                 df['Volatility'] = garch_fit.conditional_volatility / 1000
@@ -228,8 +235,15 @@ def main():
             st.line_chart(processed_data['Close'])
             
         with col2:
-            st.metric("Current Price", f"${processed_data['Close'].iloc[-1]:.2f}")
-            st.metric("24h Volatility", f"{processed_data['Volatility'].iloc[-1]*100:.2f}%")
+            try:
+                # Explicit type conversion for formatting
+                current_price = float(processed_data['Close'].iloc[-1])
+                current_vol = float(processed_data['Volatility'].iloc[-1]) * 100
+                st.metric("Current Price", f"${current_price:.2f}")
+                st.metric("24h Volatility", f"{current_vol:.2f}%")
+            except (IndexError, KeyError, ValueError) as e:
+                st.error(f"Data display error: {str(e)}")
+                logging.error(f"Data display failed: {str(e)}")
 
     # Model training
     st.sidebar.header("Model Controls")

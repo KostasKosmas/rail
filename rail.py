@@ -16,7 +16,7 @@ from sklearn.utils.class_weight import compute_sample_weight
 from imblearn.over_sampling import SMOTE
 from datetime import datetime, timedelta
 import warnings
-from sklearn.cluster import KMeans  # Added import for KMeans
+from sklearn.cluster import KMeans
 
 # ======================
 # CONFIGURATION
@@ -102,7 +102,13 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
             df[f'SMA_{window}'] = df['Close'].rolling(window).mean()
             df[f'STD_{window}'] = df['Close'].rolling(window).std()
             df[f'RSI_{window}'] = 100 - (100 / (1 + (df['Close'].diff().clip(lower=0).rolling(window).mean() / 
-                                                   df['Close'].diff().clip(upper=0).abs().rolling(window).mean())))
+                                                   df['Close'].diff().clip(upper=0).abs().rolling(window).mean()))
+        
+        # MACD features
+        ema12 = df['Close'].ewm(span=12, adjust=False).mean()
+        ema26 = df['Close'].ewm(span=26, adjust=False).mean()
+        df['MACD'] = ema12 - ema26
+        df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
         
         # Volume features
         df['VWAP'] = (df['Volume'] * (df['High'] + df['Low'] + df['Close']) / 3).cumsum() / df['Volume'].cumsum()
@@ -112,7 +118,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         returns = df['Log_Returns'].dropna()
         df['Volatility'] = returns.rolling(GARCH_WINDOW).std()
         
-        # Volatility clustering with proper index alignment
+        # Volatility clustering
         vol_series = df['Volatility'].dropna()
         if len(vol_series) >= VOLATILITY_CLUSTERS:
             kmeans = KMeans(n_clusters=VOLATILITY_CLUSTERS)
@@ -128,7 +134,12 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
                             bins=[-np.inf, -0.01, 0.01, np.inf],
                             labels=[0, 1, 2])
         
-        return df.dropna().set_index('Datetime') if 'Datetime' in df.columns else df.dropna()
+        # Clean up columns
+        df = df.dropna()
+        if 'index' in df.columns:
+            df = df.drop(columns=['index'])
+            
+        return df.set_index('Datetime') if 'Datetime' in df.columns else df
     except Exception as e:
         logging.error(f"Feature engineering failed: {str(e)}")
         return pd.DataFrame()
@@ -178,6 +189,9 @@ class TradingModel:
 
     def optimize_models(self, X: pd.DataFrame, y: pd.Series):
         try:
+            if X.empty or y.empty:
+                raise ValueError("Empty training data")
+                
             X_sel = self._safe_feature_selection(X, y)
             
             self.study = optuna.create_study(
@@ -217,6 +231,9 @@ class TradingModel:
                 X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
                 y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
                 
+                if X_train.empty or X_test.empty:
+                    continue
+                
                 X_res, y_res = self.smote.fit_resample(X_train, y_train)
                 
                 rf = RandomForestClassifier(**rf_params).fit(X_res, y_res)
@@ -226,13 +243,16 @@ class TradingModel:
                 f1 = f1_score(y_test, np.argmax(preds, axis=1), average='weighted')
                 scores.append(f1)
                 
-            return np.mean(scores)
+            return np.mean(scores) if scores else 0.0
         except Exception as e:
             logging.warning(f"Trial failed: {str(e)}")
             return 0.0
 
     def train(self, X: pd.DataFrame, y: pd.Series):
         try:
+            if X.empty or y.empty:
+                raise ValueError("Empty training data")
+                
             X_sel = X[self.selected_features]
             X_res, y_res = self.smote.fit_resample(X_sel, y)
             
@@ -286,8 +306,9 @@ def main():
             
         with col2:
             try:
-                current_price = processed_data['Close'].iloc[-1]
-                current_vol = processed_data['Volatility'].iloc[-1]
+                # Ensure we're accessing scalar values
+                current_price = float(processed_data['Close'].iloc[-1])
+                current_vol = float(processed_data['Volatility'].iloc[-1])
                 st.metric("Current Price", f"${current_price:,.2f}")
                 st.metric("Volatility", f"{current_vol:.2%}")
             except Exception as e:

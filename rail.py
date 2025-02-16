@@ -101,7 +101,6 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         for window in windows:
             df[f'SMA_{window}'] = df['Close'].rolling(window).mean()
             df[f'STD_{window}'] = df['Close'].rolling(window).std()
-            # Fixed RSI calculation with proper parenthesis
             df[f'RSI_{window}'] = 100 - (100 / (1 + (
                 df['Close'].diff().clip(lower=0).rolling(window).mean() / 
                 df['Close'].diff().clip(upper=0).abs().rolling(window).mean()
@@ -132,13 +131,12 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         for period in [3, 7, 14]:
             df[f'Momentum_{period}'] = df['Close'].pct_change(period)
         
-        # Target engineering
+        # Target engineering (don't dropna here)
         df['Target'] = pd.cut(df['Returns'].shift(-1), 
                             bins=[-np.inf, -0.01, 0.01, np.inf],
                             labels=[0, 1, 2])
         
         # Clean up columns
-        df = df.dropna()
         if 'index' in df.columns:
             df = df.drop(columns=['index'])
             
@@ -192,8 +190,13 @@ class TradingModel:
 
     def optimize_models(self, X: pd.DataFrame, y: pd.Series):
         try:
+            # Handle NaN in target
+            valid_idx = y.dropna().index
+            X = X.loc[valid_idx]
+            y = y.loc[valid_idx]
+            
             if X.empty or y.empty:
-                raise ValueError("Empty training data")
+                raise ValueError("Empty training data after cleaning")
                 
             X_sel = self._safe_feature_selection(X, y)
             
@@ -253,8 +256,12 @@ class TradingModel:
 
     def train(self, X: pd.DataFrame, y: pd.Series):
         try:
+            valid_idx = y.dropna().index
+            X = X.loc[valid_idx]
+            y = y.loc[valid_idx]
+            
             if X.empty or y.empty:
-                raise ValueError("Empty training data")
+                raise ValueError("Empty training data after cleaning")
                 
             X_sel = X[self.selected_features]
             X_res, y_res = self.smote.fit_resample(X_sel, y)
@@ -279,10 +286,13 @@ class TradingModel:
             if not self.selected_features:
                 raise ValueError("No features selected for prediction")
                 
-            X_sel = X[self.selected_features]
+            # Ensure we're using the latest valid features
+            valid_features = [f for f in self.selected_features if f in X.columns]
+            X_sel = X[valid_features]
+            
             prob_rf = self.calibrated_rf.predict_proba(X_sel)
             prob_gb = self.calibrated_gb.predict_proba(X_sel)
-            ensemble_probs = 0.6*prob_rf + 0.4*prob_gb
+            ensemble_probs = 0.6*prob_rf + 0.4*gb.predict_proba(X_sel)
             return ensemble_probs[:, 2]
         except Exception as e:
             logging.error(f"Prediction failed: {str(e)}")
@@ -345,7 +355,8 @@ def main():
 
     if st.session_state.model and not processed_data.empty:
         try:
-            latest_data = processed_data[st.session_state.model.selected_features].iloc[[-1]]
+            # Use most recent data with all features
+            latest_data = processed_data.iloc[[-1]].drop(columns=['Target'], errors='ignore')
             confidence = st.session_state.model.predict(latest_data)[0]
             
             st.subheader("Trading Signal")

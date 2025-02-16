@@ -6,7 +6,7 @@ import pandas as pd
 import yfinance as yf
 import streamlit as st
 import optuna
-import pandas_ta as ta
+import ta
 from arch import arch_model
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.model_selection import TimeSeriesSplit
@@ -31,7 +31,7 @@ TRADE_THRESHOLD_SELL = 0.42
 GARCH_WINDOW = 7
 MAX_TRIALS = 20
 INITIAL_FEATURES = [
-    'SMA_20', 'SMA_50', 'SMA_200', 'RSI', 'MACD', 'MACD_Hist',
+    'SMA_20', 'SMA_50', 'SMA_200', 'RSI', 'MACD', 'MACD_hist',
     'BBL_20_2.0', 'BBM_20_2.0', 'BBU_20_2.0', 'ATRr_14', 
     'VWAP', 'Volume_MA_20', 'Volatility', 'OBV'
 ]
@@ -102,27 +102,35 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
             return pd.DataFrame()
 
 def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Advanced feature engineering with pandas-ta indicators"""
+    """Advanced feature engineering with ta indicators"""
     df = df.copy()
     try:
+        # Initialize technical analysis indicators
+        indicator = ta.TechnicalAnalysis(
+            high=df['High'],
+            low=df['Low'],
+            close=df['Close'],
+            volume=df['Volume']
+        )
+        
         # Price features
-        df['SMA_20'] = ta.sma(df['Close'], length=20)
-        df['SMA_50'] = ta.sma(df['Close'], length=50)
-        df['SMA_200'] = ta.sma(df['Close'], length=200)
+        df['SMA_20'] = indicator.sma(window=20)
+        df['SMA_50'] = indicator.sma(window=50)
+        df['SMA_200'] = indicator.sma(window=200)
         df['Returns'] = df['Close'].pct_change()
         
         # Bollinger Bands
-        bb = ta.bbands(df['Close'], length=20, std=2)
-        df = pd.concat([df, bb], axis=1)
+        bb = indicator.bollinger_bands(window=20, window_dev=2)
+        df = pd.concat([df, bb.add_suffix('_20_2.0')], axis=1)
         
         # Momentum indicators
-        df['RSI'] = ta.rsi(df['Close'], length=14)
-        macd = ta.macd(df['Close'], fast=12, slow=26, signal=9)
-        df['MACD'] = macd['MACD_12_26_9']
-        df['MACD_Hist'] = macd['MACDh_12_26_9']
+        df['RSI'] = indicator.rsi(window=14)
+        macd = indicator.macd(fast=12, slow=26, signal=9)
+        df['MACD'] = macd['MACD']
+        df['MACD_hist'] = macd['MACD_hist']
         
         # Volatility features
-        df['ATRr_14'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
+        df['ATRr_14'] = indicator.atr(window=14)
         returns = df['Returns'].dropna()
         if len(returns) > 100:
             try:
@@ -136,8 +144,8 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
             df['Volatility'] = returns.rolling(GARCH_WINDOW).std() * 100
         
         # Volume features
-        df['VWAP'] = ta.vwap(df['High'], df['Low'], df['Close'], df['Volume'])
-        df['OBV'] = ta.obv(df['Close'], df['Volume'])
+        df['VWAP'] = (df['Volume'] * (df['High'] + df['Low'] + df['Close']) / 3).cumsum() / df['Volume'].cumsum()
+        df['OBV'] = indicator.on_balance_volume()
         df['Volume_MA_20'] = df['Volume'].rolling(20).mean()
         
         # Target encoding

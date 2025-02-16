@@ -16,6 +16,7 @@ from sklearn.utils.class_weight import compute_sample_weight
 from imblearn.over_sampling import SMOTE
 from datetime import datetime, timedelta
 import warnings
+from sklearn.cluster import KMeans  # Added import for KMeans
 
 # ======================
 # CONFIGURATION
@@ -25,13 +26,12 @@ PRIMARY_INTERVAL = '15m'
 FALLBACK_INTERVAL = '60m'
 TRADE_THRESHOLD_BUY = 0.58
 TRADE_THRESHOLD_SELL = 0.42
-MAX_TRIALS = 50  # Increased from 15 to 50
+MAX_TRIALS = 50
 GARCH_WINDOW = 14
 DATA_RETRIES = 3
-MIN_FEATURES = 7  # Increased minimum features
-VOLATILITY_CLUSTERS = 3  # New parameter for volatility clustering
+MIN_FEATURES = 7
+VOLATILITY_CLUSTERS = 3
 
-# Suppress warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 logging.basicConfig(level=logging.INFO)
 
@@ -42,7 +42,6 @@ st.set_page_config(page_title="AI Trading System", layout="wide")
 st.title("🚀 AI-Powered Cryptocurrency Trading System")
 st.markdown("Real-time trading signals with machine learning and volatility modeling")
 
-# Initialize session state
 if 'model' not in st.session_state:
     st.session_state.model = None
 if 'last_trained' not in st.session_state:
@@ -57,7 +56,6 @@ if 'data_warning' not in st.session_state:
 # ======================
 @st.cache_data(ttl=300, show_spinner="Fetching market data...")
 def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
-    """Improved data fetching with multi-source validation"""
     end = datetime.now()
     lookback_days = 59 if interval in ['15m', '30m'] else 180
     
@@ -69,7 +67,7 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
             interval=interval,
             progress=False,
             auto_adjust=True
-        ).reset_index()  # Fix for MultiIndex issues
+        ).reset_index()
         
         if not df.empty and len(df) > 100:
             st.session_state.data_warning = None
@@ -77,7 +75,7 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
     except Exception as e:
         logging.warning(f"Primary data fetch failed: {str(e)}")
     
-    try:  # Binance API fallback
+    try:
         df = pd.read_json(f"https://api.binance.com/api/v3/klines?symbol={symbol.replace('-', '')}&interval={interval}&limit=1000")
         df = df.iloc[:, :6]
         df.columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'Close time']
@@ -89,11 +87,10 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Enhanced feature engineering with volatility clustering"""
     if df.empty or len(df) < 100:
         return pd.DataFrame()
         
-    df = df.copy().reset_index()  # Fix for MultiIndex issues
+    df = df.copy().reset_index()
     try:
         # Core price features
         df['Returns'] = df['Close'].pct_change()
@@ -115,21 +112,21 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         returns = df['Log_Returns'].dropna()
         df['Volatility'] = returns.rolling(GARCH_WINDOW).std()
         
-        # Volatility clustering using KMeans
-        from sklearn.cluster import KMeans
-        volatilities = df['Volatility'].dropna().values.reshape(-1, 1)
-        if len(volatilities) >= VOLATILITY_CLUSTERS:
-            kmeans = KMeans(n_clusters=VOLATILITY_CLUSTERS).fit(volatilities)
-            df['Vol_Cluster'] = kmeans.labels_
+        # Volatility clustering with proper index alignment
+        vol_series = df['Volatility'].dropna()
+        if len(vol_series) >= VOLATILITY_CLUSTERS:
+            kmeans = KMeans(n_clusters=VOLATILITY_CLUSTERS)
+            clusters = kmeans.fit_predict(vol_series.values.reshape(-1, 1))
+            df['Vol_Cluster'] = pd.Series(clusters, index=vol_series.index)
         
         # Momentum features
         for period in [3, 7, 14]:
             df[f'Momentum_{period}'] = df['Close'].pct_change(period)
         
-        # Target engineering with 3-class system
+        # Target engineering
         df['Target'] = pd.cut(df['Returns'].shift(-1), 
                             bins=[-np.inf, -0.01, 0.01, np.inf],
-                            labels=[0, 1, 2])  # 0=Strong Sell, 1=Neutral, 2=Strong Buy
+                            labels=[0, 1, 2])
         
         return df.dropna().set_index('Datetime') if 'Datetime' in df.columns else df.dropna()
     except Exception as e:
@@ -152,7 +149,6 @@ class TradingModel:
         self.best_score = 0
 
     def _progress_callback(self, study, trial):
-        """Enhanced progress tracking"""
         if st.session_state.training_progress:
             progress = (trial.number + 1) / MAX_TRIALS
             text = (f"Trial {trial.number + 1}/{MAX_TRIALS} - "
@@ -160,16 +156,11 @@ class TradingModel:
             st.session_state.training_progress.progress(progress, text=text)
 
     def _safe_feature_selection(self, X, y):
-        """Robust feature selection with column validation"""
         try:
-            # Convert to DataFrame if not already
             if not isinstance(X, pd.DataFrame):
                 X = pd.DataFrame(X)
-                
-            # Remove any remaining MultiIndex
             X.columns = [str(col) for col in X.columns]
             
-            # Feature selection pipeline
             self.feature_selector = SelectFromModel(
                 GradientBoostingClassifier(n_estimators=100),
                 threshold="1.25*median"
@@ -177,7 +168,6 @@ class TradingModel:
             self.feature_selector.fit(X, y)
             self.selected_features = X.columns[self.feature_selector.get_support()]
             
-            # Final validation
             if len(self.selected_features) < MIN_FEATURES:
                 self.selected_features = X.columns[:MIN_FEATURES]
             
@@ -187,7 +177,6 @@ class TradingModel:
             return X.iloc[:, :MIN_FEATURES]
 
     def optimize_models(self, X: pd.DataFrame, y: pd.Series):
-        """Optimization pipeline with cross-validation enhancements"""
         try:
             X_sel = self._safe_feature_selection(X, y)
             
@@ -206,9 +195,7 @@ class TradingModel:
             raise
 
     def _objective(self, trial, X, y):
-        """Enhanced objective function with stratified time split"""
         try:
-            # Parameter spaces
             rf_params = {
                 'n_estimators': trial.suggest_int('rf_n_estimators', 300, 1000),
                 'max_depth': trial.suggest_int('rf_max_depth', 15, 40),
@@ -223,7 +210,6 @@ class TradingModel:
                 'subsample': trial.suggest_float('gb_subsample', 0.8, 1.0)
             }
             
-            # Stratified time series split
             tscv = TimeSeriesSplit(n_splits=3)
             scores = []
             
@@ -231,14 +217,11 @@ class TradingModel:
                 X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
                 y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
                 
-                # Class balancing
                 X_res, y_res = self.smote.fit_resample(X_train, y_train)
                 
-                # Model training
                 rf = RandomForestClassifier(**rf_params).fit(X_res, y_res)
                 gb = GradientBoostingClassifier(**gb_params).fit(X_res, y_res)
                 
-                # Ensemble predictions
                 preds = 0.6*rf.predict_proba(X_test) + 0.4*gb.predict_proba(X_test)
                 f1 = f1_score(y_test, np.argmax(preds, axis=1), average='weighted')
                 scores.append(f1)
@@ -249,23 +232,17 @@ class TradingModel:
             return 0.0
 
     def train(self, X: pd.DataFrame, y: pd.Series):
-        """Enhanced training with feature validation"""
         try:
             X_sel = X[self.selected_features]
-            
-            # Final balancing
             X_res, y_res = self.smote.fit_resample(X_sel, y)
             
-            # Get best parameters
             best_params = self.study.best_params
             rf_params = {k[3:]: v for k, v in best_params.items() if k.startswith('rf_')}
             gb_params = {k[3:]: v for k, v in best_params.items() if k.startswith('gb_')}
             
-            # Train models
             self.model_rf.set_params(**rf_params).fit(X_res, y_res)
             self.model_gb.set_params(**gb_params).fit(X_res, y_res)
             
-            # Calibration with time series aware CV
             self.calibrated_rf = CalibratedClassifierCV(self.model_rf, cv=TimeSeriesSplit(3))
             self.calibrated_gb = CalibratedClassifierCV(self.model_gb, cv=TimeSeriesSplit(3))
             self.calibrated_rf.fit(X_sel, y)
@@ -275,7 +252,6 @@ class TradingModel:
             raise
 
     def predict(self, X: pd.DataFrame) -> float:
-        """Robust prediction with error handling"""
         try:
             if not self.selected_features:
                 raise ValueError("No features selected for prediction")
@@ -284,20 +260,18 @@ class TradingModel:
             prob_rf = self.calibrated_rf.predict_proba(X_sel)
             prob_gb = self.calibrated_gb.predict_proba(X_sel)
             ensemble_probs = 0.6*prob_rf + 0.4*prob_gb
-            return ensemble_probs[:, 2]  # Return probability for Strong Buy class
+            return ensemble_probs[:, 2]
         except Exception as e:
             logging.error(f"Prediction failed: {str(e)}")
-            return np.zeros(len(X))  # Return neutral predictions
+            return np.zeros(len(X))
 
 # ======================
 # STREAMLIT INTERFACE
 # ======================
 def main():
-    # Symbol selection
     st.sidebar.header("Settings")
     symbol = st.sidebar.text_input("Cryptocurrency Symbol", DEFAULT_SYMBOL).upper()
     
-    # Data section
     raw_data = fetch_data(symbol, PRIMARY_INTERVAL)
     processed_data = calculate_features(raw_data)
     
@@ -319,7 +293,6 @@ def main():
             except Exception as e:
                 st.error(f"Display error: {str(e)}")
 
-    # Model training
     st.sidebar.header("Model Controls")
     if st.sidebar.button("🚀 Train Model"):
         if processed_data.empty or 'Target' not in processed_data.columns:
@@ -347,7 +320,6 @@ def main():
             time.sleep(1)
             st.session_state.training_progress = None
 
-    # Trading signals
     if st.session_state.model and not processed_data.empty:
         try:
             latest_data = processed_data[st.session_state.model.selected_features].iloc[[-1]]
@@ -357,7 +329,6 @@ def main():
             col1, col2, col3 = st.columns(3)
             col1.metric("Confidence Score", f"{confidence:.2%}")
             
-            # Dynamic threshold adjustment based on volatility
             current_vol = processed_data['Volatility'].iloc[-1]
             adj_buy = TRADE_THRESHOLD_BUY + (current_vol * 0.1)
             adj_sell = TRADE_THRESHOLD_SELL - (current_vol * 0.1)

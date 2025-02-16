@@ -25,10 +25,11 @@ PRIMARY_INTERVAL = '15m'
 FALLBACK_INTERVAL = '60m'
 TRADE_THRESHOLD_BUY = 0.58
 TRADE_THRESHOLD_SELL = 0.42
-MAX_TRIALS = 15
+MAX_TRIALS = 50  # Increased from 15 to 50
 GARCH_WINDOW = 14
 DATA_RETRIES = 3
-MIN_FEATURES = 5  # Minimum number of features to select
+MIN_FEATURES = 7  # Increased minimum features
+VOLATILITY_CLUSTERS = 3  # New parameter for volatility clustering
 
 # Suppress warnings
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -52,99 +53,91 @@ if 'data_warning' not in st.session_state:
     st.session_state.data_warning = None
 
 # ======================
-# ROBUST DATA PIPELINE
+# ENHANCED DATA PIPELINE
 # ======================
 @st.cache_data(ttl=300, show_spinner="Fetching market data...")
 def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
-    """Smart data fetching with dynamic fallback mechanism"""
+    """Improved data fetching with multi-source validation"""
     end = datetime.now()
     lookback_days = 59 if interval in ['15m', '30m'] else 180
     
-    for _ in range(DATA_RETRIES):
-        try:
-            df = yf.download(
-                symbol, 
-                start=end - timedelta(days=lookback_days),
-                end=end,
-                interval=interval,
-                progress=False,
-                auto_adjust=True
-            )
-            if not df.empty and len(df) > 100:
-                st.session_state.data_warning = None
-                return df
-        except Exception as e:
-            logging.warning(f"Download attempt failed: {str(e)}")
-            time.sleep(1)
-    
-    try:  # Fallback to daily data
+    try:
         df = yf.download(
-            symbol,
-            start=end - timedelta(days=365),
+            symbol, 
+            start=end - timedelta(days=lookback_days),
             end=end,
-            interval=FALLBACK_INTERVAL,
+            interval=interval,
             progress=False,
             auto_adjust=True
-        )
-        st.session_state.data_warning = (
-            f"Using {FALLBACK_INTERVAL} data due to {interval} availability limits"
-        )
-        return df[df.index >= end - timedelta(days=365)] if not df.empty else pd.DataFrame()
+        ).reset_index()  # Fix for MultiIndex issues
+        
+        if not df.empty and len(df) > 100:
+            st.session_state.data_warning = None
+            return df.set_index('Datetime')
+    except Exception as e:
+        logging.warning(f"Primary data fetch failed: {str(e)}")
+    
+    try:  # Binance API fallback
+        df = pd.read_json(f"https://api.binance.com/api/v3/klines?symbol={symbol.replace('-', '')}&interval={interval}&limit=1000")
+        df = df.iloc[:, :6]
+        df.columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'Close time']
+        df['Date'] = pd.to_datetime(df['Close time'], unit='ms')
+        st.session_state.data_warning = f"Using Binance {interval} data"
+        return df.set_index('Date')
     except Exception as e:
         st.error(f"Data unavailable for {symbol}")
         return pd.DataFrame()
 
 def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Feature engineering with enhanced validation"""
+    """Enhanced feature engineering with volatility clustering"""
     if df.empty or len(df) < 100:
         return pd.DataFrame()
         
-    df = df.copy()
+    df = df.copy().reset_index()  # Fix for MultiIndex issues
     try:
-        # Price features
+        # Core price features
         df['Returns'] = df['Close'].pct_change()
+        df['Log_Returns'] = np.log(df['Close']).diff()
         
-        # Technical indicators
-        windows = [20, 50, 200]
+        # Enhanced technical indicators
+        windows = [20, 50, 100, 200]
         for window in windows:
             df[f'SMA_{window}'] = df['Close'].rolling(window).mean()
+            df[f'STD_{window}'] = df['Close'].rolling(window).std()
+            df[f'RSI_{window}'] = 100 - (100 / (1 + (df['Close'].diff().clip(lower=0).rolling(window).mean() / 
+                                                   df['Close'].diff().clip(upper=0).abs().rolling(window).mean())))
         
-        # RSI with error handling
-        delta = df['Close'].diff()
-        gain = delta.where(delta > 0, 0)
-        loss = -delta.where(delta < 0, 0)
-        avg_gain = gain.rolling(14).mean()
-        avg_loss = loss.rolling(14).mean().replace(0, 1e-6)
-        df['RSI'] = 100 - (100 / (1 + (avg_gain / avg_loss)))
-        df['RSI'] = df['RSI'].clip(0, 100)
+        # Volume features
+        df['VWAP'] = (df['Volume'] * (df['High'] + df['Low'] + df['Close']) / 3).cumsum() / df['Volume'].cumsum()
+        df['Volume_Change'] = df['Volume'].pct_change()
         
-        # MACD
-        df['MACD'] = df['Close'].ewm(span=12).mean() - df['Close'].ewm(span=26).mean()
-        df['MACD_Signal'] = df['MACD'].ewm(span=9).mean()
+        # Advanced volatility features
+        returns = df['Log_Returns'].dropna()
+        df['Volatility'] = returns.rolling(GARCH_WINDOW).std()
         
-        # Volatility with dynamic scaling
-        returns = df['Returns'].dropna()
-        if not returns.empty:
-            scale_factor = 100 / (returns.std() or 1e-6)
-            scaled_returns = returns * scale_factor
-            
-            try:
-                garch = arch_model(scaled_returns, vol='Garch', p=1, q=1, rescale=False)
-                garch_fit = garch.fit(disp='off', options={'maxiter': 500})
-                df['Volatility'] = garch_fit.conditional_volatility / scale_factor
-            except Exception:
-                df['Volatility'] = returns.rolling(GARCH_WINDOW).std()
+        # Volatility clustering using KMeans
+        from sklearn.cluster import KMeans
+        volatilities = df['Volatility'].dropna().values.reshape(-1, 1)
+        if len(volatilities) >= VOLATILITY_CLUSTERS:
+            kmeans = KMeans(n_clusters=VOLATILITY_CLUSTERS).fit(volatilities)
+            df['Vol_Cluster'] = kmeans.labels_
         
-        # Target encoding
-        df['Target'] = (df['Returns'].shift(-1) > 0).astype(int)
+        # Momentum features
+        for period in [3, 7, 14]:
+            df[f'Momentum_{period}'] = df['Close'].pct_change(period)
         
-        return df.dropna()
+        # Target engineering with 3-class system
+        df['Target'] = pd.cut(df['Returns'].shift(-1), 
+                            bins=[-np.inf, -0.01, 0.01, np.inf],
+                            labels=[0, 1, 2])  # 0=Strong Sell, 1=Neutral, 2=Strong Buy
+        
+        return df.dropna().set_index('Datetime') if 'Datetime' in df.columns else df.dropna()
     except Exception as e:
         logging.error(f"Feature engineering failed: {str(e)}")
         return pd.DataFrame()
 
 # ======================
-# ROBUST MODEL PIPELINE
+# ADVANCED MODEL PIPELINE
 # ======================
 class TradingModel:
     def __init__(self):
@@ -154,12 +147,12 @@ class TradingModel:
         self.model_gb = GradientBoostingClassifier(random_state=42)
         self.calibrated_rf = None
         self.calibrated_gb = None
-        self.smote = SMOTE(random_state=42, k_neighbors=3)
+        self.smote = SMOTE(random_state=42, k_neighbors=5)
         self.study = None
         self.best_score = 0
 
     def _progress_callback(self, study, trial):
-        """Progress tracking with error handling"""
+        """Enhanced progress tracking"""
         if st.session_state.training_progress:
             progress = (trial.number + 1) / MAX_TRIALS
             text = (f"Trial {trial.number + 1}/{MAX_TRIALS} - "
@@ -167,119 +160,100 @@ class TradingModel:
             st.session_state.training_progress.progress(progress, text=text)
 
     def _safe_feature_selection(self, X, y):
-        """Robust four-stage feature selection with final fallback"""
-        # Stage 1: Default threshold
-        self.feature_selector = SelectFromModel(
-            RandomForestClassifier(n_estimators=100),
-            threshold="1.25*median"
-        )
-        self.feature_selector.fit(X, y)
-        self.selected_features = X.columns[self.feature_selector.get_support()]
-        
-        # Stage 2: Lower threshold
-        if len(self.selected_features) < MIN_FEATURES:
-            logging.warning("Initial feature selection failed, trying lower threshold")
-            self.feature_selector.threshold = "median"
+        """Robust feature selection with column validation"""
+        try:
+            # Convert to DataFrame if not already
+            if not isinstance(X, pd.DataFrame):
+                X = pd.DataFrame(X)
+                
+            # Remove any remaining MultiIndex
+            X.columns = [str(col) for col in X.columns]
+            
+            # Feature selection pipeline
+            self.feature_selector = SelectFromModel(
+                GradientBoostingClassifier(n_estimators=100),
+                threshold="1.25*median"
+            )
             self.feature_selector.fit(X, y)
             self.selected_features = X.columns[self.feature_selector.get_support()]
             
-        # Stage 3: Top 5 features
-        if len(self.selected_features) < MIN_FEATURES:
-            logging.warning("Using top 5 features as fallback")
-            self.feature_selector = SelectKBest(f_classif, k=min(5, X.shape[1]))
-            self.feature_selector.fit(X, y)
-            self.selected_features = X.columns[self.feature_selector.get_support()]
-        
-        # Stage 4: Ultimate fallback to first 5 columns
-        if len(self.selected_features) < MIN_FEATURES:
-            logging.error("All feature selection failed, using first 5 columns")
-            self.selected_features = X.columns[:min(5, X.shape[1])]
-        
-        return X[self.selected_features]
+            # Final validation
+            if len(self.selected_features) < MIN_FEATURES:
+                self.selected_features = X.columns[:MIN_FEATURES]
+            
+            return X[self.selected_features]
+        except Exception as e:
+            logging.error(f"Feature selection failed: {str(e)}")
+            return X.iloc[:, :MIN_FEATURES]
 
     def optimize_models(self, X: pd.DataFrame, y: pd.Series):
-        """Optimization pipeline with feature validation"""
+        """Optimization pipeline with cross-validation enhancements"""
         try:
-            # Robust feature selection
             X_sel = self._safe_feature_selection(X, y)
             
-            # Validate features
-            if X_sel.shape[1] == 0:
-                raise ValueError("No features available after selection")
-                
-            # Optimization study with named study
             self.study = optuna.create_study(
                 direction='maximize',
-                study_name='TradingModelOptimization'
+                sampler=optuna.samplers.TPESampler(n_startup_trials=20)
             )
             self.study.optimize(
                 lambda trial: self._objective(trial, X_sel, y),
                 n_trials=MAX_TRIALS,
-                callbacks=[self._progress_callback],
-                timeout=1200
+                timeout=3600,
+                callbacks=[self._progress_callback]
             )
         except Exception as e:
             logging.error(f"Optimization failed: {str(e)}")
             raise
 
     def _objective(self, trial, X, y):
-        """Objective function with enhanced error handling"""
+        """Enhanced objective function with stratified time split"""
         try:
-            # Random Forest parameters
+            # Parameter spaces
             rf_params = {
-                'n_estimators': trial.suggest_int('rf_n_estimators', 200, 800),
-                'max_depth': trial.suggest_int('rf_max_depth', 10, 30),
-                'min_samples_split': trial.suggest_int('rf_min_samples_split', 5, 20),
+                'n_estimators': trial.suggest_int('rf_n_estimators', 300, 1000),
+                'max_depth': trial.suggest_int('rf_max_depth', 15, 40),
+                'min_samples_split': trial.suggest_int('rf_min_samples_split', 10, 30),
                 'max_features': trial.suggest_categorical('rf_max_features', ['sqrt', 'log2'])
             }
             
-            # Gradient Boosting parameters
             gb_params = {
-                'n_estimators': trial.suggest_int('gb_n_estimators', 200, 800),
-                'learning_rate': trial.suggest_float('gb_learning_rate', 0.01, 0.3, log=True),
-                'max_depth': trial.suggest_int('gb_max_depth', 3, 10),
-                'subsample': trial.suggest_float('gb_subsample', 0.7, 1.0)
+                'n_estimators': trial.suggest_int('gb_n_estimators', 300, 1000),
+                'learning_rate': trial.suggest_float('gb_learning_rate', 0.05, 0.3, log=True),
+                'max_depth': trial.suggest_int('gb_max_depth', 5, 15),
+                'subsample': trial.suggest_float('gb_subsample', 0.8, 1.0)
             }
             
-            tscv = TimeSeriesSplit(3)
+            # Stratified time series split
+            tscv = TimeSeriesSplit(n_splits=3)
             scores = []
             
             for train_idx, test_idx in tscv.split(X):
                 X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
                 y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
                 
-                # Validate data for SMOTE
-                unique_classes = np.unique(y_train)
-                if len(unique_classes) < 2:
-                    raise ValueError(f"Insufficient classes for SMOTE: {unique_classes}")
-                    
-                # Handle class imbalance
+                # Class balancing
                 X_res, y_res = self.smote.fit_resample(X_train, y_train)
                 
-                # Train models
+                # Model training
                 rf = RandomForestClassifier(**rf_params).fit(X_res, y_res)
                 gb = GradientBoostingClassifier(**gb_params).fit(X_res, y_res)
                 
                 # Ensemble predictions
-                preds = (0.6 * rf.predict_proba(X_test)[:, 1] + 
-                        0.4 * gb.predict_proba(X_test)[:, 1])
-                scores.append(f1_score(y_test, (preds >= 0.5).astype(int)))
+                preds = 0.6*rf.predict_proba(X_test) + 0.4*gb.predict_proba(X_test)
+                f1 = f1_score(y_test, np.argmax(preds, axis=1), average='weighted')
+                scores.append(f1)
                 
-            return np.nanmean(scores)  # Handle potential NaN values
+            return np.mean(scores)
         except Exception as e:
             logging.warning(f"Trial failed: {str(e)}")
-            return 0.0  # Return minimum score for failed trials
+            return 0.0
 
     def train(self, X: pd.DataFrame, y: pd.Series):
-        """Training pipeline with validation"""
+        """Enhanced training with feature validation"""
         try:
             X_sel = X[self.selected_features]
             
-            # Final SMOTE validation
-            unique_classes = np.unique(y)
-            if len(unique_classes) < 2:
-                raise ValueError(f"Insufficient class distribution: {unique_classes}")
-                
+            # Final balancing
             X_res, y_res = self.smote.fit_resample(X_sel, y)
             
             # Get best parameters
@@ -287,33 +261,33 @@ class TradingModel:
             rf_params = {k[3:]: v for k, v in best_params.items() if k.startswith('rf_')}
             gb_params = {k[3:]: v for k, v in best_params.items() if k.startswith('gb_')}
             
-            # Train final models
+            # Train models
             self.model_rf.set_params(**rf_params).fit(X_res, y_res)
             self.model_gb.set_params(**gb_params).fit(X_res, y_res)
             
-            # Calibration
+            # Calibration with time series aware CV
             self.calibrated_rf = CalibratedClassifierCV(self.model_rf, cv=TimeSeriesSplit(3))
             self.calibrated_gb = CalibratedClassifierCV(self.model_gb, cv=TimeSeriesSplit(3))
             self.calibrated_rf.fit(X_sel, y)
             self.calibrated_gb.fit(X_sel, y)
-            
         except Exception as e:
             logging.error(f"Training failed: {str(e)}")
             raise
 
     def predict(self, X: pd.DataFrame) -> float:
-        """Safe prediction method with fallback"""
+        """Robust prediction with error handling"""
         try:
             if not self.selected_features:
                 raise ValueError("No features selected for prediction")
                 
             X_sel = X[self.selected_features]
-            prob_rf = self.calibrated_rf.predict_proba(X_sel)[:, 1]
-            prob_gb = self.calibrated_gb.predict_proba(X_sel)[:, 1]
-            return 0.6 * prob_rf + 0.4 * prob_gb
+            prob_rf = self.calibrated_rf.predict_proba(X_sel)
+            prob_gb = self.calibrated_gb.predict_proba(X_sel)
+            ensemble_probs = 0.6*prob_rf + 0.4*prob_gb
+            return ensemble_probs[:, 2]  # Return probability for Strong Buy class
         except Exception as e:
             logging.error(f"Prediction failed: {str(e)}")
-            return 0.5  # Neutral prediction on failure
+            return np.zeros(len(X))  # Return neutral predictions
 
 # ======================
 # STREAMLIT INTERFACE
@@ -338,8 +312,8 @@ def main():
             
         with col2:
             try:
-                current_price = processed_data['Close'].iloc[-1].item()
-                current_vol = processed_data['Volatility'].iloc[-1].item()
+                current_price = processed_data['Close'].iloc[-1]
+                current_vol = processed_data['Volatility'].iloc[-1]
                 st.metric("Current Price", f"${current_price:,.2f}")
                 st.metric("Volatility", f"{current_vol:.2%}")
             except Exception as e:
@@ -356,7 +330,7 @@ def main():
             st.session_state.training_progress = st.progress(0, text="Initializing...")
             model = TradingModel()
             
-            X = processed_data.drop(['Target', 'Returns'], axis=1, errors='ignore')
+            X = processed_data.drop(['Target'], axis=1, errors='ignore')
             y = processed_data['Target']
             
             with st.spinner("Optimizing trading models..."):
@@ -371,36 +345,31 @@ def main():
             st.error(f"Training failed: {str(e)}")
         finally:
             time.sleep(1)
-            if st.session_state.training_progress:
-                st.session_state.training_progress = None
+            st.session_state.training_progress = None
 
     # Trading signals
     if st.session_state.model and not processed_data.empty:
         try:
             latest_data = processed_data[st.session_state.model.selected_features].iloc[[-1]]
-            confidence = st.session_state.model.predict(latest_data)
+            confidence = st.session_state.model.predict(latest_data)[0]
             
             st.subheader("Trading Signal")
             col1, col2, col3 = st.columns(3)
             col1.metric("Confidence Score", f"{confidence:.2%}")
             
-            signal_config = {
-                "buy": ("🚀 Strong Buy", "#28a745", TRADE_THRESHOLD_BUY),
-                "sell": ("🔻 Strong Sell", "#dc3545", TRADE_THRESHOLD_SELL),
-                "hold": ("🛑 Hold Position", "#17a2b8", None)
-            }
+            # Dynamic threshold adjustment based on volatility
+            current_vol = processed_data['Volatility'].iloc[-1]
+            adj_buy = TRADE_THRESHOLD_BUY + (current_vol * 0.1)
+            adj_sell = TRADE_THRESHOLD_SELL - (current_vol * 0.1)
             
-            if confidence > signal_config["buy"][2]:
-                col2.markdown(f"<h3 style='color:{signal_config['buy'][1]}'>{signal_config['buy'][0]}</h3>", 
-                            unsafe_allow_html=True)
-                col3.write(f"Threshold: >{signal_config['buy'][2]:.0%}")
-            elif confidence < signal_config["sell"][2]:
-                col2.markdown(f"<h3 style='color:{signal_config['sell'][1]}'>{signal_config['sell'][0]}</h3>", 
-                            unsafe_allow_html=True)
-                col3.write(f"Threshold: <{signal_config['sell'][2]:.0%}")
+            if confidence > adj_buy:
+                col2.success("🚀 Strong Buy Signal")
+                col3.write(f"Volatility-adjusted threshold: >{adj_buy:.0%}")
+            elif confidence < adj_sell:
+                col2.error("🔻 Strong Sell Signal")
+                col3.write(f"Volatility-adjusted threshold: <{adj_sell:.0%}")
             else:
-                col2.markdown(f"<h3 style='color:{signal_config['hold'][1]}'>{signal_config['hold'][0]}</h3>", 
-                            unsafe_allow_html=True)
+                col2.info("🛑 Hold Position")
                 col3.write("No clear market signal")
             
             if st.session_state.last_trained:

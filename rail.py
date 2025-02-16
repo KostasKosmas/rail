@@ -168,54 +168,58 @@ class TradingModel:
         self.calibrated_gb = None
         self.progress = None
         self.smote = SMOTE(random_state=42)
-        self.current_study = ""
+        self.study_rf = None
+        self.study_gb = None
 
     def _progress_callback(self, study, trial):
         if self.progress:
-            total_trials = 2 * MAX_TRIALS
-            completed = trial.number + 1 + (MAX_TRIALS if "Gradient" in self.current_study else 0)
+            current_model = "Random Forest" if study == self.study_rf else "Gradient Boosting"
+            completed = trial.number + 1
+            total = MAX_TRIALS
             self.progress.progress(
-                completed / total_trials,
+                completed / total,
                 text=(
-                    f"{self.current_study} Trial {trial.number + 1}/{MAX_TRIALS} - "
+                    f"{current_model} Trial {completed}/{total} - "
                     f"Best: {study.best_value:.2%}"
                 )
             )
 
     def optimize_hyperparameters(self, X: pd.DataFrame, y: pd.Series):
-        def objective_rf(trial):
-            params = {
-                'n_estimators': trial.suggest_int('n_estimators', 200, 1000),
-                'max_depth': trial.suggest_int('max_depth', 10, 50),
-                'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
-                'max_features': trial.suggest_categorical('max_features', ['sqrt', 'log2', None]),
-            }
-            return self._cross_val_score(RandomForestClassifier(**params), X, y)
+        # Random Forest optimization
+        self.study_rf = optuna.create_study(direction='maximize')
+        self.study_rf.optimize(
+            lambda trial: self._rf_objective(trial, X, y), 
+            n_trials=MAX_TRIALS,
+            callbacks=[self._progress_callback]
+        )
+        self.model_rf.set_params(**self.study_rf.best_params)
 
-        def objective_gb(trial):
-            params = {
-                'n_estimators': trial.suggest_int('n_estimators', 200, 1000),
-                'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.3, log=True),
-                'max_depth': trial.suggest_int('max_depth', 3, 20),
-                'subsample': trial.suggest_float('subsample', 0.6, 1.0),
-            }
-            return self._cross_val_score(GradientBoostingClassifier(**params), X, y)
+        # Gradient Boosting optimization
+        self.study_gb = optuna.create_study(direction='maximize')
+        self.study_gb.optimize(
+            lambda trial: self._gb_objective(trial, X, y), 
+            n_trials=MAX_TRIALS,
+            callbacks=[self._progress_callback]
+        )
+        self.model_gb.set_params(**self.study_gb.best_params)
 
-        # Reset features before each optimization
-        self.selected_features = []
-        self.current_study = "Random Forest"
-        study_rf = optuna.create_study(direction='maximize')
-        study_rf.optimize(objective_rf, n_trials=MAX_TRIALS, 
-                        callbacks=[self._progress_callback])
-        self.model_rf.set_params(**study_rf.best_params)
+    def _rf_objective(self, trial, X, y):
+        params = {
+            'n_estimators': trial.suggest_int('n_estimators', 200, 1000),
+            'max_depth': trial.suggest_int('max_depth', 10, 50),
+            'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
+            'max_features': trial.suggest_categorical('max_features', ['sqrt', 'log2', None]),
+        }
+        return self._cross_val_score(RandomForestClassifier(**params), X, y)
 
-        # Reset features for GB optimization
-        self.selected_features = []
-        self.current_study = "Gradient Boosting"
-        study_gb = optuna.create_study(direction='maximize')
-        study_gb.optimize(objective_gb, n_trials=MAX_TRIALS,
-                        callbacks=[self._progress_callback])
-        self.model_gb.set_params(**study_gb.best_params)
+    def _gb_objective(self, trial, X, y):
+        params = {
+            'n_estimators': trial.suggest_int('n_estimators', 200, 1000),
+            'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.3, log=True),
+            'max_depth': trial.suggest_int('max_depth', 3, 20),
+            'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+        }
+        return self._cross_val_score(GradientBoostingClassifier(**params), X, y)
 
     def _cross_val_score(self, model, X, y) -> float:
         tscv = TimeSeriesSplit(n_splits=3)
@@ -233,7 +237,7 @@ class TradingModel:
                 self.feature_selector.fit(X_train, y_train)
                 self.selected_features = X_train.columns[self.feature_selector.get_support()]
                 if len(self.selected_features) == 0:
-                    raise ValueError("No features selected!")
+                    raise ValueError("Feature selection failed - no features selected!")
             
             X_train_sel = X_train[self.selected_features]
             X_test_sel = X_test[self.selected_features]
@@ -335,10 +339,8 @@ def main():
             X = processed_data.drop(['Target', 'Returns'], axis=1, errors='ignore')
             y = processed_data['Target']
             
-            with st.spinner("Optimizing Random Forest..."):
+            with st.spinner("Optimizing Models (This may take several minutes)..."):
                 model.optimize_hyperparameters(X, y)
-                
-            with st.spinner("Finalizing Calibration..."):
                 model.train(X, y)
                 
             st.session_state.model = model

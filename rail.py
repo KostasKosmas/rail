@@ -1,4 +1,3 @@
-# crypto_trading.py
 # Install dependencies: pip install -r requirements.txt
 
 import streamlit as st
@@ -6,12 +5,14 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from sklearn.model_selection import RandomizedSearchCV
+from sklearn.model_selection import RandomizedSearchCV, TimeSeriesSplit
 from sklearn.metrics import accuracy_score, f1_score
-from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.feature_selection import SelectFromModel
 import joblib
 import os
 import time
+from arch import arch_model
+import logging
 
 # Configuration
 MAX_DATA_POINTS = 3000
@@ -22,6 +23,16 @@ SIMULATIONS = 500
 
 # Auto-create model directory
 os.makedirs(SAVE_PATH, exist_ok=True)
+
+# Logging configuration
+logging.basicConfig(filename='app.log', level=logging.ERROR)
+
+def safe_execute(func):
+    try:
+        return func()
+    except Exception as e:
+        logging.error(f"Error in {func.__name__}: {e}")
+        return None
 
 @st.cache_data
 def load_data(symbol, interval="1d", period="5y"):
@@ -58,7 +69,7 @@ def load_data(symbol, interval="1d", period="5y"):
         return None
 
 def select_features(X, y):
-    selector = SelectKBest(score_func=f_classif, k='all')
+    selector = SelectFromModel(RandomForestClassifier(n_estimators=100), threshold="median")
     selector.fit(X, y)
     return selector
 
@@ -70,9 +81,10 @@ def train_model(df, crypto_symbol):
         X = df[["SMA_50", "SMA_200", "RSI", "MACD", "OBV", "Volume_MA"]]
         y = np.where(df["Close"].shift(-1) > df["Close"], 1, 0).ravel()
         
-        split = int(0.8 * len(df))
-        X_train, X_test = X.iloc[:split], X.iloc[split:]
-        y_train, y_test = y[:split], y[split:]
+        tscv = TimeSeriesSplit(n_splits=5)
+        for train_idx, test_idx in tscv.split(X):
+            X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+            y_train, y_test = y[train_idx], y[test_idx]
 
         selector = select_features(X_train, y_train)
         X_train_sel = selector.transform(X_train)
@@ -88,7 +100,7 @@ def train_model(df, crypto_symbol):
             model_rf.fit(X_train_sel, y_train)
         else:
             model_rf = RandomizedSearchCV(
-                RandomForestClassifier(n_jobs=-1, class_weight='balanced'),
+                RandomForestClassifier(n_jobs=-1, class_weight='balanced', warm_start=True),
                 {'n_estimators': [200, 300], 'max_depth': [15, 20, None], 'min_samples_split': [2, 5]},
                 n_iter=3, cv=3, scoring='f1'
             ).fit(X_train_sel, y_train).best_estimator_
@@ -100,7 +112,7 @@ def train_model(df, crypto_symbol):
             model_gb.fit(X_train_sel, y_train)
         else:
             model_gb = RandomizedSearchCV(
-                GradientBoostingClassifier(),
+                GradientBoostingClassifier(warm_start=True),
                 {'n_estimators': [200, 300], 'learning_rate': [0.05, 0.1], 'max_depth': [3, 5], 'subsample': [0.8, 1.0]},
                 n_iter=3, cv=3, scoring='f1'
             ).fit(X_train_sel, y_train).best_estimator_
@@ -124,8 +136,12 @@ def generate_price_points(df, days=FORECAST_DAYS, simulations=SIMULATIONS):
             raise ValueError("Insufficient historical data")
             
         returns = np.log(df['Close']).diff().dropna()
+        garch_model = arch_model(returns, vol='Garch', p=1, q=1)
+        garch_fitted = garch_model.fit(disp="off")
+        forecast_volatility = garch_fitted.forecast(start=0).variance
+
         mu = returns.mean()
-        sigma = returns.std()
+        sigma = np.sqrt(forecast_volatility.iloc[-1, 0])
         last_price = df['Close'].iloc[-1].item()
         
         forecast = np.zeros((days, simulations))

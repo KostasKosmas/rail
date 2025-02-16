@@ -9,10 +9,9 @@ import optuna
 from arch import arch_model
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.feature_selection import SelectFromModel, SelectKBest, f_classif
+from sklearn.feature_selection import SelectFromModel
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import f1_score
-from sklearn.utils.class_weight import compute_sample_weight
 from imblearn.over_sampling import SMOTE
 from datetime import datetime, timedelta
 import warnings
@@ -31,7 +30,7 @@ GARCH_WINDOW = 14
 DATA_RETRIES = 3
 MIN_FEATURES = 7
 VOLATILITY_CLUSTERS = 3
-MIN_SAMPLES_FOR_SMOTE = 10  # New safety threshold
+MIN_SAMPLES_FOR_SMOTE = 10
 
 warnings.filterwarnings("ignore", category=UserWarning)
 logging.basicConfig(level=logging.INFO)
@@ -53,7 +52,7 @@ if 'data_warning' not in st.session_state:
     st.session_state.data_warning = None
 
 # ======================
-# ENHANCED DATA PIPELINE
+# DATA PIPELINE
 # ======================
 @st.cache_data(ttl=300, show_spinner="Fetching market data...")
 def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
@@ -97,7 +96,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         df['Returns'] = df['Close'].pct_change()
         df['Log_Returns'] = np.log(df['Close']).diff()
         
-        # Enhanced technical indicators
+        # Technical indicators
         windows = [20, 50, 100, 200]
         for window in windows:
             df[f'SMA_{window}'] = df['Close'].rolling(window).mean()
@@ -105,7 +104,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
             df[f'RSI_{window}'] = 100 - (100 / (1 + (
                 df['Close'].diff().clip(lower=0).rolling(window).mean() / 
                 df['Close'].diff().clip(upper=0).abs().rolling(window).mean()
-            ))
+            )))
         
         # MACD features
         ema12 = df['Close'].ewm(span=12, adjust=False).mean()
@@ -117,7 +116,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         df['VWAP'] = (df['Volume'] * (df['High'] + df['Low'] + df['Close']) / 3).cumsum() / df['Volume'].cumsum()
         df['Volume_Change'] = df['Volume'].pct_change()
         
-        # Advanced volatility features
+        # Volatility features
         returns = df['Log_Returns'].dropna()
         df['Volatility'] = returns.rolling(GARCH_WINDOW).std()
         
@@ -137,16 +136,16 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
                             bins=[-np.inf, -0.01, 0.01, np.inf],
                             labels=[0, 1, 2])
         
-        # Clean up data
+        # Clean data
         df = df.replace([np.inf, -np.inf], np.nan)
         df = df.dropna()
-        return df.reset_index(drop=True)
+        return df
     except Exception as e:
         logging.error(f"Feature engineering failed: {str(e)}")
         return pd.DataFrame()
 
 # ======================
-# ROBUST MODEL PIPELINE
+# MODEL PIPELINE
 # ======================
 class TradingModel:
     def __init__(self):
@@ -190,13 +189,12 @@ class TradingModel:
 
     def optimize_models(self, X: pd.DataFrame, y: pd.Series):
         try:
-            # Clean data before processing
             valid_idx = y.dropna().index
             X = X.loc[valid_idx].copy()
             y = y.loc[valid_idx].copy()
             
             if X.empty or y.empty or len(y.unique()) < 2:
-                raise ValueError("Insufficient training data after cleaning")
+                raise ValueError("Insufficient training data")
                 
             X_sel = self._safe_feature_selection(X, y)
             
@@ -237,11 +235,9 @@ class TradingModel:
                 X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
                 y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
                 
-                # Skip small sample sizes
                 if len(X_train) < MIN_SAMPLES_FOR_SMOTE or len(X_test) == 0:
                     continue
                 
-                # Dynamic SMOTE configuration
                 smote = SMOTE(
                     random_state=42,
                     k_neighbors=min(5, len(X_train) - 1)
@@ -266,11 +262,10 @@ class TradingModel:
             y = y.loc[valid_idx].copy()
             
             if X.empty or y.empty or len(y.unique()) < 2:
-                raise ValueError("Insufficient training data after cleaning")
+                raise ValueError("Insufficient training data")
                 
             X_sel = X[self.selected_features]
             
-            # Dynamic SMOTE for final training
             smote = SMOTE(
                 random_state=42,
                 k_neighbors=min(5, len(X_sel) - 1)
@@ -300,18 +295,18 @@ class TradingModel:
             X_sel = X[valid_features].copy().reset_index(drop=True)
             
             if X_sel.empty:
-                return 0.5  # Fallback neutral prediction
+                return 0.5
                 
             prob_rf = self.calibrated_rf.predict_proba(X_sel)
             prob_gb = self.calibrated_gb.predict_proba(X_sel)
             ensemble_probs = 0.6*prob_rf + 0.4*prob_gb
-            return ensemble_probs[0][2]  # Direct scalar return
+            return ensemble_probs[0][2]
         except Exception as e:
             logging.error(f"Prediction failed: {str(e)}")
-            return 0.5  # Neutral fallback
+            return 0.5
 
 # ======================
-# STREAMLIT INTERFACE
+# INTERFACE
 # ======================
 def main():
     st.sidebar.header("Settings")

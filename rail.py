@@ -1,293 +1,245 @@
-# crypto_trading_advanced.py
-# Install: pip install streamlit yfinance pandas numpy scikit-learn joblib ta
+# crypto_trading.py
+# Install dependencies: pip install streamlit yfinance pandas numpy scikit-learn joblib
 
 import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, StackingClassifier
-from sklearn.model_selection import RandomizedSearchCV, TimeSeriesSplit
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
-from sklearn.feature_selection import SelectKBest, mutual_info_classif
-from sklearn.preprocessing import RobustScaler
-from sklearn.pipeline import Pipeline
-from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.model_selection import RandomizedSearchCV
+from sklearn.metrics import accuracy_score, f1_score
+from sklearn.feature_selection import SelectKBest, f_classif
 import joblib
 import os
 import time
-from ta import add_all_ta_features
-from ta.momentum import RSIIndicator, StochasticOscillator
-from ta.volatility import BollingerBands
-from ta.trend import MACD, ADXIndicator
-from ta.volume import MFIIndicator
 
 # Configuration
-MAX_DATA_POINTS = 5000
-INCREMENTAL_ESTIMATORS = 75
+MAX_DATA_POINTS = 3000
+INCREMENTAL_ESTIMATORS = 50
 SAVE_PATH = "saved_models"
-FORECAST_DAYS = 21
-SIMULATIONS = 1000
-THRESHOLD_DAYS = 3
+FORECAST_DAYS = 15
+SIMULATIONS = 500
 
 # Auto-create model directory
 os.makedirs(SAVE_PATH, exist_ok=True)
 
 @st.cache_data
-def load_enhanced_data(symbol, interval="1d", period="5y"):
+def load_data(symbol, interval="1d", period="5y"):
     try:
-        df = yf.download(symbol, period=period, interval=interval, auto_adjust=True)
+        df = yf.download(symbol, period=period, interval=interval)
         if df.empty or len(df) < 100:
             st.error(f"⚠️ Insufficient data for {symbol}")
             return None
 
-        df = add_all_ta_features(df, open="Open", high="High", low="Low", close="Close", volume="Volume")
+        df = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
         
-        # Custom indicators
-        bb = BollingerBands(df["Close"])
-        df["BB_upper"] = bb.bollinger_hband()
-        df["BB_lower"] = bb.bollinger_lband()
-        df["BB_width"] = bb.bollinger_wband()
+        # Technical indicators
+        df["SMA_50"] = df["Close"].rolling(50).mean()
+        df["SMA_200"] = df["Close"].rolling(200).mean()
         
-        stoch = StochasticOscillator(high=df["High"], low=df["Low"], close=df["Close"])
-        df["Stoch_%K"] = stoch.stoch()
-        df["Stoch_%D"] = stoch.stoch_signal()
+        # RSI calculation
+        delta = df['Close'].diff().dropna()
+        gain = delta.clip(lower=0)
+        loss = (-delta).clip(lower=0)
+        avg_gain = gain.rolling(14).mean()
+        avg_loss = loss.rolling(14).mean()
+        rs = avg_gain / (avg_loss + 1e-10)
+        df['RSI'] = 100 - (100 / (1 + rs))
         
-        mfi = MFIIndicator(high=df["High"], low=df["Low"], close=df["Close"], volume=df["Volume"])
-        df["MFI"] = mfi.money_flow_index()
+        df['MACD'] = df['Close'].ewm(span=12).mean() - df['Close'].ewm(span=26).mean()
+        df['OBV'] = (np.sign(df['Close'].diff()) * df['Volume']).cumsum()
+        df['Volume_MA'] = df['Volume'].rolling(20).mean()
         
-        adx = ADXIndicator(high=df["High"], low=df["Low"], close=df["Close"])
-        df["ADX"] = adx.adx()
-        
-        # Lagged features
-        for lag in [1, 3, 5]:
-            df[f"Return_{lag}d"] = df["Close"].pct_change(lag)
-            df[f"Volatility_{lag}d"] = df["Close"].pct_change().rolling(lag).std()
-        
-        # Target variable
-        future_returns = df["Close"].pct_change(THRESHOLD_DAYS).shift(-THRESHOLD_DAYS)
-        future_returns_values = future_returns.to_numpy().flatten()
-        valid_indices = ~np.isnan(future_returns_values)
-        target_values = np.where(future_returns_values[valid_indices] > 0.015, 1, 0).astype(np.int8)
-        
-        df = df.iloc[:len(target_values)]
-        df["Target"] = target_values
-        
-        # Feature engineering
-        df["RSI_Volume"] = df["rsi"] * df["volume_adi"]
-        df["MACD_Signal_Ratio"] = df["macd"] / (df["macd_signal"] + 1e-10)
-        
-        # Clean data
-        df = df.dropna().iloc[-MAX_DATA_POINTS:]
-        df = df.astype({col: np.float32 for col in df.columns if col != "Target"})
-        df["Target"] = df["Target"].astype(np.int8)
-        
-        return df
+        return df.dropna().iloc[-MAX_DATA_POINTS:].astype(np.float32)
     
     except Exception as e:
         st.error(f"Data error: {str(e)}")
         return None
 
-def create_feature_pipeline():
-    return Pipeline([
-        ('scaler', RobustScaler()),
-        ('selector', SelectKBest(score_func=mutual_info_classif, k=20))
-    ])
+def select_features(X, y):
+    selector = SelectKBest(score_func=f_classif, k='all')
+    selector.fit(X, y)
+    return selector
 
-def train_enhanced_model(df, crypto_symbol):
+def train_model(df, crypto_symbol):
     try:
-        if df is None or len(df) < 300:
+        if df is None or len(df) < 200:
             raise ValueError("Insufficient training data")
             
-        X = df.drop(columns=["Target"])
-        y = np.ravel(df["Target"].values)
-        
-        tscv = TimeSeriesSplit(n_splits=3)
-        feature_pipeline = create_feature_pipeline()
+        X = df[["SMA_50", "SMA_200", "RSI", "MACD", "OBV", "Volume_MA"]]
+        y = np.where(df["Close"].shift(-1) > df["Close"], 1, 0).ravel()
         
         split = int(0.8 * len(df))
         X_train, X_test = X.iloc[:split], X.iloc[split:]
         y_train, y_test = y[:split], y[split:]
-        
-        X_train_trans = feature_pipeline.fit_transform(X_train, y_train)
-        X_test_trans = feature_pipeline.transform(X_test)
 
-        rf = RandomForestClassifier(n_jobs=-1, class_weight='balanced')
-        gb = GradientBoostingClassifier(n_iter_no_change=10, validation_fraction=0.1)
-        meta = LogisticRegression()
+        selector = select_features(X_train, y_train)
+        X_train_sel = selector.transform(X_train)
+        X_test_sel = selector.transform(X_test)
+
+        rf_path = f"{SAVE_PATH}/{crypto_symbol}_model_rf.pkl"
+        gb_path = f"{SAVE_PATH}/{crypto_symbol}_model_gb.pkl"
         
-        model_path = f"{SAVE_PATH}/{crypto_symbol}_stacked_model.pkl"
-        
-        if os.path.exists(model_path):
-            model = joblib.load(model_path)
-            if hasattr(model, 'n_estimators'):
-                model.n_estimators += INCREMENTAL_ESTIMATORS
-            model.fit(X_train_trans, y_train)
+        # Random Forest
+        model_rf = joblib.load(rf_path) if os.path.exists(rf_path) else None
+        if model_rf:
+            model_rf.n_estimators += INCREMENTAL_ESTIMATORS
+            model_rf.fit(X_train_sel, y_train)
         else:
-            model = StackingClassifier(
-                estimators=[
-                    ('rf', RandomizedSearchCV(
-                        rf,
-                        {
-                            'n_estimators': [300, 500],
-                            'max_depth': [None, 20],
-                            'min_samples_split': [2, 5]
-                        },
-                        n_iter=3, cv=tscv, scoring='f1'
-                    )),
-                    ('gb', RandomizedSearchCV(
-                        gb,
-                        {
-                            'learning_rate': [0.01, 0.1],
-                            'subsample': [0.8, 1.0],
-                            'max_depth': [3, 5]
-                        },
-                        n_iter=3, cv=tscv, scoring='f1'
-                    ))
-                ],
-                final_estimator=meta,
-                stack_method='predict_proba'
-            ).fit(X_train_trans, y_train)
+            model_rf = RandomizedSearchCV(
+                RandomForestClassifier(n_jobs=-1, class_weight='balanced'),
+                {'n_estimators': [200, 300], 'max_depth': [15, 20, None], 'min_samples_split': [2, 5]},
+                n_iter=3, cv=3, scoring='f1'
+            ).fit(X_train_sel, y_train).best_estimator_
 
-        y_pred = model.predict(X_test_trans)
+        # Gradient Boosting
+        model_gb = joblib.load(gb_path) if os.path.exists(gb_path) else None
+        if model_gb:
+            model_gb.n_estimators += INCREMENTAL_ESTIMATORS
+            model_gb.fit(X_train_sel, y_train)
+        else:
+            model_gb = RandomizedSearchCV(
+                GradientBoostingClassifier(n_iter_no_change=5),
+                {'n_estimators': [200, 300], 'learning_rate': [0.05, 0.1], 'max_depth': [3, 5], 'subsample': [0.8, 1.0]},
+                n_iter=3, cv=3, scoring='f1'
+            ).fit(X_train_sel, y_train).best_estimator_
+
+        y_pred = (model_rf.predict(X_test_sel) + model_gb.predict(X_test_sel)) // 2
+        accuracy = accuracy_score(y_test, y_pred)
+        f1 = f1_score(y_test, y_pred)
         
-        metrics = {
-            'accuracy': accuracy_score(y_test, y_pred),
-            'f1': f1_score(y_test, y_pred),
-            'precision': precision_score(y_test, y_pred),
-            'recall': recall_score(y_test, y_pred)
-        }
+        joblib.dump(model_rf, rf_path)
+        joblib.dump(model_gb, gb_path)
         
-        joblib.dump((model, feature_pipeline), model_path)
-        return model, feature_pipeline, df, metrics
+        return model_rf, model_gb, selector, df, accuracy, f1
         
     except Exception as e:
         st.error(f"Training error: {str(e)}")
-        return None, None, None, None
+        return None, None, None, None, None, None
 
-def generate_enhanced_forecast(df):
+def generate_price_points(df, days=FORECAST_DAYS, simulations=SIMULATIONS):
     try:
+        if df.empty or len(df) < 100:
+            raise ValueError("Insufficient historical data")
+            
         returns = np.log(df['Close']).diff().dropna()
-        volatility = returns.rolling(21).std().iloc[-1]
+        mu = returns.mean()
+        sigma = returns.std()
         last_price = df['Close'].iloc[-1].item()
         
-        # Fixed parenthesis closure
-        simulations = np.exp(
-            np.random.normal(
-                loc=0, 
-                scale=volatility, 
-                size=(SIMULATIONS, FORECAST_DAYS)
-            ).cumsum(axis=1)
-        )
-        
-        price_paths = last_price * simulations
+        forecast = np.zeros((days, simulations))
+        for i in range(simulations):
+            daily_returns = np.random.normal(mu, sigma, days)
+            price_path = last_price * np.exp(np.cumsum(daily_returns))
+            forecast[:, i] = price_path
         
         return pd.DataFrame({
-            'Day': range(1, FORECAST_DAYS+1),
-            'Median': np.median(price_paths, axis=0),
-            'Upper_95': np.percentile(price_paths, 95, axis=0),
-            'Lower_95': np.percentile(price_paths, 5, axis=0),
-            'Volatility': volatility
-        })
+            'Day': range(1, days+1),
+            'Median': np.median(forecast, axis=1),
+            'Upper': np.percentile(forecast, 95, axis=1),
+            'Lower': np.percentile(forecast, 5, axis=1)
+        }).reset_index(drop=True)
+        
     except Exception as e:
         st.error(f"Forecast error: {str(e)}")
         return pd.DataFrame()
 
-def calculate_risk_levels(df, model, pipeline):
+def calculate_trade_levels(df, selector, model_rf, model_gb):
     try:
-        current_features = pipeline.transform(df.iloc[-1:].drop(columns=["Target"]))
-        proba = model.predict_proba(current_features)[0][1]
+        features = ["SMA_50", "SMA_200", "RSI", "MACD", "OBV", "Volume_MA"]
+        X = selector.transform(df[features][-30:])
         
-        volatility = df["Volatility_5d"].iloc[-1]
-        adx_value = df["ADX"].iloc[-1]
-        mfi_value = df["MFI"].iloc[-1]
+        rf_proba = model_rf.predict_proba(X)[:, 1]
+        gb_proba = model_gb.predict_proba(X)[:, 1]
+        confidence = np.mean((rf_proba + gb_proba) / 2)
         
-        risk_params = {
-            'base_atr': df['average_true_range'].iloc[-14:].mean(),
-            'trend_strength': adx_value / 100,
-            'volume_confirmation': mfi_value / 100
-        }
+        high = df['High'].iloc[-14:].values
+        low = df['Low'].iloc[-14:].values
+        atr = np.mean(high - low).item()
         
-        confidence = 0.4*proba + 0.3*risk_params['trend_strength'] + 0.3*risk_params['volume_confirmation']
+        current_price = df['Close'].iloc[-1].item()
+        sma_trend = df['SMA_50'].iloc[-1].item() > df['SMA_200'].iloc[-1].item()
+        
+        forecast = generate_price_points(df)
+        if forecast.empty:
+            raise ValueError("Price forecast failed")
+        
+        risk_multiplier = 1.5 if confidence > 0.7 else 1.0
+        stop_loss = current_price - (atr * 1.5 * risk_multiplier)
+        take_profit = current_price + (atr * 2.0 * risk_multiplier)
         
         return {
-            'entry': df['Close'].iloc[-1].item(),
-            'stop_loss': df['Close'].iloc[-1] * (1 - (risk_params['base_atr'] * (2 - confidence)) if confidence < 1 else df['Close'].iloc[-1] * 0.95,
-            'take_profit': df['Close'].iloc[-1] * (1 + (risk_params['base_atr'] * (1 + confidence))),
+            'entry': current_price,
+            'stop_loss': stop_loss,
+            'take_profit': take_profit,
+            'forecast': forecast,
             'confidence': confidence,
-            'volatility': volatility,
-            'trend_strength': adx_value,
-            'mfi_status': "Overbought" if mfi_value > 80 else "Oversold" if mfi_value < 20 else "Neutral"
+            'trend': 'Bullish' if sma_trend else 'Bearish'
         }
     except Exception as e:
-        st.error(f"Risk calculation error: {str(e)}")
+        st.error(f"Trade error: {str(e)}")
         return None
 
 def main():
-    st.title("🚀 Advanced AI Crypto Trading System")
+    st.title("🚀 AI Crypto Trading System")
     
     crypto_symbol = st.sidebar.text_input("Crypto Pair", "BTC-USD")
     auto_refresh = st.sidebar.checkbox("Live Updates", True)
     
-    df = load_enhanced_data(crypto_symbol)
+    df = load_data(crypto_symbol)
     if df is None:
         st.stop()
     
     if st.button("🔄 Refresh") or auto_refresh:
-        with st.spinner("Training advanced model..."):
-            model, pipeline, df, metrics = train_enhanced_model(df, crypto_symbol)
+        with st.spinner("Analyzing market..."):
+            model_rf, model_gb, selector, df, acc, f1 = train_model(df, crypto_symbol)
         
-        if model and metrics:
-            st.subheader("📊 Advanced Performance Metrics")
-            cols = st.columns(4)
-            cols[0].metric("Accuracy", f"{metrics['accuracy']:.2%}")
-            cols[1].metric("F1 Score", f"{metrics['f1']:.2%}")
-            cols[2].metric("Precision", f"{metrics['precision']:.2%}")
-            cols[3].metric("Recall", f"{metrics['recall']:.2%}")
+        if model_rf and model_gb:
+            st.subheader("📊 Performance Metrics")
+            cols = st.columns(2)
+            cols[0].metric("Accuracy", f"{acc:.2%}")
+            cols[1].metric("F1 Score", f"{f1:.2%}")
             
-            levels = calculate_risk_levels(df, model, pipeline)
-            forecast = generate_enhanced_forecast(df)
-            
-            if levels and not forecast.empty:
-                st.subheader("📈 Smart Trading Signals")
+            levels = calculate_trade_levels(df, selector, model_rf, model_gb)
+            if levels:
+                st.subheader("📈 Trading Signals")
                 
-                cols = st.columns(4)
+                cols = st.columns(3)
                 cols[0].metric("Current Price", f"${levels['entry']:.2f}")
                 cols[1].metric("Stop Loss", f"${levels['stop_loss']:.2f}", delta_color="inverse")
                 cols[2].metric("Take Profit", f"${levels['take_profit']:.2f}")
-                cols[3].metric("Risk Score", f"{levels['confidence']:.2%}")
-                
-                st.subheader("📊 Market Conditions")
-                cond_cols = st.columns(3)
-                cond_cols[0].metric("Volatility", f"{levels['volatility']:.2%}")
-                cond_cols[1].metric("Trend Strength", f"{levels['trend_strength']:.1f}/100")
-                cond_cols[2].metric("MFI Status", levels['mfi_status'])
                 
                 st.subheader("🔮 Price Forecast")
-                st.line_chart(forecast.set_index('Day')[['Median', 'Upper_95', 'Lower_95']])
+                st.line_chart(levels['forecast'].set_index('Day'))
                 
-                st.subheader("📉 Technical Overview")
-                tab1, tab2, tab3 = st.tabs(["Bollinger Bands", "MACD", "Stochastic"])
+                st.progress(levels['confidence'])
+                st.caption(f"Model Confidence: {levels['confidence']:.2%}")
                 
-                with tab1:
-                    st.line_chart(df[['Close', 'BB_upper', 'BB_lower']].iloc[-100:])
-                with tab2:
-                    st.line_chart(df[['macd', 'macd_signal']].iloc[-100:])
-                with tab3:
-                    st.line_chart(df[['Stoch_%K', 'Stoch_%D']].iloc[-100:])
-
+                if levels['trend'] == 'Bullish':
+                    st.success("📈 Bullish Trend Detected")
+                else:
+                    st.warning("📉 Bearish Market Conditions")
+    
     try:
-        live_data = yf.download(crypto_symbol, period='1d', interval='1m', auto_adjust=True)
-        if not live_data.empty:
-            st.subheader("🔴 Live Market Dashboard")
+        live_data = yf.download(crypto_symbol, period='1d', interval='1m')
+        if not live_data.empty and len(live_data) > 1:
+            st.subheader("🔴 Live Market Feed")
             current = live_data.iloc[-1]
-            changes = live_data.pct_change().iloc[-1] * 100
+            prev = live_data.iloc[-2]
+            
+            price_now = current['Close'].item()
+            price_change = price_now - prev['Close'].item()
+            
+            vol_now = current['Volume'].item()
+            vol_prev = prev['Volume'].item()
+            vol_change = vol_now - vol_prev
             
             cols = st.columns(4)
-            cols[0].metric("Price", f"${current['Close']:.2f}", f"{changes['Close']:.2f}%")
-            cols[1].metric("Volume", f"{current['Volume']:,.0f}", f"{changes['Volume']:.2f}%")
-            cols[2].metric("Spread", f"{(current['High'] - current['Low']):.2f}")
-            cols[3].metric("VWAP", f"{np.sum(live_data['Close'] * live_data['Volume']) / np.sum(live_data['Volume']):.2f}")
-            
+            cols[0].metric("Price", f"${price_now:.2f}", f"{price_change:.2f}")
+            cols[1].metric("Volume", f"{vol_now:,.0f}", 
+                          f"{vol_change:+,.0f}" if vol_change >=0 else f"({-vol_change:,.0f})")
+            cols[2].metric("24H High", f"${live_data['High'].max().item():.2f}")
+            cols[3].metric("24H Low", f"${live_data['Low'].min().item():.2f}")
     except Exception as e:
         st.error(f"Live feed error: {str(e)}")
 

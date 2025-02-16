@@ -15,7 +15,6 @@ from sklearn.metrics import accuracy_score
 from sklearn.utils.class_weight import compute_sample_weight
 from datetime import datetime, timedelta
 import warnings
-from arch import ConvergenceWarning
 
 # ======================
 # CONFIGURATION
@@ -29,7 +28,7 @@ GARCH_WINDOW = 21
 
 # Suppress warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="arch")
-warnings.filterwarnings("ignore", category=ConvergenceWarning)
+warnings.filterwarnings("ignore", category=RuntimeWarning)
 logging.basicConfig(level=logging.INFO)
 
 # ======================

@@ -20,12 +20,22 @@ import warnings
 # CONFIGURATION
 # ======================
 SYMBOL = 'BTC-USD'
-INTERVAL = '15m'  # Increased from 5m to reduce noise
-LOOKBACK_DAYS = 180  # Extended from 60 days
-TRADE_THRESHOLD_BUY = 0.55  # Adjusted for low volatility
+INTERVAL = '15m'  # Primary interval
+FALLBACK_INTERVAL = '60m'  # Fallback if 15m fails
+LOOKBACK_DAYS = 59  # Max for 15m (Yahoo limit: 60 days)
+FALLBACK_LOOKBACK_DAYS = 180  # For 60m data
+TRADE_THRESHOLD_BUY = 0.55
 TRADE_THRESHOLD_SELL = 0.45
-GARCH_WINDOW = 7  # Reduced from 21
-MAX_TRIALS = 15  # Reduced from 20
+GARCH_WINDOW = 7
+MAX_TRIALS = 15
+
+# Interval validation mapping
+INTERVAL_LIMITS = {
+    '15m': 60,
+    '30m': 60,
+    '60m': 730,
+    '1d': 365*5
+}
 
 # Suppress warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="arch")
@@ -46,26 +56,68 @@ if 'last_trained' not in st.session_state:
     st.session_state.last_trained = None
 if 'training_progress' not in st.session_state:
     st.session_state.training_progress = None
+if 'data_warning' not in st.session_state:
+    st.session_state.data_warning = None
 
 # ======================
 # DATA PIPELINE
 # ======================
 @st.cache_data(ttl=300, show_spinner="Fetching market data...")
 def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
-    """Optimized data fetching with yfinance"""
+    """Smart data fetching with fallback mechanism"""
     end = datetime.now()
-    start = end - timedelta(days=LOOKBACK_DAYS)
-    return yf.download(
-        symbol, 
-        start=start, 
-        end=end, 
-        interval=interval, 
-        progress=False,
-        auto_adjust=False
-    )
+    
+    # Validate interval and lookback days
+    max_days = INTERVAL_LIMITS.get(interval, 60)
+    lookback = min(LOOKBACK_DAYS, max_days-1)
+    start = end - timedelta(days=lookback)
+    
+    try:
+        df = yf.download(
+            symbol, 
+            start=start, 
+            end=end, 
+            interval=interval, 
+            progress=False,
+            auto_adjust=False
+        )
+        
+        if df.empty:
+            raise ValueError("Empty dataframe received")
+            
+        st.session_state.data_warning = None
+        return df
+        
+    except Exception as e:
+        logging.warning(f"Primary interval failed: {str(e)}")
+        
+        # Fallback to longer interval
+        fallback_days = FALLBACK_LOOKBACK_DAYS
+        start_fallback = end - timedelta(days=fallback_days)
+        
+        try:
+            df = yf.download(
+                symbol,
+                start=start_fallback,
+                end=end,
+                interval=FALLBACK_INTERVAL,
+                progress=False,
+                auto_adjust=False
+            )
+            
+            st.session_state.data_warning = (
+                f"Using {FALLBACK_INTERVAL} data (last {fallback_days} days) "
+                f"due to {interval} availability limits"
+            )
+            return df
+            
+        except Exception as fallback_error:
+            logging.error(f"Fallback failed: {str(fallback_error)}")
+            st.error("Data unavailable for all intervals")
+            return pd.DataFrame()
 
 def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Enhanced feature engineering"""
+    """Adaptive feature engineering"""
     df = df.copy()
     try:
         # Price features
@@ -80,14 +132,14 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         rs = np.where(loss != 0, gain / loss, 1)
         df['RSI'] = 100 - (100 / (1 + rs))
         
-        # Volatility with GARCH fallback
+        # Volatility calculation
         returns = df['Returns'].dropna()
         if len(returns) > 100:
             try:
                 scaled_returns = returns * 1000
                 garch = arch_model(scaled_returns, vol='Garch', p=1, q=1, rescale=False)
                 garch_fit = garch.fit(disp='off', options={'maxiter': 500})
-                df['Volatility'] = garch_fit.conditional_volatility / 1000 * 100  # Percentage format
+                df['Volatility'] = garch_fit.conditional_volatility / 1000 * 100
             except Exception:
                 df['Volatility'] = returns.rolling(GARCH_WINDOW).std() * 100
         else:
@@ -118,15 +170,13 @@ class TradingModel:
         self.progress = None
 
     def _progress_callback(self, study, trial):
-        """Update training progress in real-time"""
         if self.progress:
             self.progress.progress(
                 (trial.number + 1) / MAX_TRIALS,
-                text=f"Trial {trial.number + 1}/{MAX_TRIALS} - Current Best: {study.best_value:.2%}"
+                text=f"Trial {trial.number + 1}/{MAX_TRIALS} - Best: {study.best_value:.2%}"
             )
 
     def optimize_hyperparameters(self, X: pd.DataFrame, y: pd.Series):
-        """Efficient Bayesian optimization"""
         def objective_rf(trial):
             params = {
                 'n_estimators': trial.suggest_int('n_estimators', 200, 800),
@@ -145,20 +195,17 @@ class TradingModel:
             }
             return self._cross_val_score(GradientBoostingClassifier(**params), X, y)
 
-        # Optimize RF
         study_rf = optuna.create_study(direction='maximize')
         study_rf.optimize(objective_rf, n_trials=MAX_TRIALS, 
                         callbacks=[self._progress_callback])
         self.model_rf.set_params(**study_rf.best_params)
 
-        # Optimize GB
         study_gb = optuna.create_study(direction='maximize')
         study_gb.optimize(objective_gb, n_trials=MAX_TRIALS,
                         callbacks=[self._progress_callback])
         self.model_gb.set_params(**study_gb.best_params)
 
     def _cross_val_score(self, model, X, y) -> float:
-        """Optimized time-series validation"""
         tscv = TimeSeriesSplit(n_splits=3)
         scores = []
         
@@ -166,7 +213,6 @@ class TradingModel:
             X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
             y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
             
-            # Feature selection
             if self.feature_selector is None:
                 self.feature_selector = SelectFromModel(
                     RandomForestClassifier(n_estimators=100),
@@ -177,7 +223,6 @@ class TradingModel:
             X_train_sel = self.feature_selector.transform(X_train)
             X_test_sel = self.feature_selector.transform(X_test)
             
-            # Balanced weighting
             sample_weights = compute_sample_weight('balanced', y_train)
             
             model.fit(X_train_sel, y_train, sample_weight=sample_weights)
@@ -186,9 +231,7 @@ class TradingModel:
         return np.mean(scores)
 
     def train(self, X: pd.DataFrame, y: pd.Series):
-        """Streamlined training pipeline"""
         try:
-            # Feature selection
             self.feature_selector = SelectFromModel(
                 RandomForestClassifier(n_estimators=100),
                 threshold="median"
@@ -196,12 +239,10 @@ class TradingModel:
             self.feature_selector.fit(X, y)
             X_sel = self.feature_selector.transform(X)
 
-            # Train models
             sample_weights = compute_sample_weight('balanced', y)
             self.model_rf.fit(X_sel, y, sample_weight=sample_weights)
             self.model_gb.fit(X_sel, y, sample_weight=sample_weights)
 
-            # Probability calibration
             self.calibrated_rf = CalibratedClassifierCV(
                 self.model_rf,
                 method='isotonic',
@@ -220,7 +261,6 @@ class TradingModel:
             raise
 
     def predict(self, X: pd.DataFrame) -> float:
-        """Ensemble prediction"""
         X_sel = self.feature_selector.transform(X)
         prob_rf = self.calibrated_rf.predict_proba(X_sel)[:, 1]
         prob_gb = self.calibrated_gb.predict_proba(X_sel)[:, 1]
@@ -233,6 +273,9 @@ def main():
     # Data section
     raw_data = fetch_data(SYMBOL, INTERVAL)
     processed_data = calculate_features(raw_data)
+    
+    if st.session_state.data_warning:
+        st.warning(st.session_state.data_warning)
     
     if not processed_data.empty:
         col1, col2 = st.columns([3, 1])
@@ -257,7 +300,7 @@ def main():
             return
             
         try:
-            st.session_state.training_progress = st.progress(0, text="Initializing training...")
+            st.session_state.training_progress = st.progress(0, text="Initializing...")
             model = TradingModel()
             model.progress = st.session_state.training_progress
             
@@ -267,7 +310,7 @@ def main():
             with st.spinner("Optimizing Random Forest..."):
                 model.optimize_hyperparameters(X, y)
                 
-            with st.spinner("Finalizing Model Calibration..."):
+            with st.spinner("Finalizing Calibration..."):
                 model.train(X, y)
                 
             st.session_state.model = model
@@ -293,8 +336,7 @@ def main():
             st.subheader("Trading Signal")
             
             col1, col2, col3 = st.columns(3)
-            col1.metric("Confidence Score", f"{prediction:.2%}", 
-                       help="Model's confidence in the prediction")
+            col1.metric("Confidence Score", f"{prediction:.2%}")
             
             if prediction > TRADE_THRESHOLD_BUY:
                 col2.success("🚦 Strong Buy Signal")
@@ -306,7 +348,6 @@ def main():
                 col2.info("🛑 Hold Position")
                 col3.write("No clear market signal")
                 
-            st.session_state.last_trained = st.session_state.last_trained or datetime.now()
             st.caption(f"Last trained: {st.session_state.last_trained.strftime('%Y-%m-%d %H:%M')}")
             
         except Exception as e:

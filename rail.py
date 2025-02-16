@@ -28,6 +28,7 @@ TRADE_THRESHOLD_SELL = 0.42
 MAX_TRIALS = 15
 GARCH_WINDOW = 14
 DATA_RETRIES = 3
+MIN_FEATURES = 5  # Minimum number of features to select
 
 # Suppress warnings
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -143,7 +144,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
 # ======================
-# OPTIMIZED MODEL PIPELINE
+# ROBUST MODEL PIPELINE
 # ======================
 class TradingModel:
     def __init__(self):
@@ -153,109 +154,155 @@ class TradingModel:
         self.model_gb = GradientBoostingClassifier(random_state=42)
         self.calibrated_rf = None
         self.calibrated_gb = None
-        self.smote = SMOTE(random_state=42, k_neighbors=5)
+        self.smote = SMOTE(random_state=42, k_neighbors=3)  # Reduced neighbors
         self.study = None
         self.best_score = 0
 
     def _progress_callback(self, study, trial):
-        """Unified progress tracking with proper completion handling"""
+        """Progress tracking with error handling"""
         if st.session_state.training_progress:
             progress = (trial.number + 1) / MAX_TRIALS
             text = (f"Trial {trial.number + 1}/{MAX_TRIALS} - "
                     f"Best F1: {study.best_value:.2%}")
             st.session_state.training_progress.progress(progress, text=text)
-            
-            if trial.number == MAX_TRIALS - 1:
-                time.sleep(1)
-                st.session_state.training_progress.progress(1.0, "Optimization complete!")
 
-    def optimize_models(self, X: pd.DataFrame, y: pd.Series):
-        """Combined optimization pipeline"""
-        # Feature selection
+    def _safe_feature_selection(self, X, y):
+        """Robust feature selection with fallbacks"""
+        # First attempt with default threshold
         self.feature_selector = SelectFromModel(
             RandomForestClassifier(n_estimators=100),
             threshold="1.25*median"
         )
-        X_sel = self.feature_selector.fit_transform(X, y)
+        self.feature_selector.fit(X, y)
         self.selected_features = X.columns[self.feature_selector.get_support()]
         
-        # Combined optimization study
-        self.study = optuna.create_study(direction='maximize')
-        self.study.optimize(
-            lambda trial: self._objective(trial, X_sel, y),
-            n_trials=MAX_TRIALS,
-            callbacks=[self._progress_callback],
-            timeout=1200
-        )
+        # Fallback to lower threshold if no features selected
+        if len(self.selected_features) < MIN_FEATURES:
+            logging.warning("Initial feature selection failed, trying lower threshold")
+            self.feature_selector.threshold = "median"
+            self.feature_selector.fit(X, y)
+            self.selected_features = X.columns[self.feature_selector.get_support()]
+            
+        # Final fallback to top 5 features
+        if len(self.selected_features) < MIN_FEATURES:
+            logging.warning("Using top 5 features as fallback")
+            self.feature_selector = SelectFromModel(
+                RandomForestClassifier(n_estimators=100),
+                max_features=5
+            )
+            self.feature_selector.fit(X, y)
+            self.selected_features = X.columns[self.feature_selector.get_support()]
+        
+        return X[self.selected_features]
+
+    def optimize_models(self, X: pd.DataFrame, y: pd.Series):
+        """Optimization pipeline with feature validation"""
+        try:
+            # Robust feature selection
+            X_sel = self._safe_feature_selection(X, y)
+            
+            # Validate features
+            if X_sel.shape[1] == 0:
+                raise ValueError("No features available after selection")
+                
+            # Optimization study
+            self.study = optuna.create_study(direction='maximize')
+            self.study.optimize(
+                lambda trial: self._objective(trial, X_sel, y),
+                n_trials=MAX_TRIALS,
+                callbacks=[self._progress_callback],
+                timeout=1200
+            )
+        except Exception as e:
+            logging.error(f"Optimization failed: {str(e)}")
+            raise
 
     def _objective(self, trial, X, y):
-        """Combined objective function for both models"""
-        # Random Forest parameters
-        rf_params = {
-            'n_estimators': trial.suggest_int('rf_n_estimators', 200, 800),
-            'max_depth': trial.suggest_int('rf_max_depth', 10, 30),
-            'min_samples_split': trial.suggest_int('rf_min_samples_split', 5, 20),
-            'max_features': trial.suggest_categorical('rf_max_features', ['sqrt', 'log2'])
-        }
-        
-        # Gradient Boosting parameters
-        gb_params = {
-            'n_estimators': trial.suggest_int('gb_n_estimators', 200, 800),
-            'learning_rate': trial.suggest_float('gb_learning_rate', 0.01, 0.3, log=True),
-            'max_depth': trial.suggest_int('gb_max_depth', 3, 10),
-            'subsample': trial.suggest_float('gb_subsample', 0.7, 1.0)
-        }
-        
-        tscv = TimeSeriesSplit(3)
-        scores = []
-        
-        for train_idx, test_idx in tscv.split(X):
-            X_train, X_test = X[train_idx], X[test_idx]
-            y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+        """Objective function with error handling"""
+        try:
+            # Random Forest parameters
+            rf_params = {
+                'n_estimators': trial.suggest_int('rf_n_estimators', 200, 800),
+                'max_depth': trial.suggest_int('rf_max_depth', 10, 30),
+                'min_samples_split': trial.suggest_int('rf_min_samples_split', 5, 20),
+                'max_features': trial.suggest_categorical('rf_max_features', ['sqrt', 'log2'])
+            }
             
-            # Handle class imbalance
-            X_res, y_res = self.smote.fit_resample(X_train, y_train)
+            # Gradient Boosting parameters
+            gb_params = {
+                'n_estimators': trial.suggest_int('gb_n_estimators', 200, 800),
+                'learning_rate': trial.suggest_float('gb_learning_rate', 0.01, 0.3, log=True),
+                'max_depth': trial.suggest_int('gb_max_depth', 3, 10),
+                'subsample': trial.suggest_float('gb_subsample', 0.7, 1.0)
+            }
             
-            # Train models
-            rf = RandomForestClassifier(**rf_params).fit(X_res, y_res)
-            gb = GradientBoostingClassifier(**gb_params).fit(X_res, y_res)
+            tscv = TimeSeriesSplit(3)
+            scores = []
             
-            # Ensemble predictions
-            preds = (0.6 * rf.predict_proba(X_test)[:, 1] + 
-                    0.4 * gb.predict_proba(X_test)[:, 1])
-            scores.append(f1_score(y_test, (preds >= 0.5).astype(int)))
-            
-        return np.mean(scores)
+            for train_idx, test_idx in tscv.split(X):
+                X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+                y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+                
+                # Handle class imbalance with validation
+                if len(np.unique(y_train)) < 2:
+                    raise ValueError("Insufficient class variety for SMOTE")
+                    
+                X_res, y_res = self.smote.fit_resample(X_train, y_train)
+                
+                # Train models
+                rf = RandomForestClassifier(**rf_params).fit(X_res, y_res)
+                gb = GradientBoostingClassifier(**gb_params).fit(X_res, y_res)
+                
+                # Ensemble predictions
+                preds = (0.6 * rf.predict_proba(X_test)[:, 1] + 
+                        0.4 * gb.predict_proba(X_test)[:, 1])
+                scores.append(f1_score(y_test, (preds >= 0.5).astype(int)))
+                
+            return np.mean(scores)
+        except Exception as e:
+            logging.warning(f"Trial failed: {str(e)}")
+            return 0.0  # Return minimum score for failed trials
 
     def train(self, X: pd.DataFrame, y: pd.Series):
-        """Final training with calibration"""
-        X_sel = X[self.selected_features]
-        X_res, y_res = self.smote.fit_resample(X_sel, y)
-        
-        # Get best parameters from study
-        best_params = self.study.best_params
-        rf_params = {k[3:]: v for k, v in best_params.items() if k.startswith('rf_')}
-        gb_params = {k[3:]: v for k, v in best_params.items() if k.startswith('gb_')}
-        
-        self.model_rf.set_params(**rf_params)
-        self.model_gb.set_params(**gb_params)
-        
-        # Train final models
-        self.model_rf.fit(X_res, y_res)
-        self.model_gb.fit(X_res, y_res)
-        
-        # Calibration
-        self.calibrated_rf = CalibratedClassifierCV(self.model_rf, cv=TimeSeriesSplit(3))
-        self.calibrated_gb = CalibratedClassifierCV(self.model_gb, cv=TimeSeriesSplit(3))
-        self.calibrated_rf.fit(X_sel, y)
-        self.calibrated_gb.fit(X_sel, y)
+        """Training pipeline with validation"""
+        try:
+            X_sel = X[self.selected_features]
+            
+            # Final SMOTE validation
+            if len(np.unique(y)) < 2:
+                raise ValueError("Insufficient class distribution for training")
+                
+            X_res, y_res = self.smote.fit_resample(X_sel, y)
+            
+            # Get best parameters
+            best_params = self.study.best_params
+            rf_params = {k[3:]: v for k, v in best_params.items() if k.startswith('rf_')}
+            gb_params = {k[3:]: v for k, v in best_params.items() if k.startswith('gb_')}
+            
+            # Train final models
+            self.model_rf.set_params(**rf_params).fit(X_res, y_res)
+            self.model_gb.set_params(**gb_params).fit(X_res, y_res)
+            
+            # Calibration
+            self.calibrated_rf = CalibratedClassifierCV(self.model_rf, cv=TimeSeriesSplit(3))
+            self.calibrated_gb = CalibratedClassifierCV(self.model_gb, cv=TimeSeriesSplit(3))
+            self.calibrated_rf.fit(X_sel, y)
+            self.calibrated_gb.fit(X_sel, y)
+            
+        except Exception as e:
+            logging.error(f"Training failed: {str(e)}")
+            raise
 
     def predict(self, X: pd.DataFrame) -> float:
-        """Ensemble prediction with calibration"""
-        X_sel = X[self.selected_features]
-        prob_rf = self.calibrated_rf.predict_proba(X_sel)[:, 1]
-        prob_gb = self.calibrated_gb.predict_proba(X_sel)[:, 1]
-        return 0.6 * prob_rf + 0.4 * prob_gb
+        """Safe prediction method"""
+        try:
+            X_sel = X[self.selected_features]
+            prob_rf = self.calibrated_rf.predict_proba(X_sel)[:, 1]
+            prob_gb = self.calibrated_gb.predict_proba(X_sel)[:, 1]
+            return 0.6 * prob_rf + 0.4 * prob_gb
+        except Exception as e:
+            logging.error(f"Prediction failed: {str(e)}")
+            return 0.5  # Neutral prediction on failure
 
 # ======================
 # STREAMLIT INTERFACE
@@ -284,8 +331,6 @@ def main():
                 current_vol = processed_data['Volatility'].iloc[-1].item()
                 st.metric("Current Price", f"${current_price:,.2f}")
                 st.metric("Volatility", f"{current_vol:.2%}")
-            except (IndexError, AttributeError) as e:
-                st.error("Insufficient data to display metrics")
             except Exception as e:
                 st.error(f"Display error: {str(e)}")
 
@@ -322,26 +367,20 @@ def main():
     if st.session_state.model and not processed_data.empty:
         try:
             latest_data = processed_data[st.session_state.model.selected_features].iloc[[-1]]
-            confidence = st.session_state.model.predict(latest_data)[0]
+            confidence = st.session_state.model.predict(latest_data)
             
             st.subheader("Trading Signal")
             col1, col2, col3 = st.columns(3)
             col1.metric("Confidence Score", f"{confidence:.2%}")
             
-            signal_style = {
-                "buy": ("🚀 Strong Buy", "#28a745"),
-                "sell": ("🔻 Strong Sell", "#dc3545"),
-                "hold": ("🛑 Hold", "#17a2b8")
-            }
-            
             if confidence > TRADE_THRESHOLD_BUY:
-                col2.markdown(f"<h3 style='color:{signal_style['buy'][1]}'>{signal_style['buy'][0]}</h3>", unsafe_allow_html=True)
+                col2.success("🚀 Strong Buy Signal")
                 col3.write(f"Threshold: >{TRADE_THRESHOLD_BUY:.0%}")
             elif confidence < TRADE_THRESHOLD_SELL:
-                col2.markdown(f"<h3 style='color:{signal_style['sell'][1]}'>{signal_style['sell'][0]}</h3>", unsafe_allow_html=True)
+                col2.error("🔻 Strong Sell Signal")
                 col3.write(f"Threshold: <{TRADE_THRESHOLD_SELL:.0%}")
             else:
-                col2.markdown(f"<h3 style='color:{signal_style['hold'][1]}'>{signal_style['hold'][0]}</h3>", unsafe_allow_html=True)
+                col2.info("🛑 Hold Position")
                 col3.write("No clear market signal")
             
             if st.session_state.last_trained:

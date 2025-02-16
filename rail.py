@@ -6,6 +6,7 @@ import pandas as pd
 import yfinance as yf
 import streamlit as st
 import optuna
+import pandas_ta as ta
 from arch import arch_model
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.model_selection import TimeSeriesSplit
@@ -16,7 +17,6 @@ from sklearn.utils.class_weight import compute_sample_weight
 from imblearn.over_sampling import SMOTE
 from datetime import datetime, timedelta
 import warnings
-import talib
 
 # ======================
 # CONFIGURATION
@@ -24,16 +24,16 @@ import talib
 SYMBOL = 'BTC-USD'
 PRIMARY_INTERVAL = '15m'
 FALLBACK_INTERVAL = '60m'
-LOOKBACK_DAYS = 59  # Max for 15m data
-FALLBACK_LOOKBACK = 180  # For 60m data
+LOOKBACK_DAYS = 59
+FALLBACK_LOOKBACK = 180
 TRADE_THRESHOLD_BUY = 0.58
 TRADE_THRESHOLD_SELL = 0.42
 GARCH_WINDOW = 7
 MAX_TRIALS = 20
 INITIAL_FEATURES = [
-    'SMA_20', 'SMA_50', 'SMA_200', 'RSI', 'MACD', 'MACD_Signal',
-    'BB_upper', 'BB_middle', 'BB_lower', 'ATR', 'VWAP', 'Volume_MA_20',
-    'Volatility', 'OBV'
+    'SMA_20', 'SMA_50', 'SMA_200', 'RSI', 'MACD', 'MACD_Hist',
+    'BBL_20_2.0', 'BBM_20_2.0', 'BBU_20_2.0', 'ATRr_14', 
+    'VWAP', 'Volume_MA_20', 'Volatility', 'OBV'
 ]
 
 # Suppress warnings
@@ -102,32 +102,27 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
             return pd.DataFrame()
 
 def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Advanced feature engineering with technical indicators"""
+    """Advanced feature engineering with pandas-ta indicators"""
     df = df.copy()
     try:
         # Price features
-        df['SMA_20'] = df['Close'].rolling(20).mean()
-        df['SMA_50'] = df['Close'].rolling(50).mean()
-        df['SMA_200'] = df['Close'].rolling(200).mean()
+        df['SMA_20'] = ta.sma(df['Close'], length=20)
+        df['SMA_50'] = ta.sma(df['Close'], length=50)
+        df['SMA_200'] = ta.sma(df['Close'], length=200)
         df['Returns'] = df['Close'].pct_change()
         
         # Bollinger Bands
-        df['BB_upper'], df['BB_middle'], df['BB_lower'] = talib.BBANDS(
-            df['Close'], timeperiod=20
-        )
+        bb = ta.bbands(df['Close'], length=20, std=2)
+        df = pd.concat([df, bb], axis=1)
         
         # Momentum indicators
-        df['RSI'] = talib.RSI(df['Close'], timeperiod=14)
-        macd, macdsignal, _ = talib.MACD(
-            df['Close'], fastperiod=12, slowperiod=26, signalperiod=9
-        )
-        df['MACD'] = macd
-        df['MACD_Signal'] = macdsignal
+        df['RSI'] = ta.rsi(df['Close'], length=14)
+        macd = ta.macd(df['Close'], fast=12, slow=26, signal=9)
+        df['MACD'] = macd['MACD_12_26_9']
+        df['MACD_Hist'] = macd['MACDh_12_26_9']
         
         # Volatility features
-        df['ATR'] = talib.ATR(
-            df['High'], df['Low'], df['Close'], timeperiod=14
-        )
+        df['ATRr_14'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
         returns = df['Returns'].dropna()
         if len(returns) > 100:
             try:
@@ -141,8 +136,8 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
             df['Volatility'] = returns.rolling(GARCH_WINDOW).std() * 100
         
         # Volume features
-        df['VWAP'] = (df['Volume'] * (df['High'] + df['Low'] + df['Close']) / 3).cumsum() / df['Volume'].cumsum()
-        df['OBV'] = talib.OBV(df['Close'], df['Volume'])
+        df['VWAP'] = ta.vwap(df['High'], df['Low'], df['Close'], df['Volume'])
+        df['OBV'] = ta.obv(df['Close'], df['Volume'])
         df['Volume_MA_20'] = df['Volume'].rolling(20).mean()
         
         # Target encoding
@@ -199,13 +194,11 @@ class TradingModel:
             }
             return self._cross_val_score(GradientBoostingClassifier(**params), X, y)
 
-        # Optimize RF
         study_rf = optuna.create_study(direction='maximize')
         study_rf.optimize(objective_rf, n_trials=MAX_TRIALS, 
                         callbacks=[self._progress_callback])
         self.model_rf.set_params(**study_rf.best_params)
 
-        # Optimize GB
         study_gb = optuna.create_study(direction='maximize')
         study_gb.optimize(objective_gb, n_trials=MAX_TRIALS,
                         callbacks=[self._progress_callback])
@@ -219,7 +212,6 @@ class TradingModel:
             X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
             y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
             
-            # Feature selection and SMOTE only on training data
             if not self.selected_features:
                 self.feature_selector = SelectFromModel(
                     RandomForestClassifier(n_estimators=100),
@@ -230,7 +222,6 @@ class TradingModel:
             else:
                 X_train_sel = X_train[self.selected_features]
             
-            # Handle class imbalance
             X_res, y_res = self.smote.fit_resample(X_train_sel, y_train)
             
             model.fit(X_res, y_res)
@@ -241,7 +232,6 @@ class TradingModel:
 
     def train(self, X: pd.DataFrame, y: pd.Series):
         try:
-            # Final feature selection
             self.feature_selector = SelectFromModel(
                 RandomForestClassifier(n_estimators=100),
                 threshold="median"
@@ -249,14 +239,11 @@ class TradingModel:
             X_sel = self.feature_selector.fit_transform(X, y)
             self.selected_features = X.columns[self.feature_selector.get_support()]
             
-            # Handle class imbalance
             X_res, y_res = self.smote.fit_resample(X_sel, y)
             
-            # Train models
             self.model_rf.fit(X_res, y_res)
             self.model_gb.fit(X_res, y_res)
 
-            # Probability calibration
             self.calibrated_rf = CalibratedClassifierCV(
                 self.model_rf,
                 method='isotonic',

@@ -25,13 +25,12 @@ PRIMARY_INTERVAL = '15m'
 FALLBACK_INTERVAL = '60m'
 TRADE_THRESHOLD_BUY = 0.58
 TRADE_THRESHOLD_SELL = 0.42
-GARCH_WINDOW = 7
-MAX_TRIALS = 20
-MAX_RETRIES = 3
+MAX_TRIALS = 15  # Reduced from 20 to 15
+GARCH_WINDOW = 14
+DATA_RETRIES = 3
 
 # Suppress warnings
 warnings.filterwarnings("ignore", category=UserWarning)
-warnings.filterwarnings("ignore", category=RuntimeWarning)
 logging.basicConfig(level=logging.INFO)
 
 # ======================
@@ -52,16 +51,16 @@ if 'data_warning' not in st.session_state:
     st.session_state.data_warning = None
 
 # ======================
-# DATA PIPELINE
+# IMPROVED DATA PIPELINE
 # ======================
 @st.cache_data(ttl=300, show_spinner="Fetching market data...")
 def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
-    """Smart data fetching with fallback mechanism"""
+    """Robust data fetching with retries and validation"""
     end = datetime.now()
-    max_days = 60 if interval in ['15m', '30m'] else 730
-    lookback = max_days - 2  # Add buffer for timezone issues
+    max_days = 60 if interval in ['15m', '30m'] else 180
+    lookback = max_days - 2  # Buffer for timezone issues
     
-    for attempt in range(MAX_RETRIES):
+    for _ in range(DATA_RETRIES):
         try:
             df = yf.download(
                 symbol, 
@@ -71,14 +70,14 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
                 progress=False,
                 auto_adjust=True
             )
-            if not df.empty:
+            if not df.empty and len(df) > 100:
                 st.session_state.data_warning = None
                 return df
         except Exception as e:
-            logging.warning(f"Attempt {attempt+1} failed: {str(e)}")
+            logging.warning(f"Download attempt failed: {str(e)}")
             time.sleep(1)
     
-    try:  # Fallback to daily data
+    try:  # Fallback mechanism
         df = yf.download(
             symbol,
             start=end - timedelta(days=365),
@@ -90,61 +89,53 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
         st.session_state.data_warning = (
             f"Using {FALLBACK_INTERVAL} data due to {interval} availability limits"
         )
-        return df
-    except Exception as fallback_error:
-        logging.error(f"Fallback failed: {str(fallback_error)}")
+        return df if not df.empty else pd.DataFrame()
+    except Exception as e:
         st.error(f"Data unavailable for {symbol}")
         return pd.DataFrame()
 
 def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Feature engineering with validation"""
-    if df.empty or len(df) < 20:
+    """Enhanced feature engineering with validation"""
+    if df.empty or len(df) < 100:
         return pd.DataFrame()
         
     df = df.copy()
     try:
         # Price features
-        df['Returns'] = df['Close'].pct_change()
+        df['Returns'] = df['Close'].pct_change().dropna()
         
         # Technical indicators
-        for window in [20, 50, 200]:
+        windows = [20, 50, 200]
+        for window in windows:
             df[f'SMA_{window}'] = df['Close'].rolling(window).mean()
         
-        # RSI Calculation
+        # RSI with error handling
         delta = df['Close'].diff()
         gain = delta.where(delta > 0, 0)
         loss = -delta.where(delta < 0, 0)
-        rs = (gain.rolling(14).mean() / 
-              loss.rolling(14).mean()).replace(np.inf, 100)
+        avg_gain = gain.rolling(14).mean()
+        avg_loss = loss.rolling(14).mean()
+        rs = avg_gain / avg_loss.replace(0, 1e-6)  # Prevent division by zero
         df['RSI'] = 100 - (100 / (1 + rs))
+        df['RSI'] = df['RSI'].clip(0, 100)  # Bound between 0-100
         
         # MACD
         df['MACD'] = df['Close'].ewm(span=12).mean() - df['Close'].ewm(span=26).mean()
         df['MACD_Signal'] = df['MACD'].ewm(span=9).mean()
         
-        # Bollinger Bands
-        df['BB_MA20'] = df['Close'].rolling(20).mean()
-        df['BB_STD20'] = df['Close'].rolling(20).std()
-        df['BB_Upper'] = df['BB_MA20'] + (df['BB_STD20'] * 2)
-        df['BB_Lower'] = df['BB_MA20'] - (df['BB_STD20'] * 2)
-        
-        # Volume
-        df['OBV'] = (np.sign(df['Close'].diff()) * df['Volume']).cumsum()
-        df['Volume_MA_20'] = df['Volume'].rolling(20).mean()
-        
-        # Volatility
+        # Volatility with dynamic scaling
         returns = df['Returns'].dropna()
-        if len(returns) > 100:
-            try:
-                model = arch_model(returns * 100, vol='Garch', p=1, q=1)
-                res = model.fit(disp='off')
-                df['Volatility'] = res.conditional_volatility / 100
-            except:
-                df['Volatility'] = returns.rolling(GARCH_WINDOW).std()
-        else:
+        scale_factor = 100 / returns.std()  # Dynamic scaling
+        scaled_returns = returns * scale_factor
+        
+        try:
+            garch = arch_model(scaled_returns, vol='Garch', p=1, q=1, rescale=False)
+            garch_fit = garch.fit(disp='off', options={'maxiter': 500})
+            df['Volatility'] = garch_fit.conditional_volatility / scale_factor
+        except Exception:
             df['Volatility'] = returns.rolling(GARCH_WINDOW).std()
         
-        # Target
+        # Target encoding
         df['Target'] = (df['Returns'].shift(-1) > 0).astype(int)
         
         return df.dropna()
@@ -153,7 +144,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
 # ======================
-# MODEL PIPELINE
+# OPTIMIZED MODEL PIPELINE
 # ======================
 class TradingModel:
     def __init__(self):
@@ -163,79 +154,85 @@ class TradingModel:
         self.model_gb = GradientBoostingClassifier(random_state=42)
         self.calibrated_rf = None
         self.calibrated_gb = None
-        self.smote = SMOTE(random_state=42)
-        self.study_rf = None
-        self.study_gb = None
+        self.smote = SMOTE(random_state=42, k_neighbors=5)
+        self.study = None
+        self.best_score = 0
 
     def _progress_callback(self, study, trial):
+        """Unified progress tracking"""
         if st.session_state.training_progress:
-            model_type = "RF" if study == self.study_rf else "GB"
             progress = (trial.number + 1) / MAX_TRIALS
-            text = (f"{model_type} Trial {trial.number+1}/{MAX_TRIALS} - "
+            text = (f"Trial {trial.number + 1}/{MAX_TRIALS} - "
                     f"Best F1: {study.best_value:.2%}")
             st.session_state.training_progress.progress(progress, text=text)
 
-    def optimize_hyperparameters(self, X: pd.DataFrame, y: pd.Series):
+    def optimize_models(self, X: pd.DataFrame, y: pd.Series):
+        """Combined optimization for both models"""
         # Feature selection
         self.feature_selector = SelectFromModel(
             RandomForestClassifier(n_estimators=100),
-            threshold="median"
+            threshold="1.25*median"
         )
         X_sel = self.feature_selector.fit_transform(X, y)
-        self.selected_features = X.columns[self.feature_selector.get_support()]
+        self.selected_features = X.columns[self.feature_selector.get_support_]
         
-        # RF optimization
-        self.study_rf = optuna.create_study(direction='maximize')
-        self.study_rf.optimize(
-            lambda trial: self._objective(trial, X_sel, y, 'rf'), 
+        # Combined study
+        self.study = optuna.create_study(direction='maximize')
+        self.study.optimize(
+            lambda trial: self._objective(trial, X_sel, y),
             n_trials=MAX_TRIALS,
             callbacks=[self._progress_callback]
         )
-        self.model_rf.set_params(**self.study_rf.best_params)
         
-        # GB optimization
-        self.study_gb = optuna.create_study(direction='maximize')
-        self.study_gb.optimize(
-            lambda trial: self._objective(trial, X_sel, y, 'gb'), 
-            n_trials=MAX_TRIALS,
-            callbacks=[self._progress_callback]
-        )
-        self.model_gb.set_params(**self.study_gb.best_params)
+        # Set best parameters
+        self.model_rf.set_params(**self.study.best_params['rf'])
+        self.model_gb.set_params(**self.study.best_params['gb'])
 
-    def _objective(self, trial, X, y, model_type):
-        if model_type == 'rf':
-            params = {
-                'n_estimators': trial.suggest_int('n_estimators', 200, 800),
-                'max_depth': trial.suggest_int('max_depth', 10, 30),
-                'min_samples_split': trial.suggest_int('min_samples_split', 5, 20),
-                'max_features': trial.suggest_categorical('max_features', ['sqrt', 'log2'])
-            }
-            model = RandomForestClassifier(**params)
-        else:
-            params = {
-                'n_estimators': trial.suggest_int('n_estimators', 200, 800),
-                'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
-                'max_depth': trial.suggest_int('max_depth', 3, 10),
-                'subsample': trial.suggest_float('subsample', 0.7, 1.0)
-            }
-            model = GradientBoostingClassifier(**params)
+    def _objective(self, trial, X, y):
+        """Combined objective function for both models"""
+        # RF parameters
+        rf_params = {
+            'n_estimators': trial.suggest_int('rf_n_estimators', 200, 800),
+            'max_depth': trial.suggest_int('rf_max_depth', 10, 30),
+            'min_samples_split': trial.suggest_int('rf_min_samples_split', 5, 20),
+            'max_features': trial.suggest_categorical('rf_max_features', ['sqrt', 'log2'])
+        }
         
+        # GB parameters
+        gb_params = {
+            'n_estimators': trial.suggest_int('gb_n_estimators', 200, 800),
+            'learning_rate': trial.suggest_float('gb_learning_rate', 0.01, 0.3, log=True),
+            'max_depth': trial.suggest_int('gb_max_depth', 3, 10),
+            'subsample': trial.suggest_float('gb_subsample', 0.7, 1.0)
+        }
+        
+        # Cross-validation
         tscv = TimeSeriesSplit(3)
         scores = []
+        
         for train_idx, test_idx in tscv.split(X):
             X_train, X_test = X[train_idx], X[test_idx]
             y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
             
+            # Handle class imbalance
             X_res, y_res = self.smote.fit_resample(X_train, y_train)
-            model.fit(X_res, y_res)
-            scores.append(f1_score(y_test, model.predict(X_test)))
-        
+            
+            # Train and evaluate both models
+            rf = RandomForestClassifier(**rf_params).fit(X_res, y_res)
+            gb = GradientBoostingClassifier(**gb_params).fit(X_res, y_res)
+            
+            # Ensemble predictions
+            preds = 0.6*rf.predict(X_test) + 0.4*gb.predict(X_test)
+            scores.append(f1_score(y_test, preds.round()))
+            
         return np.mean(scores)
 
     def train(self, X: pd.DataFrame, y: pd.Series):
+        """Final training with best parameters"""
         X_sel = X[self.selected_features]
         X_res, y_res = self.smote.fit_resample(X_sel, y)
         
+        # Train models
         self.model_rf.fit(X_res, y_res)
         self.model_gb.fit(X_res, y_res)
         
@@ -246,6 +243,7 @@ class TradingModel:
         self.calibrated_gb.fit(X_sel, y)
 
     def predict(self, X: pd.DataFrame) -> float:
+        """Ensemble prediction"""
         X_sel = X[self.selected_features]
         prob_rf = self.calibrated_rf.predict_proba(X_sel)[:, 1]
         prob_gb = self.calibrated_gb.predict_proba(X_sel)[:, 1]
@@ -278,16 +276,14 @@ def main():
                 current_vol = processed_data['Volatility'].iloc[-1]
                 st.metric("Current Price", f"${current_price:,.2f}")
                 st.metric("Volatility", f"{current_vol:.2%}")
-            except IndexError:
-                st.error("Insufficient data points")
             except Exception as e:
-                st.error(f"Data display error: {str(e)}")
+                st.error(f"Display error: {str(e)}")
 
     # Model training
     st.sidebar.header("Model Controls")
     if st.sidebar.button("🚀 Train Model"):
         if processed_data.empty or 'Target' not in processed_data.columns:
-            st.error("Invalid data for training")
+            st.error("Insufficient data for training")
             return
             
         try:
@@ -297,13 +293,13 @@ def main():
             X = processed_data.drop(['Target', 'Returns'], axis=1, errors='ignore')
             y = processed_data['Target']
             
-            with st.spinner("Optimizing Models..."):
-                model.optimize_hyperparameters(X, y)
+            with st.spinner("Optimizing models..."):
+                model.optimize_models(X, y)
                 model.train(X, y)
             
             st.session_state.model = model
             st.session_state.last_trained = datetime.now()
-            st.success(f"Model trained! Best F1: {max(model.study_rf.best_value, model.study_gb.best_value):.2%}")
+            st.success(f"Model trained! Best F1: {model.study.best_value:.2%}")
             
         except Exception as e:
             st.error(f"Training failed: {str(e)}")

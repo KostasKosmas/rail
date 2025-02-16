@@ -168,12 +168,18 @@ class TradingModel:
         self.calibrated_gb = None
         self.progress = None
         self.smote = SMOTE(random_state=42)
+        self.current_study = ""
 
     def _progress_callback(self, study, trial):
         if self.progress:
+            total_trials = 2 * MAX_TRIALS
+            completed = trial.number + 1 + (MAX_TRIALS if "Gradient" in self.current_study else 0)
             self.progress.progress(
-                (trial.number + 1) / MAX_TRIALS,
-                text=f"Trial {trial.number + 1}/{MAX_TRIALS} - Best: {study.best_value:.2%}"
+                completed / total_trials,
+                text=(
+                    f"{self.current_study} Trial {trial.number + 1}/{MAX_TRIALS} - "
+                    f"Best: {study.best_value:.2%}"
+                )
             )
 
     def optimize_hyperparameters(self, X: pd.DataFrame, y: pd.Series):
@@ -195,11 +201,17 @@ class TradingModel:
             }
             return self._cross_val_score(GradientBoostingClassifier(**params), X, y)
 
+        # Reset features before each optimization
+        self.selected_features = []
+        self.current_study = "Random Forest"
         study_rf = optuna.create_study(direction='maximize')
         study_rf.optimize(objective_rf, n_trials=MAX_TRIALS, 
                         callbacks=[self._progress_callback])
         self.model_rf.set_params(**study_rf.best_params)
 
+        # Reset features for GB optimization
+        self.selected_features = []
+        self.current_study = "Gradient Boosting"
         study_gb = optuna.create_study(direction='maximize')
         study_gb.optimize(objective_gb, n_trials=MAX_TRIALS,
                         callbacks=[self._progress_callback])
@@ -213,7 +225,6 @@ class TradingModel:
             X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
             y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
             
-            # Fix: Check length instead of truth value
             if len(self.selected_features) == 0:
                 self.feature_selector = SelectFromModel(
                     RandomForestClassifier(n_estimators=100),
@@ -221,6 +232,8 @@ class TradingModel:
                 )
                 self.feature_selector.fit(X_train, y_train)
                 self.selected_features = X_train.columns[self.feature_selector.get_support()]
+                if len(self.selected_features) == 0:
+                    raise ValueError("No features selected!")
             
             X_train_sel = X_train[self.selected_features]
             X_test_sel = X_test[self.selected_features]
@@ -330,9 +343,10 @@ def main():
                 
             st.session_state.model = model
             st.session_state.last_trained = datetime.now()
-            st.session_state.training_progress.progress(1.0, "Training complete!")
-            time.sleep(1)
-            st.session_state.training_progress = None
+            if st.session_state.training_progress:
+                st.session_state.training_progress.progress(1.0, "Training complete!")
+                time.sleep(1)
+                st.session_state.training_progress = None
             st.success("Model trained successfully!")
             
         except Exception as e:
@@ -362,7 +376,8 @@ def main():
                 col2.info("🛑 Hold Position")
                 col3.write("No clear market signal")
                 
-            st.caption(f"Last trained: {st.session_state.last_trained.strftime('%Y-%m-%d %H:%M')}")
+            if st.session_state.last_trained:
+                st.caption(f"Last trained: {st.session_state.last_trained.strftime('%Y-%m-%d %H:%M')}")
             
         except Exception as e:
             st.error(f"Prediction error: {str(e)}")

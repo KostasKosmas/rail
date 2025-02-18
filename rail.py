@@ -74,23 +74,33 @@ if 'training_progress' not in st.session_state:
     st.session_state.training_progress = TrainingProgress()
 
 # ======================
-# DATA PIPELINE
+# FIXED DATA PIPELINE
 # ======================
 @st.cache_data(ttl=300, show_spinner="Fetching market data...")
 def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
-    end = datetime.now()
-    lookback_days = 59 if interval in ['15m', '30m'] else 180
-    
     try:
+        # Use period parameter instead of start/end for crypto data
         df = yf.download(
-            symbol, 
-            start=end - timedelta(days=lookback_days),
-            end=end,
+            tickers=symbol,
+            period="60d" if interval in ['15m', '30m'] else "180d",
             interval=interval,
             progress=False,
-            auto_adjust=True
+            auto_adjust=True,
+            ignore_tz=True,  # Fix for timezone issues
+            raise_errors=False  # Prevent exception throwing
         )
-        return df.reset_index(drop=True) if not df.empty else pd.DataFrame()
+        
+        if df.empty:
+            st.error(f"No data found for {symbol}")
+            return pd.DataFrame()
+            
+        # Convert index to datetime and filter
+        df.index = pd.to_datetime(df.index)
+        df = df.sort_index(ascending=True)
+        df = df[~df.index.duplicated()]
+        
+        return df.reset_index()  # Keep datetime as a column
+        
     except Exception as e:
         logging.error(f"Data fetch failed: {str(e)}")
         st.error(f"Failed to fetch data for {symbol}")
@@ -101,7 +111,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
     
     try:
-        df = df.copy().reset_index(drop=True)
+        df = df.copy().rename(columns={'index': 'Date'})
         df['Returns'] = df['Close'].pct_change()
         df['Log_Returns'] = np.log(df['Close']).diff()
         
@@ -135,7 +145,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
 # ======================
-# MODEL PIPELINE
+# MODEL PIPELINE (UNCHANGED)
 # ======================
 class TradingModel:
     def __init__(self):
@@ -318,7 +328,7 @@ class TradingModel:
             return 0.5
 
 # ======================
-# INTERFACE
+# FIXED INTERFACE
 # ======================
 def main():
     # Initialize session state
@@ -335,7 +345,10 @@ def main():
         col1, col2 = st.columns([3, 1])
         with col1:
             st.subheader(f"{symbol} Price Chart")
-            st.line_chart(processed_data['Close'])
+            if 'Date' in processed_data:
+                st.line_chart(processed_data.set_index('Date')['Close'])
+            else:
+                st.line_chart(processed_data['Close'])
             
         with col2:
             current_price = processed_data['Close'].iloc[-1].item()

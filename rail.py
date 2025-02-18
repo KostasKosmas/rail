@@ -8,6 +8,7 @@ import streamlit as st
 import optuna
 import warnings
 import os
+import requests
 from threading import Lock
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.model_selection import TimeSeriesSplit
@@ -35,6 +36,9 @@ UPDATE_INTERVAL = 0.5
 STUDY_DIR = "optuna_studies"
 STUDY_NAME = "main_study"
 STUDY_STORAGE = f"sqlite:///{STUDY_DIR}/trading_studies.db"
+YF_MAX_RETRIES = 3
+YF_RETRY_DELAY = 2
+YF_STATUS_URL = "https://query1.finance.yahoo.com/"
 
 warnings.filterwarnings("ignore", category=UserWarning, message=".*ScriptRunContext.*")
 logging.basicConfig(level=logging.INFO)
@@ -67,75 +71,92 @@ class TrainingProgress:
         with progress_lock:
             self._trials_completed = value
 
-# Initialize session state variables
 if 'model' not in st.session_state:
     st.session_state.model = None
 if 'training_progress' not in st.session_state:
     st.session_state.training_progress = TrainingProgress()
 
 # ======================
-# FIXED DATA PIPELINE
+# RESILIENT DATA PIPELINE
 # ======================
 @st.cache_data(ttl=300, show_spinner="Fetching market data...")
 def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
-    try:
-        # Updated yfinance parameters with proper error handling
-        df = yf.download(
-            tickers=symbol,
-            period="60d" if interval in ['15m', '30m'] else "180d",
-            interval=interval,
-            progress=False,
-            auto_adjust=True,
-            ignore_tz=True,  # Fix timezone issues
-            actions=False,    # Disable dividend and stock split data
-            timeout=10        # Add timeout for connection
-        )
-        
-        if df.empty:
-            st.error(f"No market data available for {symbol}")
-            return pd.DataFrame()
-            
-        # Process the index
-        df.index = pd.to_datetime(df.index)
-        df = df.sort_index().reset_index()
-        df = df.rename(columns={'index': 'Date'})
-        
-        # Filter out weekends for crypto (markets never close)
-        df = df[df['Date'].dt.dayofweek < 5]
-        
-        return df.dropna().reset_index(drop=True)
-        
-    except Exception as e:
-        logging.error(f"Data fetch error: {str(e)}")
-        st.error(f"Failed to retrieve data for {symbol}. Check symbol validity.")
-        return pd.DataFrame()
+    def check_yf_status():
+        try:
+            response = requests.get(YF_STATUS_URL, timeout=5)
+            return response.status_code == 200
+        except:
+            return False
 
+    for attempt in range(YF_MAX_RETRIES):
+        try:
+            if not check_yf_status():
+                raise ConnectionError("Yahoo Finance API unavailable")
+            
+            df = yf.download(
+                tickers=symbol,
+                period="60d" if interval in ['15m', '30m'] else "180d",
+                interval=interval,
+                progress=False,
+                auto_adjust=True,
+                ignore_tz=True,
+                actions=False,
+                timeout=10
+            )
+            
+            if df.empty:
+                continue
+
+            df = df.reset_index()
+            df.columns = [col.strftime('%Y-%m-%d %H:%M:%S') if isinstance(col, pd.Timestamp) else col 
+                         for col in df.columns]
+            
+            numeric_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+            df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors='coerce')
+            df = df[df['Close'] > 0].dropna()
+            
+            if len(df) > 100:
+                return df.reset_index(drop=True)
+            
+        except Exception as e:
+            logging.warning(f"Attempt {attempt+1} failed: {str(e)}")
+            if attempt < YF_MAX_RETRIES - 1:
+                time.sleep(YF_RETRY_DELAY * (attempt + 1))
+    
+    st.error("""🚨 Failed to fetch data. Possible reasons:
+             - Yahoo Finance service outage
+             - Invalid cryptocurrency symbol
+             - Network connectivity issues
+             Please try again later.""")
+    return pd.DataFrame()
 
 def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or len(df) < 100:
         return pd.DataFrame()
     
     try:
-        df = df.copy().rename(columns={'index': 'Date'})
+        df = df.copy()
         df['Returns'] = df['Close'].pct_change()
         df['Log_Returns'] = np.log(df['Close']).diff()
         
-        windows = [20, 50, 100, 200]
+        windows = [20, 50, 100]
         for window in windows:
-            df[f'SMA_{window}'] = df['Close'].rolling(window).mean()
-            df[f'STD_{window}'] = df['Close'].rolling(window).std()
-            df[f'RSI_{window}'] = 100 - (100 / (1 + (
-                df['Close'].diff().clip(lower=0).rolling(window).mean() / 
-                df['Close'].diff().clip(upper=0).abs().rolling(window).mean()
-            )))
+            if len(df) >= window:
+                df[f'SMA_{window}'] = df['Close'].rolling(window).mean()
+                df[f'STD_{window}'] = df['Close'].rolling(window).std()
+                df[f'RSI_{window}'] = 100 - (100 / (1 + (
+                    df['Close'].diff().clip(lower=0).rolling(window).mean() / 
+                    df['Close'].diff().clip(upper=0).abs().rolling(window).mean()
+                )))
 
-        df['Volatility'] = df['Log_Returns'].rolling(GARCH_WINDOW).std()
-        
-        vol_series = df['Volatility'].dropna()
-        if len(vol_series) >= VOLATILITY_CLUSTERS:
-            kmeans = KMeans(n_clusters=VOLATILITY_CLUSTERS)
-            clusters = kmeans.fit_predict(vol_series.values.reshape(-1, 1))
-            df['Vol_Cluster'] = pd.Series(clusters, index=vol_series.index).reindex(df.index, fill_value=-1)
+        if not df.empty:
+            df['Volatility'] = df['Log_Returns'].rolling(GARCH_WINDOW).std()
+            vol_series = df['Volatility'].dropna()
+            
+            if len(vol_series) >= VOLATILITY_CLUSTERS:
+                kmeans = KMeans(n_clusters=VOLATILITY_CLUSTERS)
+                clusters = kmeans.fit_predict(vol_series.values.reshape(-1, 1))
+                df['Vol_Cluster'] = pd.Series(clusters, index=vol_series.index).reindex(df.index, fill_value=-1)
         
         for period in [3, 7, 14]:
             df[f'Momentum_{period}'] = df['Close'].pct_change(period)
@@ -150,7 +171,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
 # ======================
-# MODEL PIPELINE (UNCHANGED)
+# ROBUST MODEL PIPELINE
 # ======================
 class TradingModel:
     def __init__(self):
@@ -183,24 +204,18 @@ class TradingModel:
             tscv = TimeSeriesSplit(n_splits=3)
             
             with progress_lock:
-                if 'training_progress' not in st.session_state:
-                    st.session_state.training_progress = TrainingProgress()
                 st.session_state.training_progress.status = "Performing feature selection..."
             
             X_sel = self._safe_feature_selection(X, y)
             
             try:
-                with progress_lock:
-                    st.session_state.training_progress.status = "Loading study..."
                 self.study = optuna.load_study(
                     study_name=STUDY_NAME,
                     storage=STUDY_STORAGE,
                     sampler=optuna.samplers.TPESampler(),
                     pruner=optuna.pruners.MedianPruner()
                 )
-            except (KeyError, ValueError):
-                with progress_lock:
-                    st.session_state.training_progress.status = "Creating new study..."
+            except:
                 self.study = optuna.create_study(
                     study_name=STUDY_NAME,
                     storage=STUDY_STORAGE,
@@ -211,18 +226,14 @@ class TradingModel:
 
             def trial_callback(study, trial):
                 with progress_lock:
-                    if 'training_progress' in st.session_state:
-                        st.session_state.training_progress.current_trial = trial.number + 1
-                        st.session_state.training_progress.best_score = study.best_value
-                        st.session_state.training_progress.params = trial.params
-                        st.session_state.training_progress.latest_score = trial.value
-                        st.session_state.training_progress.trials_completed += 1
-                        st.session_state.training_progress.status = f"Trial {trial.number + 1}/{MAX_TRIALS}"
+                    st.session_state.training_progress.current_trial = trial.number + 1
+                    st.session_state.training_progress.best_score = study.best_value
+                    st.session_state.training_progress.params = trial.params
+                    st.session_state.training_progress.latest_score = trial.value
+                    st.session_state.training_progress.trials_completed += 1
+                    st.session_state.training_progress.status = f"Trial {trial.number + 1}/{MAX_TRIALS}"
                 time.sleep(0.1)
 
-            with progress_lock:
-                st.session_state.training_progress.status = "Starting optimization..."
-                
             self.study.optimize(
                 lambda trial: self._objective(trial, X_sel, y, tscv),
                 n_trials=MAX_TRIALS,
@@ -231,13 +242,11 @@ class TradingModel:
             )
             
             with progress_lock:
-                if 'training_progress' in st.session_state:
-                    st.session_state.training_progress.status = "Optimization complete"
+                st.session_state.training_progress.status = "Optimization complete"
                 
         except Exception as e:
             with progress_lock:
-                if 'training_progress' in st.session_state:
-                    st.session_state.training_progress.status = f"Failed: {str(e)}"
+                st.session_state.training_progress.status = f"Failed: {str(e)}"
             raise
 
     def _objective(self, trial, X, y, tscv):
@@ -276,8 +285,7 @@ class TradingModel:
                     k_neighbors=safe_k_neighbors
                 )
                 X_res, y_res = smote.fit_resample(X_train, y_train)
-            except ValueError as e:
-                logging.warning(f"Skipping fold: {str(e)}")
+            except:
                 continue
             
             rf = RandomForestClassifier(**rf_params).fit(X_res, y_res)
@@ -328,42 +336,43 @@ class TradingModel:
             prob_rf = self.calibrated_rf.predict_proba(X_sel)
             prob_gb = self.calibrated_gb.predict_proba(X_sel)
             return (0.6 * prob_rf + 0.4 * prob_gb)[0][2]
-        except Exception as e:
-            logging.error(f"Prediction failed: {str(e)}")
+        except:
             return 0.5
 
 # ======================
-# FIXED INTERFACE
+# ERROR-RESISTANT UI
 # ======================
 def main():
-    # Initialize session state
     if 'training_progress' not in st.session_state:
         st.session_state.training_progress = TrainingProgress()
     
     st.sidebar.header("Settings")
     symbol = st.sidebar.text_input("Cryptocurrency Symbol", DEFAULT_SYMBOL).upper()
     
-    raw_data = fetch_data(symbol, PRIMARY_INTERVAL)
-    processed_data = calculate_features(raw_data)
+    with st.spinner("Loading market data..."):
+        raw_data = fetch_data(symbol, PRIMARY_INTERVAL)
+        processed_data = calculate_features(raw_data)
     
-    if not processed_data.empty:
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            st.subheader(f"{symbol} Price Chart")
-            if 'Date' in processed_data:
-                st.line_chart(processed_data.set_index('Date')['Close'])
-            else:
-                st.line_chart(processed_data['Close'])
-            
-        with col2:
-            current_price = processed_data['Close'].iloc[-1].item()
-            current_vol = processed_data['Volatility'].iloc[-1].item()
-            st.metric("Current Price", f"${current_price:,.2f}")
-            st.metric("Volatility", f"{current_vol:.2%}")
+    if processed_data.empty:
+        st.warning("No valid data available for analysis")
+        return
 
-    if st.sidebar.button("🚀 Train Model") and not processed_data.empty:
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.subheader(f"{symbol} Price Chart")
+        if 'Date' in processed_data:
+            st.line_chart(processed_data.set_index('Date')['Close'])
+        else:
+            st.line_chart(processed_data['Close'])
+            
+    with col2:
+        current_price = processed_data['Close'].iloc[-1].item()
+        current_vol = processed_data['Volatility'].iloc[-1].item()
+        st.metric("Current Price", f"${current_price:,.2f}")
+        st.metric("Volatility", f"{current_vol:.2%}")
+
+    if st.sidebar.button("🚀 Train Model"):
         try:
-            # Re-initialize progress
             st.session_state.training_progress = TrainingProgress()
             model = TradingModel()
             X = processed_data.drop(['Target'], axis=1)
@@ -377,22 +386,21 @@ def main():
                 
                 while not future.done():
                     current_time = time.time()
-                    if 'training_progress' in st.session_state:
-                        progress = st.session_state.training_progress
-                        elapsed = current_time - start_time
-                        
-                        with progress_placeholder.container():
-                            st.caption(f"Status: {progress.status}")
-                            st.progress(
-                                progress.current_trial/MAX_TRIALS,
-                                text=f"Trial {progress.current_trial}/{MAX_TRIALS} (Completed: {progress.trials_completed})"
-                            )
-                            cols = st.columns(2)
-                            cols[0].metric("Best F1 Score", f"{progress.best_score:.2%}")
-                            cols[1].metric("Latest F1 Score", f"{progress.latest_score:.2%}")
-                            st.metric("Elapsed Time", f"{elapsed:.1f}s")
-                            if progress.params:
-                                st.write("Current Parameters:", progress.params)
+                    progress = st.session_state.training_progress
+                    elapsed = current_time - start_time
+                    
+                    with progress_placeholder.container():
+                        st.caption(f"Status: {progress.status}")
+                        st.progress(
+                            progress.current_trial/MAX_TRIALS,
+                            text=f"Trial {progress.current_trial}/{MAX_TRIALS} (Completed: {progress.trials_completed})"
+                        )
+                        cols = st.columns(2)
+                        cols[0].metric("Best F1 Score", f"{progress.best_score:.2%}")
+                        cols[1].metric("Latest F1 Score", f"{progress.latest_score:.2%}")
+                        st.metric("Elapsed Time", f"{elapsed:.1f}s")
+                        if progress.params:
+                            st.write("Current Parameters:", progress.params)
                     
                     time.sleep(0.1)
                 
@@ -407,7 +415,7 @@ def main():
             st.session_state.training_progress = None
             st.session_state.model = None
 
-    if 'model' in st.session_state and st.session_state.model and not processed_data.empty:
+    if st.session_state.model and not processed_data.empty:
         latest_data = processed_data.drop(columns=['Target']).iloc[[-1]].reset_index(drop=True)
         confidence = st.session_state.model.predict(latest_data)
         

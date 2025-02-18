@@ -17,7 +17,7 @@ from sklearn.metrics import f1_score
 from imblearn.over_sampling import SMOTE
 from datetime import datetime, timedelta
 from sklearn.cluster import KMeans
-from functools import wraps
+from concurrent.futures import ThreadPoolExecutor
 
 # ======================
 # CONFIGURATION
@@ -40,12 +40,6 @@ warnings.filterwarnings("ignore", category=UserWarning, message=".*ScriptRunCont
 logging.basicConfig(level=logging.INFO)
 progress_lock = Lock()
 
-# Initialize session state variables
-if 'model' not in st.session_state:
-    st.session_state.model = None
-if 'training_progress' not in st.session_state:
-    st.session_state.training_progress = None
-
 # ======================
 # STREAMLIT UI
 # ======================
@@ -63,28 +57,11 @@ class TrainingProgress:
         self.latest_score = 0.0
         self.last_update = time.time()
 
-    @property
-    def trials_completed(self):
-        with progress_lock:
-            return self._trials_completed
-
-    @trials_completed.setter
-    def trials_completed(self, value):
-        with progress_lock:
-            self._trials_completed = value
-
-def status_update(status: str):
-    """Decorator to update status and force UI refresh"""
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            if st.session_state.training_progress is not None:
-                with progress_lock:
-                    st.session_state.training_progress.status = status
-                    st.session_state.training_progress.last_update = time.time()
-            return func(*args, **kwargs)
-        return wrapper
-    return decorator
+# Initialize session state variables
+if 'model' not in st.session_state:
+    st.session_state.model = None
+if 'training_progress' not in st.session_state:
+    st.session_state.training_progress = TrainingProgress()
 
 # ======================
 # DATA PIPELINE
@@ -175,40 +152,39 @@ class TradingModel:
             logging.error(f"Feature selection failed: {str(e)}")
             return X.iloc[:, :MIN_FEATURES]
 
-    @status_update("Optimizing models...")
     def optimize_models(self, X: pd.DataFrame, y: pd.Series):
         try:
             os.makedirs(STUDY_DIR, exist_ok=True)
             tscv = TimeSeriesSplit(n_splits=3)
             
-            if st.session_state.training_progress is not None:
+            with progress_lock:
                 st.session_state.training_progress.status = "Performing feature selection..."
             
             X_sel = self._safe_feature_selection(X, y)
             
-            @status_update("Initializing study...")
-            def _init_study():
-                try:
-                    return optuna.load_study(
-                        study_name=STUDY_NAME,
-                        storage=STUDY_STORAGE,
-                        sampler=optuna.samplers.TPESampler(),
-                        pruner=optuna.pruners.MedianPruner()
-                    )
-                except (KeyError, ValueError):
-                    return optuna.create_study(
-                        study_name=STUDY_NAME,
-                        storage=STUDY_STORAGE,
-                        direction='maximize',
-                        sampler=optuna.samplers.TPESampler(),
-                        pruner=optuna.pruners.MedianPruner()
-                    )
-
-            self.study = _init_study()
+            try:
+                with progress_lock:
+                    st.session_state.training_progress.status = "Loading study..."
+                self.study = optuna.load_study(
+                    study_name=STUDY_NAME,
+                    storage=STUDY_STORAGE,
+                    sampler=optuna.samplers.TPESampler(),
+                    pruner=optuna.pruners.MedianPruner()
+                )
+            except (KeyError, ValueError):
+                with progress_lock:
+                    st.session_state.training_progress.status = "Creating new study..."
+                self.study = optuna.create_study(
+                    study_name=STUDY_NAME,
+                    storage=STUDY_STORAGE,
+                    direction='maximize',
+                    sampler=optuna.samplers.TPESampler(),
+                    pruner=optuna.pruners.MedianPruner()
+                )
 
             def trial_callback(study, trial):
-                if st.session_state.training_progress is not None:
-                    with progress_lock:
+                with progress_lock:
+                    if hasattr(st.session_state, 'training_progress'):
                         st.session_state.training_progress.current_trial = trial.number + 1
                         st.session_state.training_progress.best_score = study.best_value
                         st.session_state.training_progress.params = trial.params
@@ -217,6 +193,9 @@ class TradingModel:
                         st.session_state.training_progress.status = f"Trial {trial.number + 1}/{MAX_TRIALS}"
                 time.sleep(0.1)
 
+            with progress_lock:
+                st.session_state.training_progress.status = "Starting optimization..."
+                
             self.study.optimize(
                 lambda trial: self._objective(trial, X_sel, y, tscv),
                 n_trials=MAX_TRIALS,
@@ -224,12 +203,14 @@ class TradingModel:
                 show_progress_bar=False
             )
             
-            if st.session_state.training_progress is not None:
-                st.session_state.training_progress.status = "Optimization complete"
+            with progress_lock:
+                if hasattr(st.session_state, 'training_progress'):
+                    st.session_state.training_progress.status = "Optimization complete"
                 
         except Exception as e:
-            if st.session_state.training_progress is not None:
-                st.session_state.training_progress.status = f"Failed: {str(e)}"
+            with progress_lock:
+                if hasattr(st.session_state, 'training_progress'):
+                    st.session_state.training_progress.status = f"Failed: {str(e)}"
             raise
 
     def _objective(self, trial, X, y, tscv):
@@ -328,6 +309,10 @@ class TradingModel:
 # INTERFACE
 # ======================
 def main():
+    # Initialize session state
+    if 'training_progress' not in st.session_state:
+        st.session_state.training_progress = TrainingProgress()
+    
     st.sidebar.header("Settings")
     symbol = st.sidebar.text_input("Cryptocurrency Symbol", DEFAULT_SYMBOL).upper()
     
@@ -348,6 +333,7 @@ def main():
 
     if st.sidebar.button("🚀 Train Model") and not processed_data.empty:
         try:
+            # Re-initialize progress
             st.session_state.training_progress = TrainingProgress()
             model = TradingModel()
             X = processed_data.drop(['Target'], axis=1)
@@ -356,14 +342,35 @@ def main():
             progress_placeholder = st.empty()
             start_time = time.time()
             
-            # Run optimization in main thread
-            model.optimize_models(X, y)
-            
-            # Update progress during optimization
-            model.train(X, y)
-            st.session_state.model = model
-            st.success(f"Training completed in {time.time()-start_time:.1f}s")
-            st.session_state.training_progress = None
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(model.optimize_models, X, y)
+                
+                while not future.done():
+                    current_time = time.time()
+                    if hasattr(st.session_state, 'training_progress'):
+                        progress = st.session_state.training_progress
+                        elapsed = current_time - start_time
+                        
+                        with progress_placeholder.container():
+                            st.caption(f"Status: {progress.status}")
+                            st.progress(
+                                progress.current_trial/MAX_TRIALS,
+                                text=f"Trial {progress.current_trial}/{MAX_TRIALS} (Completed: {progress.trials_completed})"
+                            )
+                            cols = st.columns(2)
+                            cols[0].metric("Best F1 Score", f"{progress.best_score:.2%}")
+                            cols[1].metric("Latest F1 Score", f"{progress.latest_score:.2%}")
+                            st.metric("Elapsed Time", f"{elapsed:.1f}s")
+                            if progress.params:
+                                st.write("Current Parameters:", progress.params)
+                    
+                    time.sleep(0.1)
+                
+                future.result()
+                model.train(X, y)
+                st.session_state.model = model
+                st.success(f"Training completed in {time.time()-start_time:.1f}s")
+                st.session_state.training_progress = None
                 
         except Exception as e:
             st.error(f"Training failed: {str(e)}")

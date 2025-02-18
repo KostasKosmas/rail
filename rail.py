@@ -166,6 +166,10 @@ class TradingModel:
             tscv = TimeSeriesSplit(n_splits=3)
             X_sel = self._safe_feature_selection(X, y)
             
+            # Update status before study creation
+            with progress_lock:
+                st.session_state.training_progress.status = "Initializing study..."
+            
             try:
                 self.study = optuna.load_study(
                     study_name=STUDY_NAME,
@@ -173,6 +177,8 @@ class TradingModel:
                     sampler=optuna.samplers.TPESampler(),
                     pruner=optuna.pruners.MedianPruner()
                 )
+                with progress_lock:
+                    st.session_state.training_progress.status = "Resuming existing study..."
             except (KeyError, ValueError):
                 self.study = optuna.create_study(
                     study_name=STUDY_NAME,
@@ -181,6 +187,8 @@ class TradingModel:
                     sampler=optuna.samplers.TPESampler(),
                     pruner=optuna.pruners.MedianPruner()
                 )
+                with progress_lock:
+                    st.session_state.training_progress.status = "Created new study..."
 
             def trial_callback(study, trial):
                 with progress_lock:
@@ -189,16 +197,25 @@ class TradingModel:
                     st.session_state.training_progress.params = trial.params
                     st.session_state.training_progress.latest_score = trial.value
                     st.session_state.training_progress.trials_completed += 1
+                    st.session_state.training_progress.status = f"Running trial {trial.number + 1}/{MAX_TRIALS}"
                 time.sleep(0.1)
 
+            with progress_lock:
+                st.session_state.training_progress.status = "Starting optimization..."
+                
             self.study.optimize(
                 lambda trial: self._objective(trial, X_sel, y, tscv),
                 n_trials=MAX_TRIALS,
                 callbacks=[trial_callback],
                 show_progress_bar=False
             )
+            
+            with progress_lock:
+                st.session_state.training_progress.status = "Optimization complete"
+                
         except Exception as e:
-            logging.error(f"Optimization failed: {str(e)}")
+            with progress_lock:
+                st.session_state.training_progress.status = f"Failed: {str(e)}"
             raise
 
     def _objective(self, trial, X, y, tscv):

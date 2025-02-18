@@ -15,6 +15,7 @@ from imblearn.over_sampling import SMOTE
 from datetime import datetime, timedelta
 import warnings
 from sklearn.cluster import KMeans
+from concurrent.futures import ThreadPoolExecutor
 
 # ======================
 # CONFIGURATION
@@ -27,7 +28,8 @@ MAX_TRIALS = 50
 GARCH_WINDOW = 14
 MIN_FEATURES = 7
 VOLATILITY_CLUSTERS = 3
-MIN_SAMPLES_FOR_SMOTE = 10  # Minimum samples per class for SMOTE
+MIN_SAMPLES_FOR_SMOTE = 10
+TRIAL_UPDATE_INTERVAL = 2  # Seconds between UI updates
 
 warnings.filterwarnings("ignore", category=UserWarning)
 logging.basicConfig(level=logging.INFO)
@@ -38,10 +40,16 @@ logging.basicConfig(level=logging.INFO)
 st.set_page_config(page_title="AI Trading System", layout="wide")
 st.title("🚀 AI-Powered Cryptocurrency Trading System")
 
+class TrainingProgress:
+    def __init__(self):
+        self.current_trial = 0
+        self.best_score = 0.0
+        self.status = "Initializing..."
+        self.params = {}
+        self.start_time = time.time()
+
 if 'model' not in st.session_state:
     st.session_state.model = None
-if 'last_trained' not in st.session_state:
-    st.session_state.last_trained = None
 if 'training_progress' not in st.session_state:
     st.session_state.training_progress = None
 
@@ -62,9 +70,7 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
             progress=False,
             auto_adjust=True
         )
-        if not df.empty:
-            return df.reset_index(drop=True)
-        return pd.DataFrame()
+        return df.reset_index(drop=True) if not df.empty else pd.DataFrame()
     except Exception as e:
         logging.error(f"Data fetch failed: {str(e)}")
         st.error(f"Failed to fetch data for {symbol}")
@@ -74,8 +80,8 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or len(df) < 100:
         return pd.DataFrame()
     
-    df = df.copy().reset_index(drop=True)
     try:
+        df = df.copy().reset_index(drop=True)
         # Core features
         df['Returns'] = df['Close'].pct_change()
         df['Log_Returns'] = np.log(df['Close']).diff()
@@ -88,7 +94,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
             df[f'RSI_{window}'] = 100 - (100 / (1 + (
                 df['Close'].diff().clip(lower=0).rolling(window).mean() / 
                 df['Close'].diff().clip(upper=0).abs().rolling(window).mean()
-            )))
+            ))
         
         # Volatility Features
         df['Volatility'] = df['Log_Returns'].rolling(GARCH_WINDOW).std()
@@ -147,13 +153,24 @@ class TradingModel:
             tscv = TimeSeriesSplit(n_splits=3)
             X_sel = self._safe_feature_selection(X, y)
             
+            st.session_state.training_progress.status = "Creating study..."
             self.study = optuna.create_study(direction='maximize')
+            
+            def trial_callback(study, trial):
+                st.session_state.training_progress.current_trial = trial.number
+                st.session_state.training_progress.best_score = study.best_value
+                st.session_state.training_progress.params = trial.params
+                time.sleep(0.1)
+            
             self.study.optimize(
                 lambda trial: self._objective(trial, X_sel, y, tscv),
-                n_trials=MAX_TRIALS
+                n_trials=MAX_TRIALS,
+                callbacks=[trial_callback],
+                show_progress_bar=False
             )
+            st.session_state.training_progress.status = "Optimization complete"
         except Exception as e:
-            logging.error(f"Optimization failed: {str(e)}")
+            st.session_state.training_progress.status = f"Failed: {str(e)}"
             raise
 
     def _objective(self, trial, X, y, tscv):
@@ -174,19 +191,17 @@ class TradingModel:
             X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
             y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
             
-            # Skip small training sets
             if len(X_train) < MIN_SAMPLES_FOR_SMOTE:
                 continue
                 
-            # Check class distribution
             class_counts = y_train.value_counts()
             if len(class_counts) < 1:
-                continue  # No valid classes
+                continue
                 
             minority_class_count = class_counts.min()
             safe_k_neighbors = min(5, minority_class_count - 1)
             if safe_k_neighbors < 1:
-                continue  # Not enough samples in minority class
+                continue
                 
             try:
                 smote = SMOTE(
@@ -195,14 +210,12 @@ class TradingModel:
                 )
                 X_res, y_res = smote.fit_resample(X_train, y_train)
             except ValueError as e:
-                logging.warning(f"Skipping fold due to SMOTE error: {str(e)}")
+                logging.warning(f"Skipping fold: {str(e)}")
                 continue
             
-            # Model training
             rf = RandomForestClassifier(**rf_params).fit(X_res, y_res)
             gb = GradientBoostingClassifier(**gb_params).fit(X_res, y_res)
             
-            # Ensemble prediction
             preds = 0.6 * rf.predict_proba(X_test) + 0.4 * gb.predict_proba(X_test)
             scores.append(f1_score(y_test, np.argmax(preds, axis=1), average='weighted'))
             
@@ -212,14 +225,12 @@ class TradingModel:
         try:
             X_sel = X[self.selected_features]
             
-            # Handle class imbalance safely
             smote = SMOTE(
                 random_state=42,
                 k_neighbors=min(5, min(y.value_counts()) - 1)
             )
             X_res, y_res = smote.fit_resample(X_sel, y)
             
-            # Update models with best parameters
             best_params = self.study.best_params
             rf_params = {k[3:]: v for k, v in best_params.items() if k.startswith('rf_')}
             gb_params = {k[3:]: v for k, v in best_params.items() if k.startswith('gb_')}
@@ -227,7 +238,6 @@ class TradingModel:
             self.model_rf.set_params(**rf_params).fit(X_res, y_res)
             self.model_gb.set_params(**gb_params).fit(X_res, y_res)
             
-            # Model calibration
             self.calibrated_rf = CalibratedClassifierCV(self.model_rf, cv=TimeSeriesSplit(3))
             self.calibrated_gb = CalibratedClassifierCV(self.model_gb, cv=TimeSeriesSplit(3))
             self.calibrated_rf.fit(X_sel, y)
@@ -238,11 +248,7 @@ class TradingModel:
 
     def predict(self, X: pd.DataFrame) -> float:
         try:
-            # Validate input and model state
-            if (not self.selected_features or 
-                X.shape[0] == 0 or 
-                self.calibrated_rf is None or 
-                self.calibrated_gb is None):
+            if not self.selected_features or X.empty or self.calibrated_rf is None or self.calibrated_gb is None:
                 return 0.5
                 
             X_sel = X[self.selected_features].reset_index(drop=True)
@@ -280,22 +286,41 @@ def main():
 
     if st.sidebar.button("🚀 Train Model") and not processed_data.empty:
         try:
-            st.session_state.training_progress = st.progress(0, text="Initializing...")
+            st.session_state.training_progress = TrainingProgress()
             model = TradingModel()
             X = processed_data.drop(['Target'], axis=1)
             y = processed_data['Target']
             
-            with st.spinner("Optimizing trading models..."):
-                model.optimize_models(X, y)
+            progress_placeholder = st.empty()
+            start_time = time.time()
+            
+            with ThreadPoolExecutor() as executor:
+                future = executor.submit(model.optimize_models, X, y)
+                
+                while not future.done():
+                    elapsed = time.time() - start_time
+                    progress = st.session_state.training_progress
+                    
+                    with progress_placeholder.container():
+                        st.caption(f"Status: {progress.status}")
+                        st.progress(progress.current_trial/MAX_TRIALS, 
+                                  text=f"Trial {progress.current_trial+1}/{MAX_TRIALS}")
+                        st.metric("Best F1 Score", f"{progress.best_score:.2%}")
+                        st.metric("Elapsed Time", f"{elapsed:.1f}s")
+                        st.write("Current Parameters:", progress.params)
+                    
+                    time.sleep(TRIAL_UPDATE_INTERVAL)
+                
+                future.result()
                 model.train(X, y)
                 st.session_state.model = model
-                st.session_state.last_trained = datetime.now()
-                st.success(f"Model trained! Best F1: {model.study.best_value:.2%}")
+                st.success(f"Training completed in {time.time()-start_time:.1f}s")
+                st.session_state.training_progress = None
+                
         except Exception as e:
             st.error(f"Training failed: {str(e)}")
-            st.session_state.model = None  # Reset model on failure
-        finally:
             st.session_state.training_progress = None
+            st.session_state.model = None
 
     if st.session_state.model and not processed_data.empty:
         latest_data = processed_data.drop(columns=['Target']).iloc[[-1]].reset_index(drop=True)

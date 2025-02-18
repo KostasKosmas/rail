@@ -53,9 +53,19 @@ class TrainingProgress:
         self.status = "Initializing..."
         self.params = {}
         self.start_time = time.time()
-        self._trials_completed = 0
         self.latest_score = 0.0
         self.last_update = time.time()
+        self._trials_completed = 0  # Initialize private attribute
+
+    @property
+    def trials_completed(self):
+        with progress_lock:
+            return self._trials_completed
+
+    @trials_completed.setter
+    def trials_completed(self, value):
+        with progress_lock:
+            self._trials_completed = value
 
 # Initialize session state variables
 if 'model' not in st.session_state:
@@ -102,7 +112,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
             df[f'RSI_{window}'] = 100 - (100 / (1 + (
                 df['Close'].diff().clip(lower=0).rolling(window).mean() / 
                 df['Close'].diff().clip(upper=0).abs().rolling(window).mean()
-            )))
+            ))
 
         df['Volatility'] = df['Log_Returns'].rolling(GARCH_WINDOW).std()
         
@@ -189,7 +199,7 @@ class TradingModel:
                         st.session_state.training_progress.best_score = study.best_value
                         st.session_state.training_progress.params = trial.params
                         st.session_state.training_progress.latest_score = trial.value
-                        st.session_state.training_progress.trials_completed += 1
+                        st.session_state.training_progress.trials_completed += 1  # Use property
                         st.session_state.training_progress.status = f"Trial {trial.number + 1}/{MAX_TRIALS}"
                 time.sleep(0.1)
 

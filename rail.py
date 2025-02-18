@@ -55,7 +55,7 @@ class TrainingProgress:
         self.start_time = time.time()
         self.latest_score = 0.0
         self.last_update = time.time()
-        self._trials_completed = 0  # Initialize private attribute
+        self._trials_completed = 0
 
     @property
     def trials_completed(self):
@@ -112,7 +112,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
             df[f'RSI_{window}'] = 100 - (100 / (1 + (
                 df['Close'].diff().clip(lower=0).rolling(window).mean() / 
                 df['Close'].diff().clip(upper=0).abs().rolling(window).mean()
-            )))
+            ))
 
         df['Volatility'] = df['Log_Returns'].rolling(GARCH_WINDOW).std()
         
@@ -168,6 +168,8 @@ class TradingModel:
             tscv = TimeSeriesSplit(n_splits=3)
             
             with progress_lock:
+                if 'training_progress' not in st.session_state:
+                    st.session_state.training_progress = TrainingProgress()
                 st.session_state.training_progress.status = "Performing feature selection..."
             
             X_sel = self._safe_feature_selection(X, y)
@@ -194,12 +196,12 @@ class TradingModel:
 
             def trial_callback(study, trial):
                 with progress_lock:
-                    if hasattr(st.session_state, 'training_progress'):
+                    if 'training_progress' in st.session_state:
                         st.session_state.training_progress.current_trial = trial.number + 1
                         st.session_state.training_progress.best_score = study.best_value
                         st.session_state.training_progress.params = trial.params
                         st.session_state.training_progress.latest_score = trial.value
-                        st.session_state.training_progress.trials_completed += 1  # Use property
+                        st.session_state.training_progress.trials_completed += 1
                         st.session_state.training_progress.status = f"Trial {trial.number + 1}/{MAX_TRIALS}"
                 time.sleep(0.1)
 
@@ -214,12 +216,12 @@ class TradingModel:
             )
             
             with progress_lock:
-                if hasattr(st.session_state, 'training_progress'):
+                if 'training_progress' in st.session_state:
                     st.session_state.training_progress.status = "Optimization complete"
                 
         except Exception as e:
             with progress_lock:
-                if hasattr(st.session_state, 'training_progress'):
+                if 'training_progress' in st.session_state:
                     st.session_state.training_progress.status = f"Failed: {str(e)}"
             raise
 
@@ -357,7 +359,7 @@ def main():
                 
                 while not future.done():
                     current_time = time.time()
-                    if hasattr(st.session_state, 'training_progress'):
+                    if 'training_progress' in st.session_state:
                         progress = st.session_state.training_progress
                         elapsed = current_time - start_time
                         
@@ -387,7 +389,7 @@ def main():
             st.session_state.training_progress = None
             st.session_state.model = None
 
-    if st.session_state.model and not processed_data.empty:
+    if 'model' in st.session_state and st.session_state.model and not processed_data.empty:
         latest_data = processed_data.drop(columns=['Target']).iloc[[-1]].reset_index(drop=True)
         confidence = st.session_state.model.predict(latest_data)
         

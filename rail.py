@@ -79,32 +79,37 @@ if 'training_progress' not in st.session_state:
 @st.cache_data(ttl=300, show_spinner="Fetching market data...")
 def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
     try:
-        # Use period parameter instead of start/end for crypto data
+        # Updated yfinance parameters with proper error handling
         df = yf.download(
             tickers=symbol,
             period="60d" if interval in ['15m', '30m'] else "180d",
             interval=interval,
             progress=False,
             auto_adjust=True,
-            ignore_tz=True,  # Fix for timezone issues
-            raise_errors=False  # Prevent exception throwing
+            ignore_tz=True,  # Fix timezone issues
+            actions=False,    # Disable dividend and stock split data
+            timeout=10        # Add timeout for connection
         )
         
         if df.empty:
-            st.error(f"No data found for {symbol}")
+            st.error(f"No market data available for {symbol}")
             return pd.DataFrame()
             
-        # Convert index to datetime and filter
+        # Process the index
         df.index = pd.to_datetime(df.index)
-        df = df.sort_index(ascending=True)
-        df = df[~df.index.duplicated()]
+        df = df.sort_index().reset_index()
+        df = df.rename(columns={'index': 'Date'})
         
-        return df.reset_index()  # Keep datetime as a column
+        # Filter out weekends for crypto (markets never close)
+        df = df[df['Date'].dt.dayofweek < 5]
+        
+        return df.dropna().reset_index(drop=True)
         
     except Exception as e:
-        logging.error(f"Data fetch failed: {str(e)}")
-        st.error(f"Failed to fetch data for {symbol}")
+        logging.error(f"Data fetch error: {str(e)}")
+        st.error(f"Failed to retrieve data for {symbol}. Check symbol validity.")
         return pd.DataFrame()
+
 
 def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or len(df) < 100:

@@ -32,8 +32,9 @@ MIN_FEATURES = 7
 VOLATILITY_CLUSTERS = 3
 MIN_SAMPLES_FOR_SMOTE = 10
 UPDATE_INTERVAL = 1  # Seconds between UI updates
-STUDY_STORAGE = "sqlite:///trading_studies.db"
+STUDY_DIR = "optuna_studies"
 STUDY_NAME = "main_study"
+STUDY_STORAGE = f"sqlite:///{STUDY_DIR}/trading_studies.db"
 
 warnings.filterwarnings("ignore", category=UserWarning, message=".*ScriptRunContext.*")
 logging.basicConfig(level=logging.INFO)
@@ -109,7 +110,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
             df[f'RSI_{window}'] = 100 - (100 / (1 + (
                 df['Close'].diff().clip(lower=0).rolling(window).mean() / 
                 df['Close'].diff().clip(upper=0).abs().rolling(window).mean()
-            )))  # Fixed parenthesis
+            )))
 
         df['Volatility'] = df['Log_Returns'].rolling(GARCH_WINDOW).std()
         
@@ -161,10 +162,10 @@ class TradingModel:
 
     def optimize_models(self, X: pd.DataFrame, y: pd.Series):
         try:
+            os.makedirs(STUDY_DIR, exist_ok=True)
             tscv = TimeSeriesSplit(n_splits=3)
             X_sel = self._safe_feature_selection(X, y)
             
-            os.makedirs(os.path.dirname(STUDY_STORAGE.split("///")[1]), exist_ok=True)
             try:
                 self.study = optuna.load_study(
                     study_name=STUDY_NAME,

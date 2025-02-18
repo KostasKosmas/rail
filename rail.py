@@ -48,7 +48,6 @@ class TrainingProgress:
         self.params = {}
         self.start_time = time.time()
 
-# Initialize session state variables
 if 'model' not in st.session_state:
     st.session_state.model = None
 if 'training_progress' not in st.session_state:
@@ -87,7 +86,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         df['Returns'] = df['Close'].pct_change()
         df['Log_Returns'] = np.log(df['Close']).diff()
         
-        # Technical Indicators
+        # Technical Indicators (Fixed RSI calculation)
         windows = [20, 50, 100, 200]
         for window in windows:
             df[f'SMA_{window}'] = df['Close'].rolling(window).mean()
@@ -95,7 +94,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
             df[f'RSI_{window}'] = 100 - (100 / (1 + (
                 df['Close'].diff().clip(lower=0).rolling(window).mean() / 
                 df['Close'].diff().clip(upper=0).abs().rolling(window).mean()
-            ))
+            )))
 
         # Volatility Features
         df['Volatility'] = df['Log_Returns'].rolling(GARCH_WINDOW).std()
@@ -155,8 +154,7 @@ class TradingModel:
             X_sel = self._safe_feature_selection(X, y)
             
             # Initialize progress tracking
-            if not hasattr(st.session_state, 'training_progress') or st.session_state.training_progress is None:
-                st.session_state.training_progress = TrainingProgress()
+            st.session_state.training_progress = TrainingProgress()
             
             st.session_state.training_progress.status = "Creating study..."
             self.study = optuna.create_study(direction='maximize')
@@ -307,7 +305,6 @@ def main():
                 future = executor.submit(model.optimize_models, X, y)
                 
                 while not future.done():
-                    # Safely check progress state
                     if not hasattr(st.session_state, 'training_progress'):
                         break
                         

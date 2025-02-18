@@ -48,6 +48,7 @@ class TrainingProgress:
         self.params = {}
         self.start_time = time.time()
 
+# Initialize session state variables
 if 'model' not in st.session_state:
     st.session_state.model = None
 if 'training_progress' not in st.session_state:
@@ -94,8 +95,8 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
             df[f'RSI_{window}'] = 100 - (100 / (1 + (
                 df['Close'].diff().clip(lower=0).rolling(window).mean() / 
                 df['Close'].diff().clip(upper=0).abs().rolling(window).mean()
-            )))  # Now has 3 closing parentheses
-        
+            ))
+
         # Volatility Features
         df['Volatility'] = df['Log_Returns'].rolling(GARCH_WINDOW).std()
         
@@ -152,6 +153,10 @@ class TradingModel:
         try:
             tscv = TimeSeriesSplit(n_splits=3)
             X_sel = self._safe_feature_selection(X, y)
+            
+            # Initialize progress tracking
+            if not hasattr(st.session_state, 'training_progress') or st.session_state.training_progress is None:
+                st.session_state.training_progress = TrainingProgress()
             
             st.session_state.training_progress.status = "Creating study..."
             self.study = optuna.create_study(direction='maximize')
@@ -248,7 +253,10 @@ class TradingModel:
 
     def predict(self, X: pd.DataFrame) -> float:
         try:
-            if not self.selected_features or X.empty or self.calibrated_rf is None or self.calibrated_gb is None:
+            if (not self.selected_features or 
+                X.empty or 
+                self.calibrated_rf is None or 
+                self.calibrated_gb is None):
                 return 0.5
                 
             X_sel = X[self.selected_features].reset_index(drop=True)
@@ -286,6 +294,7 @@ def main():
 
     if st.sidebar.button("🚀 Train Model") and not processed_data.empty:
         try:
+            # Initialize training progress
             st.session_state.training_progress = TrainingProgress()
             model = TradingModel()
             X = processed_data.drop(['Target'], axis=1)
@@ -298,8 +307,12 @@ def main():
                 future = executor.submit(model.optimize_models, X, y)
                 
                 while not future.done():
-                    elapsed = time.time() - start_time
+                    # Safely check progress state
+                    if not hasattr(st.session_state, 'training_progress'):
+                        break
+                        
                     progress = st.session_state.training_progress
+                    elapsed = time.time() - start_time
                     
                     with progress_placeholder.container():
                         st.caption(f"Status: {progress.status}")

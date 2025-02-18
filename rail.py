@@ -6,6 +6,9 @@ import pandas as pd
 import yfinance as yf
 import streamlit as st
 import optuna
+import warnings
+import os
+from threading import Lock
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.feature_selection import SelectFromModel
@@ -13,7 +16,6 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import f1_score
 from imblearn.over_sampling import SMOTE
 from datetime import datetime, timedelta
-import warnings
 from sklearn.cluster import KMeans
 from concurrent.futures import ThreadPoolExecutor
 
@@ -29,10 +31,13 @@ GARCH_WINDOW = 14
 MIN_FEATURES = 7
 VOLATILITY_CLUSTERS = 3
 MIN_SAMPLES_FOR_SMOTE = 10
-TRIAL_UPDATE_INTERVAL = 2  # Seconds between UI updates
+UPDATE_INTERVAL = 1  # Seconds between UI updates
+STUDY_STORAGE = "sqlite:///trading_studies.db"
+STUDY_NAME = "main_study"
 
-warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=UserWarning, message=".*ScriptRunContext.*")
 logging.basicConfig(level=logging.INFO)
+progress_lock = Lock()
 
 # ======================
 # STREAMLIT UI
@@ -47,6 +52,18 @@ class TrainingProgress:
         self.status = "Initializing..."
         self.params = {}
         self.start_time = time.time()
+        self._trials_completed = 0
+        self.latest_score = 0.0
+
+    @property
+    def trials_completed(self):
+        with progress_lock:
+            return self._trials_completed
+
+    @trials_completed.setter
+    def trials_completed(self, value):
+        with progress_lock:
+            self._trials_completed = value
 
 if 'model' not in st.session_state:
     st.session_state.model = None
@@ -82,11 +99,9 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     
     try:
         df = df.copy().reset_index(drop=True)
-        # Core features
         df['Returns'] = df['Close'].pct_change()
         df['Log_Returns'] = np.log(df['Close']).diff()
         
-        # Technical Indicators (Fixed RSI calculation)
         windows = [20, 50, 100, 200]
         for window in windows:
             df[f'SMA_{window}'] = df['Close'].rolling(window).mean()
@@ -94,23 +109,19 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
             df[f'RSI_{window}'] = 100 - (100 / (1 + (
                 df['Close'].diff().clip(lower=0).rolling(window).mean() / 
                 df['Close'].diff().clip(upper=0).abs().rolling(window).mean()
-            )))
+            )))  # Fixed parenthesis
 
-        # Volatility Features
         df['Volatility'] = df['Log_Returns'].rolling(GARCH_WINDOW).std()
         
-        # Volatility Clustering
         vol_series = df['Volatility'].dropna()
         if len(vol_series) >= VOLATILITY_CLUSTERS:
             kmeans = KMeans(n_clusters=VOLATILITY_CLUSTERS)
             clusters = kmeans.fit_predict(vol_series.values.reshape(-1, 1))
             df['Vol_Cluster'] = pd.Series(clusters, index=vol_series.index).reindex(df.index, fill_value=-1)
         
-        # Momentum Features
         for period in [3, 7, 14]:
             df[f'Momentum_{period}'] = df['Close'].pct_change(period)
         
-        # Target Engineering
         df['Target'] = pd.cut(df['Returns'].shift(-1), 
                             bins=[-np.inf, -0.01, 0.01, np.inf],
                             labels=[0, 1, 2])
@@ -153,27 +164,40 @@ class TradingModel:
             tscv = TimeSeriesSplit(n_splits=3)
             X_sel = self._safe_feature_selection(X, y)
             
-            # Initialize progress tracking
-            st.session_state.training_progress = TrainingProgress()
-            
-            st.session_state.training_progress.status = "Creating study..."
-            self.study = optuna.create_study(direction='maximize')
-            
+            os.makedirs(os.path.dirname(STUDY_STORAGE.split("///")[1]), exist_ok=True)
+            try:
+                self.study = optuna.load_study(
+                    study_name=STUDY_NAME,
+                    storage=STUDY_STORAGE,
+                    sampler=optuna.samplers.TPESampler(),
+                    pruner=optuna.pruners.MedianPruner()
+                )
+            except (KeyError, ValueError):
+                self.study = optuna.create_study(
+                    study_name=STUDY_NAME,
+                    storage=STUDY_STORAGE,
+                    direction='maximize',
+                    sampler=optuna.samplers.TPESampler(),
+                    pruner=optuna.pruners.MedianPruner()
+                )
+
             def trial_callback(study, trial):
-                st.session_state.training_progress.current_trial = trial.number
-                st.session_state.training_progress.best_score = study.best_value
-                st.session_state.training_progress.params = trial.params
+                with progress_lock:
+                    st.session_state.training_progress.current_trial = trial.number + 1
+                    st.session_state.training_progress.best_score = study.best_value
+                    st.session_state.training_progress.params = trial.params
+                    st.session_state.training_progress.latest_score = trial.value
+                    st.session_state.training_progress.trials_completed += 1
                 time.sleep(0.1)
-            
+
             self.study.optimize(
                 lambda trial: self._objective(trial, X_sel, y, tscv),
                 n_trials=MAX_TRIALS,
                 callbacks=[trial_callback],
                 show_progress_bar=False
             )
-            st.session_state.training_progress.status = "Optimization complete"
         except Exception as e:
-            st.session_state.training_progress.status = f"Failed: {str(e)}"
+            logging.error(f"Optimization failed: {str(e)}")
             raise
 
     def _objective(self, trial, X, y, tscv):
@@ -292,7 +316,6 @@ def main():
 
     if st.sidebar.button("🚀 Train Model") and not processed_data.empty:
         try:
-            # Initialize training progress
             st.session_state.training_progress = TrainingProgress()
             model = TradingModel()
             X = processed_data.drop(['Target'], axis=1)
@@ -300,26 +323,33 @@ def main():
             
             progress_placeholder = st.empty()
             start_time = time.time()
+            last_update = 0
             
-            with ThreadPoolExecutor() as executor:
+            with ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(model.optimize_models, X, y)
                 
                 while not future.done():
-                    if not hasattr(st.session_state, 'training_progress'):
-                        break
+                    current_time = time.time()
+                    if current_time - last_update >= UPDATE_INTERVAL:
+                        with progress_lock:
+                            progress = st.session_state.training_progress
+                            elapsed = current_time - start_time
+                            
+                            with progress_placeholder.container():
+                                st.caption(f"Status: {progress.status}")
+                                st.progress(
+                                    progress.current_trial/MAX_TRIALS,
+                                    text=f"Trial {progress.current_trial}/{MAX_TRIALS} (Completed: {progress.trials_completed})"
+                                )
+                                cols = st.columns(2)
+                                cols[0].metric("Best F1 Score", f"{progress.best_score:.2%}")
+                                cols[1].metric("Latest F1 Score", f"{progress.latest_score:.2%}")
+                                st.metric("Elapsed Time", f"{elapsed:.1f}s")
+                                st.write("Current Parameters:", progress.params)
                         
-                    progress = st.session_state.training_progress
-                    elapsed = time.time() - start_time
+                        last_update = current_time
                     
-                    with progress_placeholder.container():
-                        st.caption(f"Status: {progress.status}")
-                        st.progress(progress.current_trial/MAX_TRIALS, 
-                                  text=f"Trial {progress.current_trial+1}/{MAX_TRIALS}")
-                        st.metric("Best F1 Score", f"{progress.best_score:.2%}")
-                        st.metric("Elapsed Time", f"{elapsed:.1f}s")
-                        st.write("Current Parameters:", progress.params)
-                    
-                    time.sleep(TRIAL_UPDATE_INTERVAL)
+                    time.sleep(0.1)
                 
                 future.result()
                 model.train(X, y)

@@ -18,6 +18,7 @@ from imblearn.over_sampling import SMOTE
 from datetime import datetime, timedelta
 from sklearn.cluster import KMeans
 from concurrent.futures import ThreadPoolExecutor
+from functools import wraps
 
 # ======================
 # CONFIGURATION
@@ -31,7 +32,7 @@ GARCH_WINDOW = 14
 MIN_FEATURES = 7
 VOLATILITY_CLUSTERS = 3
 MIN_SAMPLES_FOR_SMOTE = 10
-UPDATE_INTERVAL = 1  # Seconds between UI updates
+UPDATE_INTERVAL = 0.5  # More frequent updates
 STUDY_DIR = "optuna_studies"
 STUDY_NAME = "main_study"
 STUDY_STORAGE = f"sqlite:///{STUDY_DIR}/trading_studies.db"
@@ -55,6 +56,7 @@ class TrainingProgress:
         self.start_time = time.time()
         self._trials_completed = 0
         self.latest_score = 0.0
+        self.last_update = time.time()
 
     @property
     def trials_completed(self):
@@ -70,6 +72,18 @@ if 'model' not in st.session_state:
     st.session_state.model = None
 if 'training_progress' not in st.session_state:
     st.session_state.training_progress = None
+
+def status_update(status: str):
+    """Decorator to update status and force UI refresh"""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            with progress_lock:
+                st.session_state.training_progress.status = status
+                st.session_state.training_progress.last_update = time.time()
+            return func(*args, **kwargs)
+        return wrapper
+    return decorator
 
 # ======================
 # DATA PIPELINE
@@ -110,7 +124,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
             df[f'RSI_{window}'] = 100 - (100 / (1 + (
                 df['Close'].diff().clip(lower=0).rolling(window).mean() / 
                 df['Close'].diff().clip(upper=0).abs().rolling(window).mean()
-            )))
+            ))
 
         df['Volatility'] = df['Log_Returns'].rolling(GARCH_WINDOW).std()
         
@@ -160,35 +174,36 @@ class TradingModel:
             logging.error(f"Feature selection failed: {str(e)}")
             return X.iloc[:, :MIN_FEATURES]
 
+    @status_update("Optimizing models...")
     def optimize_models(self, X: pd.DataFrame, y: pd.Series):
         try:
             os.makedirs(STUDY_DIR, exist_ok=True)
             tscv = TimeSeriesSplit(n_splits=3)
+            
+            with progress_lock:
+                st.session_state.training_progress.status = "Performing feature selection..."
+            
             X_sel = self._safe_feature_selection(X, y)
             
-            # Update status before study creation
-            with progress_lock:
-                st.session_state.training_progress.status = "Initializing study..."
-            
-            try:
-                self.study = optuna.load_study(
-                    study_name=STUDY_NAME,
-                    storage=STUDY_STORAGE,
-                    sampler=optuna.samplers.TPESampler(),
-                    pruner=optuna.pruners.MedianPruner()
-                )
-                with progress_lock:
-                    st.session_state.training_progress.status = "Resuming existing study..."
-            except (KeyError, ValueError):
-                self.study = optuna.create_study(
-                    study_name=STUDY_NAME,
-                    storage=STUDY_STORAGE,
-                    direction='maximize',
-                    sampler=optuna.samplers.TPESampler(),
-                    pruner=optuna.pruners.MedianPruner()
-                )
-                with progress_lock:
-                    st.session_state.training_progress.status = "Created new study..."
+            @status_update("Initializing study...")
+            def _init_study():
+                try:
+                    return optuna.load_study(
+                        study_name=STUDY_NAME,
+                        storage=STUDY_STORAGE,
+                        sampler=optuna.samplers.TPESampler(),
+                        pruner=optuna.pruners.MedianPruner()
+                    )
+                except (KeyError, ValueError):
+                    return optuna.create_study(
+                        study_name=STUDY_NAME,
+                        storage=STUDY_STORAGE,
+                        direction='maximize',
+                        sampler=optuna.samplers.TPESampler(),
+                        pruner=optuna.pruners.MedianPruner()
+                    )
+
+            self.study = _init_study()
 
             def trial_callback(study, trial):
                 with progress_lock:
@@ -197,12 +212,9 @@ class TradingModel:
                     st.session_state.training_progress.params = trial.params
                     st.session_state.training_progress.latest_score = trial.value
                     st.session_state.training_progress.trials_completed += 1
-                    st.session_state.training_progress.status = f"Running trial {trial.number + 1}/{MAX_TRIALS}"
+                    st.session_state.training_progress.status = f"Trial {trial.number + 1}/{MAX_TRIALS}"
                 time.sleep(0.1)
 
-            with progress_lock:
-                st.session_state.training_progress.status = "Starting optimization..."
-                
             self.study.optimize(
                 lambda trial: self._objective(trial, X_sel, y, tscv),
                 n_trials=MAX_TRIALS,
@@ -341,31 +353,29 @@ def main():
             
             progress_placeholder = st.empty()
             start_time = time.time()
-            last_update = 0
             
             with ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(model.optimize_models, X, y)
                 
+                # Heartbeat to keep UI responsive
                 while not future.done():
                     current_time = time.time()
-                    if current_time - last_update >= UPDATE_INTERVAL:
-                        with progress_lock:
-                            progress = st.session_state.training_progress
-                            elapsed = current_time - start_time
-                            
-                            with progress_placeholder.container():
-                                st.caption(f"Status: {progress.status}")
-                                st.progress(
-                                    progress.current_trial/MAX_TRIALS,
-                                    text=f"Trial {progress.current_trial}/{MAX_TRIALS} (Completed: {progress.trials_completed})"
-                                )
-                                cols = st.columns(2)
-                                cols[0].metric("Best F1 Score", f"{progress.best_score:.2%}")
-                                cols[1].metric("Latest F1 Score", f"{progress.latest_score:.2%}")
-                                st.metric("Elapsed Time", f"{elapsed:.1f}s")
+                    progress = st.session_state.training_progress
+                    
+                    # Force update every 500ms
+                    if current_time - progress.last_update > 0.5:
+                        with progress_placeholder.container():
+                            st.caption(f"Status: {progress.status}")
+                            st.progress(
+                                progress.current_trial/MAX_TRIALS,
+                                text=f"Trial {progress.current_trial}/{MAX_TRIALS} (Completed: {progress.trials_completed})"
+                            )
+                            cols = st.columns(2)
+                            cols[0].metric("Best F1 Score", f"{progress.best_score:.2%}")
+                            cols[1].metric("Latest F1 Score", f"{progress.latest_score:.2%}")
+                            st.metric("Elapsed Time", f"{current_time - start_time:.1f}s")
+                            if progress.params:
                                 st.write("Current Parameters:", progress.params)
-                        
-                        last_update = current_time
                     
                     time.sleep(0.1)
                 

@@ -17,7 +17,6 @@ from sklearn.metrics import f1_score
 from imblearn.over_sampling import SMOTE
 from datetime import datetime, timedelta
 from sklearn.cluster import KMeans
-from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 
 # ======================
@@ -32,7 +31,7 @@ GARCH_WINDOW = 14
 MIN_FEATURES = 7
 VOLATILITY_CLUSTERS = 3
 MIN_SAMPLES_FOR_SMOTE = 10
-UPDATE_INTERVAL = 0.5  # More frequent updates
+UPDATE_INTERVAL = 0.5
 STUDY_DIR = "optuna_studies"
 STUDY_NAME = "main_study"
 STUDY_STORAGE = f"sqlite:///{STUDY_DIR}/trading_studies.db"
@@ -40,6 +39,12 @@ STUDY_STORAGE = f"sqlite:///{STUDY_DIR}/trading_studies.db"
 warnings.filterwarnings("ignore", category=UserWarning, message=".*ScriptRunContext.*")
 logging.basicConfig(level=logging.INFO)
 progress_lock = Lock()
+
+# Initialize session state variables
+if 'model' not in st.session_state:
+    st.session_state.model = None
+if 'training_progress' not in st.session_state:
+    st.session_state.training_progress = None
 
 # ======================
 # STREAMLIT UI
@@ -68,19 +73,15 @@ class TrainingProgress:
         with progress_lock:
             self._trials_completed = value
 
-if 'model' not in st.session_state:
-    st.session_state.model = None
-if 'training_progress' not in st.session_state:
-    st.session_state.training_progress = None
-
 def status_update(status: str):
     """Decorator to update status and force UI refresh"""
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
-            with progress_lock:
-                st.session_state.training_progress.status = status
-                st.session_state.training_progress.last_update = time.time()
+            if st.session_state.training_progress is not None:
+                with progress_lock:
+                    st.session_state.training_progress.status = status
+                    st.session_state.training_progress.last_update = time.time()
             return func(*args, **kwargs)
         return wrapper
     return decorator
@@ -124,7 +125,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
             df[f'RSI_{window}'] = 100 - (100 / (1 + (
                 df['Close'].diff().clip(lower=0).rolling(window).mean() / 
                 df['Close'].diff().clip(upper=0).abs().rolling(window).mean()
-            )))
+            ))
 
         df['Volatility'] = df['Log_Returns'].rolling(GARCH_WINDOW).std()
         
@@ -180,7 +181,7 @@ class TradingModel:
             os.makedirs(STUDY_DIR, exist_ok=True)
             tscv = TimeSeriesSplit(n_splits=3)
             
-            with progress_lock:
+            if st.session_state.training_progress is not None:
                 st.session_state.training_progress.status = "Performing feature selection..."
             
             X_sel = self._safe_feature_selection(X, y)
@@ -206,13 +207,14 @@ class TradingModel:
             self.study = _init_study()
 
             def trial_callback(study, trial):
-                with progress_lock:
-                    st.session_state.training_progress.current_trial = trial.number + 1
-                    st.session_state.training_progress.best_score = study.best_value
-                    st.session_state.training_progress.params = trial.params
-                    st.session_state.training_progress.latest_score = trial.value
-                    st.session_state.training_progress.trials_completed += 1
-                    st.session_state.training_progress.status = f"Trial {trial.number + 1}/{MAX_TRIALS}"
+                if st.session_state.training_progress is not None:
+                    with progress_lock:
+                        st.session_state.training_progress.current_trial = trial.number + 1
+                        st.session_state.training_progress.best_score = study.best_value
+                        st.session_state.training_progress.params = trial.params
+                        st.session_state.training_progress.latest_score = trial.value
+                        st.session_state.training_progress.trials_completed += 1
+                        st.session_state.training_progress.status = f"Trial {trial.number + 1}/{MAX_TRIALS}"
                 time.sleep(0.1)
 
             self.study.optimize(
@@ -222,11 +224,11 @@ class TradingModel:
                 show_progress_bar=False
             )
             
-            with progress_lock:
+            if st.session_state.training_progress is not None:
                 st.session_state.training_progress.status = "Optimization complete"
                 
         except Exception as e:
-            with progress_lock:
+            if st.session_state.training_progress is not None:
                 st.session_state.training_progress.status = f"Failed: {str(e)}"
             raise
 
@@ -354,36 +356,14 @@ def main():
             progress_placeholder = st.empty()
             start_time = time.time()
             
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(model.optimize_models, X, y)
-                
-                # Heartbeat to keep UI responsive
-                while not future.done():
-                    current_time = time.time()
-                    progress = st.session_state.training_progress
-                    
-                    # Force update every 500ms
-                    if current_time - progress.last_update > 0.5:
-                        with progress_placeholder.container():
-                            st.caption(f"Status: {progress.status}")
-                            st.progress(
-                                progress.current_trial/MAX_TRIALS,
-                                text=f"Trial {progress.current_trial}/{MAX_TRIALS} (Completed: {progress.trials_completed})"
-                            )
-                            cols = st.columns(2)
-                            cols[0].metric("Best F1 Score", f"{progress.best_score:.2%}")
-                            cols[1].metric("Latest F1 Score", f"{progress.latest_score:.2%}")
-                            st.metric("Elapsed Time", f"{current_time - start_time:.1f}s")
-                            if progress.params:
-                                st.write("Current Parameters:", progress.params)
-                    
-                    time.sleep(0.1)
-                
-                future.result()
-                model.train(X, y)
-                st.session_state.model = model
-                st.success(f"Training completed in {time.time()-start_time:.1f}s")
-                st.session_state.training_progress = None
+            # Run optimization in main thread
+            model.optimize_models(X, y)
+            
+            # Update progress during optimization
+            model.train(X, y)
+            st.session_state.model = model
+            st.success(f"Training completed in {time.time()-start_time:.1f}s")
+            st.session_state.training_progress = None
                 
         except Exception as e:
             st.error(f"Training failed: {str(e)}")

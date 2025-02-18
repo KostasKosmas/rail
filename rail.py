@@ -124,7 +124,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
             df[f'RSI_{window}'] = 100 - (100 / (1 + (
                 df['Close'].diff().clip(lower=0).rolling(window).mean() / 
                 df['Close'].diff().clip(upper=0).abs().rolling(window).mean()
-            ))
+            )))
 
         df['Volatility'] = df['Log_Returns'].rolling(GARCH_WINDOW).std()
         

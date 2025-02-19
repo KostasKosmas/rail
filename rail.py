@@ -67,32 +67,48 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     
     df = df.copy()
     try:
-        # Calculate lagged price changes
-        df['Close_Lag1'] = df['Close'].shift(1)
-        df['Returns'] = df['Close_Lag1'].pct_change()
-        df['Log_Returns'] = np.log(df['Close_Lag1']).diff()
+        # Calculate lagged price changes using numpy for 1D guarantee
+        df['Close_Lag1'] = df['Close'].shift(1).values  # Explicit 1D array
+        df['Returns'] = df['Close_Lag1'].pct_change().values
+        df['Log_Returns'] = np.log(df['Close_Lag1']).diff().values
         
-        # Technical Indicators (properly lagged)
+        # Technical Indicators with explicit 1D conversion
         windows = [20, 50, 100, 200]
         for window in windows:
-            df[f'SMA_{window}'] = df['Close_Lag1'].rolling(window).mean()
-            df[f'STD_{window}'] = df['Close_Lag1'].rolling(window).std()
-            df[f'RSI_{window}'] = 100 - (100 / (1 + (
-                df['Close_Lag1'].diff().clip(lower=0).rolling(window).mean() / 
-                df['Close_Lag1'].diff().clip(upper=0).abs().rolling(window).mean()
-            )))
+            close_diff = df['Close_Lag1'].diff().values  # Convert to numpy array
+            
+            # Calculate RSI components as 1D arrays
+            up = np.clip(close_diff, 0, np.inf)
+            down = np.abs(np.clip(close_diff, -np.inf, 0))
+            
+            avg_gain = pd.Series(up).rolling(window).mean().values
+            avg_loss = pd.Series(down).rolling(window).mean().values
+            
+            # Handle division by zero
+            with np.errstate(divide='ignore', invalid='ignore'):
+                rs = np.divide(avg_gain, avg_loss, where=avg_loss!=0)
+                rs[avg_loss == 0] = 1.0  # When no losses, RS = 1
+                
+            rsi = 100 - (100 / (1 + rs))
+            
+            df[f'SMA_{window}'] = df['Close_Lag1'].rolling(window).mean().values
+            df[f'STD_{window}'] = df['Close_Lag1'].rolling(window).std().values
+            df[f'RSI_{window}'] = rsi
         
         # Volatility Features
-        df['Volatility'] = df['Log_Returns'].rolling(GARCH_WINDOW).std()
+        df['Volatility'] = df['Log_Returns'].rolling(GARCH_WINDOW).std().values
         
-        # Momentum Features
+        # Momentum Features with numpy conversion
         for period in [3, 7, 14]:
-            df[f'Momentum_{period}'] = df['Close_Lag1'].pct_change(period)
+            df[f'Momentum_{period}'] = df['Close_Lag1'].pct_change(period).values
         
-        # Target Engineering (future returns)
-        df['Target'] = pd.cut(df['Close'].pct_change().shift(-1),
-                            bins=[-np.inf, -0.01, 0.01, np.inf],
-                            labels=[0, 1, 2])
+        # Target Engineering with strict 1D handling
+        future_returns = df['Close'].pct_change().shift(-1).values
+        df['Target'] = pd.cut(
+            future_returns,
+            bins=[-np.inf, -0.01, 0.01, np.inf],
+            labels=[0, 1, 2]
+        ).astype(float)  # Convert to numeric
         
         # Remove raw price data
         df = df.drop(columns=['Open', 'High', 'Low', 'Close', 'Volume', 'Close_Lag1'])

@@ -1,4 +1,4 @@
-# crypto_trading_system.py (FINAL FIXED VERSION)
+# crypto_trading_system.py (FIXED MULTIINDEX VERSION)
 import logging
 import numpy as np
 import pandas as pd
@@ -39,7 +39,7 @@ if 'last_trained' not in st.session_state:
     st.session_state.last_trained = None
 
 # ======================
-# DATA PIPELINE
+# DATA PIPELINE (FIXED)
 # ======================
 @st.cache_data(ttl=300, show_spinner="Fetching market data...")
 def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
@@ -55,8 +55,15 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
             progress=False,
             auto_adjust=True
         )
-        # Ensure flat column index
-        df.columns = df.columns.str.replace(' ', '_')
+        
+        # Handle MultiIndex columns
+        if isinstance(df.columns, pd.MultiIndex):
+            # Flatten MultiIndex to single level
+            df.columns = ['_'.join(col).strip() for col in df.columns.values]
+        else:
+            # Clean single index column names
+            df.columns = df.columns.str.replace(' ', '_')
+            
         return df.reset_index(drop=True) if not df.empty else pd.DataFrame()
     except Exception as e:
         logging.error(f"Data fetch failed: {str(e)}")
@@ -73,7 +80,6 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         if not all(col in df.columns for col in required_cols):
             raise ValueError("Missing required price columns")
 
-        # Feature calculations
         df['Close_Lag1'] = df['Close'].shift(1)
         df['Returns'] = df['Close_Lag1'].pct_change()
         df['Log_Returns'] = np.log(df['Close_Lag1']).diff()
@@ -107,9 +113,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
             ordered=False
         )
         
-        # Ensure flat column names
         df = df.drop(columns=required_cols + ['Close_Lag1'])
-        df.columns = [str(col) for col in df.columns]
         return df.dropna().reset_index(drop=True)
         
     except Exception as e:
@@ -117,7 +121,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
 # ======================
-# MODEL PIPELINE (FIXED)
+# MODEL PIPELINE
 # ======================
 class TradingModel:
     def __init__(self):
@@ -142,9 +146,6 @@ class TradingModel:
         try:
             tscv = TimeSeriesSplit(n_splits=3)
             self._validate_leakage(X)
-            
-            # Convert to flat column names
-            X.columns = [str(col) for col in X.columns]
             
             self.feature_selector = RFECV(
                 estimator=GradientBoostingClassifier(),
@@ -198,25 +199,16 @@ class TradingModel:
         return np.mean(scores)
 
     def predict(self, X: pd.DataFrame) -> float:
-        """Robust prediction with proper type handling"""
         try:
-            # Convert to flat column names
-            X.columns = [str(col) for col in X.columns]
-            
             if not self.selected_features or X.empty:
                 return 0.5
-                
             if not hasattr(self, 'model') or self.model is None:
                 return 0.5
-                
             missing_features = [f for f in self.selected_features if f not in X.columns]
-            
-            if len(missing_features) > 0:
+            if missing_features:
                 logging.error(f"Missing features: {missing_features}")
                 return 0.5
-                
             return self.model.predict_proba(X[self.selected_features])[0][2]
-            
         except Exception as e:
             logging.error(f"Prediction failed: {str(e)}")
             return 0.5

@@ -1,4 +1,4 @@
-# crypto_trading_system.py (FIXED MULTIINDEX VERSION)
+# crypto_trading_system.py (FIXED COLUMN HANDLING)
 import logging
 import numpy as np
 import pandas as pd
@@ -56,15 +56,35 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
             auto_adjust=True
         )
         
-        # Handle MultiIndex columns
+        # Handle column names
         if isinstance(df.columns, pd.MultiIndex):
-            # Flatten MultiIndex to single level
             df.columns = ['_'.join(col).strip() for col in df.columns.values]
         else:
-            # Clean single index column names
             df.columns = df.columns.str.replace(' ', '_')
+        
+        # Ensure required columns exist
+        column_aliases = {
+            'Close': ['Close', 'Adj_Close', 'Adjusted_Close'],
+            'Open': ['Open', 'Open_'],
+            'High': ['High', 'High_'],
+            'Low': ['Low', 'Low_'],
+            'Volume': ['Volume', 'Vol']
+        }
+        
+        # Rename columns using aliases
+        for standard_name, aliases in column_aliases.items():
+            for alias in aliases:
+                if alias in df.columns and standard_name not in df.columns:
+                    df.rename(columns={alias: standard_name}, inplace=True)
+                    break
+        
+        required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+        missing = [col for col in required_cols if col not in df.columns]
+        if missing:
+            raise ValueError(f"Missing columns: {missing}")
             
         return df.reset_index(drop=True) if not df.empty else pd.DataFrame()
+        
     except Exception as e:
         logging.error(f"Data fetch failed: {str(e)}")
         st.error(f"Failed to fetch data for {symbol}")
@@ -77,9 +97,11 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     try:
         required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
-        if not all(col in df.columns for col in required_cols):
-            raise ValueError("Missing required price columns")
+        missing = [col for col in required_cols if col not in df.columns]
+        if missing:
+            raise ValueError(f"Missing required columns: {missing}")
 
+        # Feature calculations
         df['Close_Lag1'] = df['Close'].shift(1)
         df['Returns'] = df['Close_Lag1'].pct_change()
         df['Log_Returns'] = np.log(df['Close_Lag1']).diff()

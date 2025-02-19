@@ -1,4 +1,4 @@
-# crypto_trading_system.py (FINAL ERROR-FIXED VERSION)
+# crypto_trading_system.py (FINAL FIXED VERSION)
 import logging
 import numpy as np
 import pandas as pd
@@ -116,7 +116,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
 # ======================
 class TradingModel:
     def __init__(self):
-        self.selected_features = pd.Index([])  # Initialize as pandas Index
+        self.selected_features = pd.Index([])
         self.model = None
         self.feature_selector = None
 
@@ -190,21 +190,25 @@ class TradingModel:
         return np.mean(scores)
 
     def predict(self, X: pd.DataFrame) -> float:
-        """Robust prediction with proper pandas Index handling"""
+        """Fixed prediction with proper MultiIndex handling"""
         try:
-            # Proper empty check for pandas Index
+            # Check for empty features using pandas' empty property
             if self.selected_features.empty or X.empty:
                 return 0.5
                 
             if not hasattr(self, 'model') or self.model is None:
                 return 0.5
                 
-            missing_features = [f for f in self.selected_features if f not in X.columns]
-            if missing_features:
+            # Convert Index to list for safe feature checking
+            required_features = self.selected_features.tolist()
+            missing_features = [f for f in required_features if f not in X.columns]
+            
+            # Check missing features using length comparison
+            if len(missing_features) > 0:  # Fix: Use explicit length check
                 logging.error(f"Missing features: {missing_features}")
                 return 0.5
                 
-            return self.model.predict_proba(X[self.selected_features])[0][2]
+            return self.model.predict_proba(X[required_features])[0][2]
             
         except Exception as e:
             logging.error(f"Prediction failed: {str(e)}")

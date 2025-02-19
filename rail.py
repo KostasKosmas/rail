@@ -1,4 +1,4 @@
-# crypto_trading_system.py (FIXED COLUMN MAPPING)
+# crypto_trading_system.py (FIXED COLUMN MAPPING VER 2)
 import logging
 import numpy as np
 import pandas as pd
@@ -40,7 +40,7 @@ if 'last_trained' not in st.session_state:
     st.session_state.last_trained = None
 
 # ======================
-# DATA PIPELINE (FIXED COLUMN MAPPING)
+# DATA PIPELINE (FIXED COLUMN HANDLING)
 # ======================
 @st.cache_data(ttl=300, show_spinner="Fetching market data...")
 def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
@@ -48,41 +48,49 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
     lookback_days = 59 if interval in ['15m', '30m'] else 180
     
     try:
+        # Fetch data with auto_adjust to handle corporate actions
         df = yf.download(
             symbol, 
             start=end - timedelta(days=lookback_days),
             end=end,
             interval=interval,
             progress=False,
-            auto_adjust=True
+            auto_adjust=True  # Automatically adjusts OHLC prices
         )
         
+        # Handle MultiIndex columns (for some exotic assets)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = ['_'.join(col).strip() for col in df.columns.values]
         
+        # Clean column names
         df.columns = [re.sub(r'\W+', '_', col).strip('_').lower() for col in df.columns]
         
-        # Fixed column mapping for all required fields
+        # Simplified column mapping based on yfinance's auto_adjust behavior
         column_mapping = {
-            'open': ['open', 'adj_open', 'adjusted_open'],
-            'high': ['high', 'adj_high', 'adjusted_high'],
-            'low': ['low', 'adj_low', 'adjusted_low'],
-            'close': ['close', 'adj_close', 'adjusted_close'],
-            'volume': ['volume', 'adj_volume', 'adjusted_volume']
+            'open': ['open'],
+            'high': ['high'],
+            'low': ['low'],
+            'close': ['close'],  # auto_adjust=True already provides adjusted close as 'Close'
+            'volume': ['volume']
         }
         
+        # Validate and map columns
         final_columns = {}
         for standard_name, aliases in column_mapping.items():
+            found = False
             for alias in aliases:
                 if alias in df.columns:
                     final_columns[standard_name] = df[alias]
+                    found = True
                     break
-            else:
-                st.error(f"Missing required column: {standard_name}")
+            if not found:
+                st.error(f"Missing required column: {standard_name} (tried {aliases})")
                 return pd.DataFrame()
 
+        # Create clean dataframe with required columns
         required_cols = ['open', 'high', 'low', 'close', 'volume']
-        clean_df = pd.DataFrame({col: final_columns[col] for col in required_cols})
+        clean_df = pd.DataFrame(final_columns)[required_cols]
+        
         return clean_df.dropna().reset_index(drop=True)
         
     except Exception as e:
@@ -101,16 +109,19 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         if missing:
             raise ValueError(f"Missing required columns: {missing}")
 
-        # Feature engineering calculations remain the same
+        # Feature engineering calculations
         df['close_lag1'] = df['close'].shift(1)
         df['returns'] = df['close_lag1'].pct_change()
         df['log_returns'] = np.log(df['close_lag1']).diff()
         
+        # Technical indicators
         windows = [20, 50, 100, 200]
         for window in windows:
+            # Moving averages and volatility
             df[f'sma_{window}'] = df['close_lag1'].rolling(window).mean()
             df[f'std_{window}'] = df['close_lag1'].rolling(window).std()
             
+            # RSI calculation
             delta = df['close_lag1'].diff()
             gain = delta.clip(lower=0)
             loss = -delta.clip(upper=0)
@@ -123,10 +134,12 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
             rsi = 100 - (100 / (1 + rs))
             df[f'rsi_{window}'] = rsi
 
+        # Volatility and momentum
         df['volatility'] = df['log_returns'].rolling(GARCH_WINDOW).std()
         for period in [3, 7, 14]:
             df[f'momentum_{period}'] = df['close_lag1'].pct_change(period)
         
+        # Target variable: future returns (1 period ahead)
         future_returns = df['close'].pct_change().shift(-1).to_numpy().ravel()
         df['target'] = pd.cut(
             future_returns,
@@ -135,6 +148,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
             ordered=False
         )
         
+        # Clean up intermediate columns
         df = df.drop(columns=required_cols + ['close_lag1'])
         return df.dropna().reset_index(drop=True)
         
@@ -169,6 +183,7 @@ class TradingModel:
             tscv = TimeSeriesSplit(n_splits=3)
             self._validate_leakage(X)
             
+            # Feature selection
             self.feature_selector = RFECV(
                 estimator=GradientBoostingClassifier(),
                 step=1,
@@ -178,15 +193,18 @@ class TradingModel:
             self.feature_selector.fit(X, y)
             self.selected_features = X.columns[self.feature_selector.get_support()]
             
+            # Hyperparameter optimization
             study = optuna.create_study(direction='maximize')
             study.optimize(
                 lambda trial: self._objective(trial, X[self.selected_features.tolist()], y, tscv),
                 n_trials=MAX_TRIALS
             )
             
+            # Final model training
             self.model = GradientBoostingClassifier(**study.best_params)
             self.model.fit(X[self.selected_features.tolist()], y)
             
+            # Model validation
             y_pred = self.model.predict(X[self.selected_features.tolist()])
             st.subheader("Model Validation")
             st.text(classification_report(y, y_pred))
@@ -211,6 +229,7 @@ class TradingModel:
             X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
             y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
             
+            # Handle class imbalance
             rus = RandomUnderSampler(random_state=42)
             X_res, y_res = rus.fit_resample(X_train, y_train)
             

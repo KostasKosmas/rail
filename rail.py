@@ -79,7 +79,8 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         # Technical Indicators
         windows = [20, 50, 100, 200]
         for window in windows:
-            # ... [Keep SMA/STD calculations unchanged]
+            df[f'SMA_{window}'] = df['Close_Lag1'].rolling(window).mean()
+            df[f'STD_{window}'] = df['Close_Lag1'].rolling(window).std()
             
             # RSI calculation
             delta = df['Close_Lag1'].diff()
@@ -99,10 +100,10 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         for period in [3, 7, 14]:
             df[f'Momentum_{period}'] = df['Close_Lag1'].pct_change(period)
         
-        # FIX: Explicit 1D conversion for pd.cut input
-        future_returns = df['Close'].pct_change().shift(-1).values  # Convert to numpy array
+        # Explicit 1D conversion with flattening
+        future_returns = df['Close'].pct_change().shift(-1).to_numpy().ravel()  # <-- FIX HERE
         df['Target'] = pd.cut(
-            future_returns,  # Now guaranteed to be 1D
+            future_returns,
             bins=[-np.inf, -0.01, 0.01, np.inf],
             labels=[0, 1, 2],
             ordered=False

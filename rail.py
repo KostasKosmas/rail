@@ -404,8 +404,8 @@ def main():
                         st.metric("Elapsed Time", f"{elapsed:.1f}s")
                         if progress.params:
                             st.write("Current Parameters:", progress.params)
-
-                 time.sleep(0.1)
+                    
+                    time.sleep(0.1)
                 
                 future.result()
                 model.train(X, y)

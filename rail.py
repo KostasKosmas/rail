@@ -1,4 +1,4 @@
-# crypto_trading_system.py (FIXED TUPLE ERROR)
+# crypto_trading_system.py (FINAL WORKING VERSION)
 import logging
 import numpy as np
 import pandas as pd
@@ -33,11 +33,10 @@ st.title("🚀 AI-Powered Cryptocurrency Trading System")
 if 'model' not in st.session_state:
     st.session_state.model = None
 
-# Data Pipeline (Fixed Column Handling)
+# Data Pipeline (Robust Column Handling)
 @st.cache_data(ttl=300, show_spinner="Fetching market data...")
 def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
     try:
-        # Fetch data with auto_adjust disabled for consistent columns
         df = yf.download(
             symbol,
             period="60d" if interval in ['15m', '30m'] else "180d",
@@ -46,20 +45,18 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
             auto_adjust=False
         )
         
-        # Convert all column names to strings
+        # Flatten MultiIndex columns to strings
         if isinstance(df.columns, pd.MultiIndex):
-            df.columns = ['_'.join(map(str, col)).lower() for col in df.columns.values]
-        else:
-            df.columns = [str(col).lower() for col in df.columns]
+            df.columns = [f'{col[0]}_{col[1]}' for col in df.columns]
         
         # Clean column names
-        df.columns = [re.sub(r'[^a-z0-9_]', '_', col) for col in df.columns]
+        df.columns = [re.sub(r'[^a-z0-9_]', '', col.lower()) for col in df.columns]
         
-        # Handle symbol-specific suffixes
+        # Remove symbol suffixes
         symbol_clean = symbol.lower().replace('-', '_')
         df.columns = [col.replace(f'_{symbol_clean}', '') for col in df.columns]
         
-        # Ensure required columns exist
+        # Validate required columns
         required_cols = ['open', 'high', 'low', 'close', 'volume']
         column_map = {
             'open': ['open', 'adj_open'],
@@ -116,7 +113,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         logging.error(f"Feature engineering failed: {str(e)}")
         return pd.DataFrame()
 
-# Model Pipeline
+# Model Pipeline (Fixed Index Handling)
 class TradingModel:
     def __init__(self):
         self.selected_features = []
@@ -126,7 +123,7 @@ class TradingModel:
         try:
             tscv = TimeSeriesSplit(n_splits=3)
             
-            # Feature selection
+            # Feature selection with explicit list conversion
             selector = RFECV(
                 GradientBoostingClassifier(),
                 step=1,
@@ -178,14 +175,22 @@ class TradingModel:
 
     def predict(self, X: pd.DataFrame) -> float:
         try:
+            # Explicit list check
             if not self.selected_features or X.empty:
                 return 0.5
+                
+            # Validate feature existence
+            missing = [f for f in self.selected_features if f not in X.columns]
+            if missing:
+                logging.error(f"Missing features: {missing}")
+                return 0.5
+                
             return self.model.predict_proba(X[self.selected_features])[0][2]
         except Exception as e:
             logging.error(f"Prediction error: {str(e)}")
             return 0.5
 
-# Main Interface
+# Main Interface (Robust Checks)
 def main():
     st.sidebar.header("Settings")
     symbol = st.sidebar.text_input("Cryptocurrency Symbol", DEFAULT_SYMBOL).upper()
@@ -193,7 +198,9 @@ def main():
     raw_data = fetch_data(symbol, PRIMARY_INTERVAL)
     processed_data = calculate_features(raw_data)
     
-    if not raw_data.empty and not processed_data.empty:
+    # Use explicit DataFrame checks
+    if isinstance(raw_data, pd.DataFrame) and not raw_data.empty and \
+       isinstance(processed_data, pd.DataFrame) and not processed_data.empty:
         col1, col2 = st.columns([3, 1])
         with col1:
             st.subheader(f"{symbol} Price Chart")
@@ -202,16 +209,18 @@ def main():
             st.metric("Current Price", f"${raw_data['close'].iloc[-1]:.2f}")
             st.metric("Volatility", f"{processed_data['volatility'].iloc[-1]:.2%}")
 
-    if st.sidebar.button("🚀 Train Model") and not processed_data.empty:
-        with st.spinner("Training AI model..."):
-            model = TradingModel()
-            X = processed_data.drop(columns=['target'])
-            y = processed_data['target']
-            model.optimize_model(X, y)
-            st.session_state.model = model
-            st.success("Model trained successfully!")
+    if isinstance(processed_data, pd.DataFrame) and not processed_data.empty:
+        if st.sidebar.button("🚀 Train Model"):
+            with st.spinner("Training AI model..."):
+                model = TradingModel()
+                X = processed_data.drop(columns=['target'])
+                y = processed_data['target']
+                model.optimize_model(X, y)
+                st.session_state.model = model
+                st.success("Model trained successfully!")
 
-    if st.session_state.model and not processed_data.empty:
+    if st.session_state.model and \
+       isinstance(processed_data, pd.DataFrame) and not processed_data.empty:
         latest_data = processed_data.drop(columns=['target']).iloc[[-1]]
         confidence = st.session_state.model.predict(latest_data)
         

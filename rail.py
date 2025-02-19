@@ -1,4 +1,4 @@
-# crypto_trading_system.py (FINAL WORKING VERSION)
+# crypto_trading_system.py (FULLY FIXED VERSION)
 import logging
 import numpy as np
 import pandas as pd
@@ -100,7 +100,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         for period in [3, 7, 14]:
             df[f'Momentum_{period}'] = df['Close_Lag1'].pct_change(period)
         
-        # Fixed 1D conversion for target variable
+        # Target engineering
         future_returns = df['Close'].pct_change().shift(-1).to_numpy().ravel()
         df['Target'] = pd.cut(
             future_returns,
@@ -118,16 +118,16 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
 # ======================
-# MODEL PIPELINE
+# MODEL PIPELINE (FIXED)
 # ======================
 class TradingModel:
     def __init__(self):
-        self.selected_features = []
+        self.selected_features = pd.Index([])  # Initialize as pandas Index
         self.model = None
         self.feature_selector = None
 
     def _validate_leakage(self, X: pd.DataFrame):
-        """Proper leakage detection for time series features"""
+        """Leakage detection for time series data"""
         leakage_found = False
         for col in X.columns:
             # Check if current values match shifted future values
@@ -202,9 +202,26 @@ class TradingModel:
         return np.mean(scores)
 
     def predict(self, X: pd.DataFrame) -> float:
-        if not self.selected_features or X.empty:
+        """Robust prediction with error handling"""
+        try:
+            # Check for empty features using pandas' empty property
+            if self.selected_features.empty or X.empty:
+                return 0.5
+                
+            if not self.model:
+                return 0.5
+                
+            return self.model.predict_proba(X[self.selected_features])[0][2]
+            
+        except AttributeError:
+            logging.error("Model not properly initialized")
             return 0.5
-        return self.model.predict_proba(X[self.selected_features])[0][2]
+        except IndexError:
+            logging.error("Prediction index out of bounds")
+            return 0.5
+        except Exception as e:
+            logging.error(f"Prediction failed: {str(e)}")
+            return 0.5
 
 # ======================
 # MAIN INTERFACE

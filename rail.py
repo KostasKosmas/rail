@@ -9,7 +9,7 @@ from sklearn.base import clone
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.feature_selection import RFECV
-from sklearn.metrics import classification_report, confusion_matrix, precision_recall_curve
+from sklearn.metrics import classification_report, confusion_matrix
 from imblearn.under_sampling import RandomUnderSampler
 from datetime import datetime, timedelta
 import warnings
@@ -42,7 +42,7 @@ if 'last_trained' not in st.session_state:
     st.session_state.last_trained = None
 
 # ======================
-# DATA PIPELINE (REVISED)
+# DATA PIPELINE
 # ======================
 @st.cache_data(ttl=300, show_spinner="Fetching market data...")
 def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
@@ -70,11 +70,11 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     
     df = df.copy()
     try:
-        # Strictly time-lagged features only
+        # Calculate returns and log returns
         df['Returns'] = df['Close'].pct_change()
         df['Log_Returns'] = np.log(df['Close']).diff()
         
-        # Technical Indicators (lagged)
+        # Technical Indicators (properly lagged)
         windows = [20, 50, 100, 200]
         for window in windows:
             df[f'SMA_{window}'] = df['Close'].shift(1).rolling(window).mean()
@@ -91,10 +91,13 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         for period in [3, 7, 14]:
             df[f'Momentum_{period}'] = df['Close'].pct_change(period).shift(1)
         
-        # Target Engineering (strictly future)
+        # Target Engineering (future returns)
         df['Target'] = pd.cut(df['Returns'].shift(-1), 
                             bins=[-np.inf, -0.01, 0.01, np.inf],
                             labels=[0, 1, 2])
+        
+        # Remove raw price data to prevent leakage
+        df = df.drop(columns=['Open', 'High', 'Low', 'Close', 'Volume', 'Returns'])
         
         return df.dropna().reset_index(drop=True)
     except Exception as e:
@@ -102,7 +105,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
 # ======================
-# MODEL PIPELINE (REVISED)
+# MODEL PIPELINE
 # ======================
 class TradingModel:
     def __init__(self):
@@ -219,7 +222,7 @@ class TradingModel:
         return self.model.predict_proba(X_sel)[0][2]
 
 # ======================
-# INTERFACE (REVISED)
+# MAIN INTERFACE
 # ======================
 def main():
     st.sidebar.header("Settings")
@@ -232,10 +235,10 @@ def main():
         col1, col2 = st.columns([3, 1])
         with col1:
             st.subheader(f"{symbol} Price Chart")
-            st.line_chart(processed_data['Close'])
+            st.line_chart(raw_data['Close'])  # Use raw data for display
             
         with col2:
-            current_price = processed_data['Close'].iloc[-1].item()
+            current_price = raw_data['Close'].iloc[-1].item()
             current_vol = processed_data['Volatility'].iloc[-1].item()
             st.metric("Current Price", f"${current_price:,.2f}")
             st.metric("Volatility", f"{current_vol:.2%}")
@@ -245,6 +248,11 @@ def main():
             model = TradingModel()
             X = processed_data.drop(['Target'], axis=1)
             y = processed_data['Target']
+            
+            # Final validation check
+            price_columns = {'Open', 'High', 'Low', 'Close', 'Volume'}
+            if any(col in X.columns for col in price_columns):
+                raise ValueError("Raw price data detected in features!")
             
             with st.spinner("Training model with leakage checks..."):
                 model.optimize_model(X, y)

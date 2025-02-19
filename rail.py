@@ -1,4 +1,4 @@
-# crypto_trading_system.py (FINAL WORKING VERSION)
+# crypto_trading_system.py (FIXED TUPLE ERROR)
 import logging
 import numpy as np
 import pandas as pd
@@ -33,56 +33,57 @@ st.title("🚀 AI-Powered Cryptocurrency Trading System")
 if 'model' not in st.session_state:
     st.session_state.model = None
 
-# Data Pipeline
+# Data Pipeline (Fixed Column Handling)
 @st.cache_data(ttl=300, show_spinner="Fetching market data...")
 def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
     try:
-        # Fetch data with auto_adjust to handle different column names
+        # Fetch data with auto_adjust disabled for consistent columns
         df = yf.download(
             symbol,
             period="60d" if interval in ['15m', '30m'] else "180d",
             interval=interval,
             progress=False,
-            auto_adjust=True
+            auto_adjust=False
         )
         
-        # Clean and normalize column names
-        df.columns = [re.sub(r'\W+', '_', col.lower().strip()) for col in df.columns]
+        # Convert all column names to strings
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = ['_'.join(map(str, col)).lower() for col in df.columns.values]
+        else:
+            df.columns = [str(col).lower() for col in df.columns]
+        
+        # Clean column names
+        df.columns = [re.sub(r'[^a-z0-9_]', '_', col) for col in df.columns]
         
         # Handle symbol-specific suffixes
-        symbol_parts = symbol.lower().replace('-', '_').split('_')
-        new_columns = []
-        for col in df.columns:
-            # Remove symbol parts from column names
-            parts = [p for p in col.split('_') if p not in symbol_parts]
-            new_columns.append('_'.join(parts).strip('_'))
+        symbol_clean = symbol.lower().replace('-', '_')
+        df.columns = [col.replace(f'_{symbol_clean}', '') for col in df.columns]
         
-        df.columns = new_columns
-        
-        # Column mapping with priority for standard names
+        # Ensure required columns exist
+        required_cols = ['open', 'high', 'low', 'close', 'volume']
         column_map = {
             'open': ['open', 'adj_open'],
             'high': ['high', 'adj_high'],
             'low': ['low', 'adj_low'],
-            'close': ['close', 'adj_close', 'adjusted_close'],
-            'volume': ['volume', 'adj_volume', 'adjusted_volume']
+            'close': ['close', 'adj_close'],
+            'volume': ['volume', 'adj_volume']
         }
         
-        # Build final columns with fallbacks
         final_cols = {}
         for standard, aliases in column_map.items():
             for alias in aliases:
                 if alias in df.columns:
                     final_cols[standard] = df[alias]
                     break
-            else:
+            if standard not in final_cols:
                 st.error(f"Missing required column: {standard}")
                 return pd.DataFrame()
         
-        return pd.DataFrame(final_cols)[['open', 'high', 'low', 'close', 'volume']].ffill().dropna()
+        clean_df = pd.DataFrame(final_cols)[required_cols]
+        return clean_df.ffill().dropna()
         
     except Exception as e:
-        logging.error(f"Data fetch failed: {str(e)}")
+        logging.error(f"Data fetch failed: {str(e)}", exc_info=True)
         return pd.DataFrame()
 
 def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -94,7 +95,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         df['close_lag1'] = df['close'].shift(1)
         df['returns'] = df['close'].pct_change()
         
-        # Technical indicators
+        # Feature calculations
         windows = [20, 50, 100]
         for window in windows:
             df[f'sma_{window}'] = df['close'].rolling(window).mean()

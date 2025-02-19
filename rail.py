@@ -1,4 +1,4 @@
-# crypto_trading_system.py (FIXED MULTIINDEX TRUTH VALUE)
+# crypto_trading_system.py (FIXED COLUMN MAPPING)
 import logging
 import numpy as np
 import pandas as pd
@@ -40,7 +40,7 @@ if 'last_trained' not in st.session_state:
     st.session_state.last_trained = None
 
 # ======================
-# DATA PIPELINE
+# DATA PIPELINE (FIXED COLUMN MAPPING)
 # ======================
 @st.cache_data(ttl=300, show_spinner="Fetching market data...")
 def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
@@ -62,9 +62,13 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
         
         df.columns = [re.sub(r'\W+', '_', col).strip('_').lower() for col in df.columns]
         
+        # Fixed column mapping for all required fields
         column_mapping = {
+            'open': ['open', 'adj_open', 'adjusted_open'],
+            'high': ['high', 'adj_high', 'adjusted_high'],
+            'low': ['low', 'adj_low', 'adjusted_low'],
             'close': ['close', 'adj_close', 'adjusted_close'],
-            'volume': ['volume', 'adj_volume']
+            'volume': ['volume', 'adj_volume', 'adjusted_volume']
         }
         
         final_columns = {}
@@ -73,14 +77,13 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
                 if alias in df.columns:
                     final_columns[standard_name] = df[alias]
                     break
-        
+            else:
+                st.error(f"Missing required column: {standard_name}")
+                return pd.DataFrame()
+
         required_cols = ['open', 'high', 'low', 'close', 'volume']
-        missing = [col for col in required_cols if col not in final_columns]
-        if missing:
-            raise ValueError(f"Missing columns: {missing}")
-            
         clean_df = pd.DataFrame({col: final_columns[col] for col in required_cols})
-        return clean_df.reset_index(drop=True) if not clean_df.empty else pd.DataFrame()
+        return clean_df.dropna().reset_index(drop=True)
         
     except Exception as e:
         logging.error(f"Data fetch failed: {str(e)}")
@@ -98,6 +101,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         if missing:
             raise ValueError(f"Missing required columns: {missing}")
 
+        # Feature engineering calculations remain the same
         df['close_lag1'] = df['close'].shift(1)
         df['returns'] = df['close_lag1'].pct_change()
         df['log_returns'] = np.log(df['close_lag1']).diff()
@@ -139,11 +143,11 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
 # ======================
-# MODEL PIPELINE (FIXED)
+# MODEL PIPELINE 
 # ======================
 class TradingModel:
     def __init__(self):
-        self.selected_features = pd.Index([])  # Initialize as pandas Index
+        self.selected_features = pd.Index([])
         self.model = None
         self.feature_selector = None
 
@@ -217,16 +221,13 @@ class TradingModel:
         return np.mean(scores)
 
     def predict(self, X: pd.DataFrame) -> float:
-        """Fixed prediction with proper Index handling"""
         try:
-            # Use .empty for pandas Index check
             if self.selected_features.empty or X.empty:
                 return 0.5
                 
             if not hasattr(self, 'model') or self.model is None:
                 return 0.5
                 
-            # Convert Index to list for DataFrame access
             features = self.selected_features.tolist()
             missing = [f for f in features if f not in X.columns]
             

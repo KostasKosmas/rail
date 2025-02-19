@@ -1,4 +1,4 @@
-# crypto_trading_system.py (FIXED MULTIINDEX HANDLING)
+# crypto_trading_system.py (FIXED COLUMN ASSIGNMENT)
 import logging
 import numpy as np
 import pandas as pd
@@ -57,29 +57,35 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
             auto_adjust=False
         )
         
-        # Handle MultiIndex columns
+        # Flatten MultiIndex columns
         if isinstance(df.columns, pd.MultiIndex):
-            # Flatten MultiIndex to single level using first level values
-            df.columns = df.columns.get_level_values(0)
+            df.columns = ['_'.join(col).strip() for col in df.columns.values]
         
-        # Clean column names
+        # Clean and standardize column names
         df.columns = [re.sub(r'\W+', '_', col).strip('_').lower() for col in df.columns]
         
-        # Standardize column names
-        column_mapping = {
-            'adj_close': 'close',
-            'adj_volume': 'volume',
-            'adjusted_close': 'close'
+        # Handle known column aliases
+        column_precedence = {
+            'close': ['close', 'adj_close', 'adjusted_close'],
+            'volume': ['volume', 'adj_volume']
         }
-        df = df.rename(columns=column_mapping)
         
-        # Verify required columns
-        required_cols = ['open', 'high', 'low', 'close', 'volume']
-        missing = [col for col in required_cols if col not in df.columns]
-        if missing:
-            raise ValueError(f"Missing columns: {missing}")
-            
-        return df.reset_index(drop=True) if not df.empty else pd.DataFrame()
+        # Select preferred column names
+        final_columns = {}
+        for preferred, aliases in column_precedence.items():
+            for alias in aliases:
+                if alias in df.columns:
+                    final_columns[preferred] = df[alias]
+                    break
+            if preferred not in final_columns:
+                raise ValueError(f"Missing {preferred} column")
+        
+        # Create clean dataframe with guaranteed single columns
+        clean_df = pd.DataFrame()
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            clean_df[col] = final_columns[col]
+        
+        return clean_df.reset_index(drop=True) if not clean_df.empty else pd.DataFrame()
         
     except Exception as e:
         logging.error(f"Data fetch failed: {str(e)}")
@@ -97,8 +103,9 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         if missing:
             raise ValueError(f"Missing required columns: {missing}")
 
-        # Feature calculations
-        df['close_lag1'] = df['close'].shift(1)
+        # Ensure single column access
+        close_series = df['close'].squeeze()  # Convert to Series if needed
+        df['close_lag1'] = close_series.shift(1)
         df['returns'] = df['close_lag1'].pct_change()
         df['log_returns'] = np.log(df['close_lag1']).diff()
         

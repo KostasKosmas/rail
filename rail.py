@@ -1,4 +1,4 @@
-# crypto_trading_system.py (FIXED COLUMN HANDLING)
+# crypto_trading_system.py (FIXED MULTIINDEX HANDLING)
 import logging
 import numpy as np
 import pandas as pd
@@ -12,6 +12,7 @@ from sklearn.metrics import classification_report, confusion_matrix, f1_score
 from imblearn.under_sampling import RandomUnderSampler
 from datetime import datetime, timedelta
 import warnings
+import re
 
 # ======================
 # CONFIGURATION
@@ -47,32 +48,36 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
     lookback_days = 59 if interval in ['15m', '30m'] else 180
     
     try:
-        # Fetch data without auto-adjust to get raw columns
         df = yf.download(
             symbol, 
             start=end - timedelta(days=lookback_days),
             end=end,
             interval=interval,
             progress=False,
-            auto_adjust=False  # Changed from True to preserve column names
+            auto_adjust=False
         )
+        
+        # Handle MultiIndex columns
+        if isinstance(df.columns, pd.MultiIndex):
+            # Flatten MultiIndex to single level using first level values
+            df.columns = df.columns.get_level_values(0)
+        
+        # Clean column names
+        df.columns = [re.sub(r'\W+', '_', col).strip('_').lower() for col in df.columns]
         
         # Standardize column names
         column_mapping = {
-            'Adj Close': 'Close',
-            'Adj_Close': 'Close',
-            'Adjusted Close': 'Close',
-            'Adj Volume': 'Volume',
-            'Adj_Volume': 'Volume'
+            'adj_close': 'close',
+            'adj_volume': 'volume',
+            'adjusted_close': 'close'
         }
         df = df.rename(columns=column_mapping)
-        df.columns = df.columns.str.replace(' ', '_')
         
         # Verify required columns
-        required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+        required_cols = ['open', 'high', 'low', 'close', 'volume']
         missing = [col for col in required_cols if col not in df.columns]
         if missing:
-            raise ValueError(f"Missing columns after renaming: {missing}")
+            raise ValueError(f"Missing columns: {missing}")
             
         return df.reset_index(drop=True) if not df.empty else pd.DataFrame()
         
@@ -87,22 +92,22 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     
     df = df.copy()
     try:
-        required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+        required_cols = ['open', 'high', 'low', 'close', 'volume']
         missing = [col for col in required_cols if col not in df.columns]
         if missing:
             raise ValueError(f"Missing required columns: {missing}")
 
         # Feature calculations
-        df['Close_Lag1'] = df['Close'].shift(1)
-        df['Returns'] = df['Close_Lag1'].pct_change()
-        df['Log_Returns'] = np.log(df['Close_Lag1']).diff()
+        df['close_lag1'] = df['close'].shift(1)
+        df['returns'] = df['close_lag1'].pct_change()
+        df['log_returns'] = np.log(df['close_lag1']).diff()
         
         windows = [20, 50, 100, 200]
         for window in windows:
-            df[f'SMA_{window}'] = df['Close_Lag1'].rolling(window).mean()
-            df[f'STD_{window}'] = df['Close_Lag1'].rolling(window).std()
+            df[f'sma_{window}'] = df['close_lag1'].rolling(window).mean()
+            df[f'std_{window}'] = df['close_lag1'].rolling(window).std()
             
-            delta = df['Close_Lag1'].diff()
+            delta = df['close_lag1'].diff()
             gain = delta.clip(lower=0)
             loss = -delta.clip(upper=0)
             
@@ -112,21 +117,21 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
             with np.errstate(divide='ignore', invalid='ignore'):
                 rs = avg_gain / avg_loss.replace(0, 1)
             rsi = 100 - (100 / (1 + rs))
-            df[f'RSI_{window}'] = rsi
+            df[f'rsi_{window}'] = rsi
 
-        df['Volatility'] = df['Log_Returns'].rolling(GARCH_WINDOW).std()
+        df['volatility'] = df['log_returns'].rolling(GARCH_WINDOW).std()
         for period in [3, 7, 14]:
-            df[f'Momentum_{period}'] = df['Close_Lag1'].pct_change(period)
+            df[f'momentum_{period}'] = df['close_lag1'].pct_change(period)
         
-        future_returns = df['Close'].pct_change().shift(-1).to_numpy().ravel()
-        df['Target'] = pd.cut(
+        future_returns = df['close'].pct_change().shift(-1).to_numpy().ravel()
+        df['target'] = pd.cut(
             future_returns,
             bins=[-np.inf, -0.01, 0.01, np.inf],
             labels=[0, 1, 2],
             ordered=False
         )
         
-        df = df.drop(columns=required_cols + ['Close_Lag1'])
+        df = df.drop(columns=required_cols + ['close_lag1'])
         return df.dropna().reset_index(drop=True)
         
     except Exception as e:
@@ -240,19 +245,19 @@ def main():
         col1, col2 = st.columns([3, 1])
         with col1:
             st.subheader(f"{symbol} Price Chart")
-            st.line_chart(raw_data['Close'])
+            st.line_chart(raw_data['close'])
             
         with col2:
-            current_price = raw_data['Close'].iloc[-1].item()
-            current_vol = processed_data['Volatility'].iloc[-1].item() if 'Volatility' in processed_data else 0
+            current_price = raw_data['close'].iloc[-1].item()
+            current_vol = processed_data['volatility'].iloc[-1].item() if 'volatility' in processed_data else 0
             st.metric("Current Price", f"${current_price:,.2f}")
             st.metric("Volatility", f"{current_vol:.2%}")
 
     if st.sidebar.button("🚀 Train Model") and not processed_data.empty:
         try:
             model = TradingModel()
-            X = processed_data.drop(columns=['Target'])
-            y = processed_data['Target']
+            X = processed_data.drop(columns=['target'])
+            y = processed_data['target']
             
             with st.spinner("Training AI model..."):
                 model.optimize_model(X, y)
@@ -264,14 +269,14 @@ def main():
             st.error(f"Training failed: {str(e)}")
 
     if st.session_state.model and not processed_data.empty:
-        latest_data = processed_data.drop(columns=['Target']).iloc[[-1]]
+        latest_data = processed_data.drop(columns=['target']).iloc[[-1]]
         confidence = st.session_state.model.predict(latest_data)
         
         st.subheader("Trading Signal")
         col1, col2 = st.columns(2)
         col1.metric("Confidence Score", f"{confidence:.2%}")
         
-        current_vol = processed_data['Volatility'].iloc[-1].item()
+        current_vol = processed_data['volatility'].iloc[-1].item()
         adj_buy = TRADE_THRESHOLD_BUY + (current_vol * 0.1)
         adj_sell = TRADE_THRESHOLD_SELL - (current_vol * 0.1)
         

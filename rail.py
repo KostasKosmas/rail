@@ -1,4 +1,4 @@
-# crypto_trading_system.py (FULLY FIXED VERSION)
+# crypto_trading_system.py (FINAL ERROR-FIXED VERSION)
 import logging
 import numpy as np
 import pandas as pd
@@ -71,18 +71,15 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         if not all(col in df.columns for col in required_cols):
             raise ValueError("Missing required price columns")
 
-        # Feature calculations
         df['Close_Lag1'] = df['Close'].shift(1)
         df['Returns'] = df['Close_Lag1'].pct_change()
         df['Log_Returns'] = np.log(df['Close_Lag1']).diff()
         
-        # Technical Indicators
         windows = [20, 50, 100, 200]
         for window in windows:
             df[f'SMA_{window}'] = df['Close_Lag1'].rolling(window).mean()
             df[f'STD_{window}'] = df['Close_Lag1'].rolling(window).std()
             
-            # RSI calculation
             delta = df['Close_Lag1'].diff()
             gain = delta.clip(lower=0)
             loss = -delta.clip(upper=0)
@@ -95,12 +92,10 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
             rsi = 100 - (100 / (1 + rs))
             df[f'RSI_{window}'] = rsi
 
-        # Volatility and Momentum features
         df['Volatility'] = df['Log_Returns'].rolling(GARCH_WINDOW).std()
         for period in [3, 7, 14]:
             df[f'Momentum_{period}'] = df['Close_Lag1'].pct_change(period)
         
-        # Target engineering
         future_returns = df['Close'].pct_change().shift(-1).to_numpy().ravel()
         df['Target'] = pd.cut(
             future_returns,
@@ -109,7 +104,6 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
             ordered=False
         )
         
-        # Cleanup
         df = df.drop(columns=required_cols + ['Close_Lag1'])
         return df.dropna().reset_index(drop=True)
         
@@ -127,10 +121,8 @@ class TradingModel:
         self.feature_selector = None
 
     def _validate_leakage(self, X: pd.DataFrame):
-        """Leakage detection for time series data"""
         leakage_found = False
         for col in X.columns:
-            # Check if current values match shifted future values
             shifted = X[col].shift(1)
             current = X[col].iloc[1:]
             if not current.equals(shifted.dropna()):
@@ -146,7 +138,6 @@ class TradingModel:
             tscv = TimeSeriesSplit(n_splits=3)
             self._validate_leakage(X)
             
-            # Feature Selection
             self.feature_selector = RFECV(
                 estimator=GradientBoostingClassifier(),
                 step=1,
@@ -156,18 +147,15 @@ class TradingModel:
             self.feature_selector.fit(X, y)
             self.selected_features = X.columns[self.feature_selector.get_support()]
             
-            # Hyperparameter Optimization
             study = optuna.create_study(direction='maximize')
             study.optimize(
                 lambda trial: self._objective(trial, X[self.selected_features], y, tscv),
                 n_trials=MAX_TRIALS
             )
             
-            # Final Model Training
             self.model = GradientBoostingClassifier(**study.best_params)
             self.model.fit(X[self.selected_features], y)
             
-            # Validation Report
             y_pred = self.model.predict(X[self.selected_features])
             st.subheader("Model Validation")
             st.text(classification_report(y, y_pred))
@@ -202,23 +190,22 @@ class TradingModel:
         return np.mean(scores)
 
     def predict(self, X: pd.DataFrame) -> float:
-        """Robust prediction with error handling"""
+        """Robust prediction with proper pandas Index handling"""
         try:
-            # Check for empty features using pandas' empty property
+            # Proper empty check for pandas Index
             if self.selected_features.empty or X.empty:
                 return 0.5
                 
-            if not self.model:
+            if not hasattr(self, 'model') or self.model is None:
+                return 0.5
+                
+            missing_features = [f for f in self.selected_features if f not in X.columns]
+            if missing_features:
+                logging.error(f"Missing features: {missing_features}")
                 return 0.5
                 
             return self.model.predict_proba(X[self.selected_features])[0][2]
             
-        except AttributeError:
-            logging.error("Model not properly initialized")
-            return 0.5
-        except IndexError:
-            logging.error("Prediction index out of bounds")
-            return 0.5
         except Exception as e:
             logging.error(f"Prediction failed: {str(e)}")
             return 0.5

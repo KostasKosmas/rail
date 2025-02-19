@@ -1,4 +1,4 @@
-# crypto_trading_system.py (FIXED COLUMN HANDLING)
+# crypto_trading_system.py (FIXED MULTIINDEX TRUTH VALUE)
 import logging
 import numpy as np
 import pandas as pd
@@ -40,7 +40,7 @@ if 'last_trained' not in st.session_state:
     st.session_state.last_trained = None
 
 # ======================
-# DATA PIPELINE (FIXED)
+# DATA PIPELINE
 # ======================
 @st.cache_data(ttl=300, show_spinner="Fetching market data...")
 def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
@@ -48,7 +48,6 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
     lookback_days = 59 if interval in ['15m', '30m'] else 180
     
     try:
-        # Fetch data with different parameters
         df = yf.download(
             symbol, 
             start=end - timedelta(days=lookback_days),
@@ -58,42 +57,28 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
             auto_adjust=True
         )
         
-        # Handle MultiIndex columns
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = ['_'.join(col).strip() for col in df.columns.values]
         
-        # Clean column names
         df.columns = [re.sub(r'\W+', '_', col).strip('_').lower() for col in df.columns]
         
-        # Column name mapping with priority
         column_mapping = {
-            'close': ['close', 'adj_close', 'adjusted_close', 'price', 'last'],
-            'open': ['open', 'opening_price'],
-            'high': ['high', 'day_high'],
-            'low': ['low', 'day_low'],
-            'volume': ['volume', 'vol', 'quantity']
+            'close': ['close', 'adj_close', 'adjusted_close'],
+            'volume': ['volume', 'adj_volume']
         }
         
-        # Find and rename columns
         final_columns = {}
         for standard_name, aliases in column_mapping.items():
             for alias in aliases:
                 if alias in df.columns:
                     final_columns[standard_name] = df[alias]
                     break
-            else:
-                # Try partial match as last resort
-                matches = [col for col in df.columns if standard_name in col]
-                if matches:
-                    final_columns[standard_name] = df[matches[0]]
         
-        # Verify we have all required columns
         required_cols = ['open', 'high', 'low', 'close', 'volume']
         missing = [col for col in required_cols if col not in final_columns]
         if missing:
-            raise ValueError(f"Missing columns after renaming: {missing}")
-        
-        # Create clean dataframe
+            raise ValueError(f"Missing columns: {missing}")
+            
         clean_df = pd.DataFrame({col: final_columns[col] for col in required_cols})
         return clean_df.reset_index(drop=True) if not clean_df.empty else pd.DataFrame()
         
@@ -113,7 +98,6 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         if missing:
             raise ValueError(f"Missing required columns: {missing}")
 
-        # Feature calculations
         df['close_lag1'] = df['close'].shift(1)
         df['returns'] = df['close_lag1'].pct_change()
         df['log_returns'] = np.log(df['close_lag1']).diff()
@@ -155,11 +139,11 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
 # ======================
-# MODEL PIPELINE
+# MODEL PIPELINE (FIXED)
 # ======================
 class TradingModel:
     def __init__(self):
-        self.selected_features = []
+        self.selected_features = pd.Index([])  # Initialize as pandas Index
         self.model = None
         self.feature_selector = None
 
@@ -188,18 +172,18 @@ class TradingModel:
                 min_features_to_select=MIN_FEATURES
             )
             self.feature_selector.fit(X, y)
-            self.selected_features = X.columns[self.feature_selector.get_support()].tolist()
+            self.selected_features = X.columns[self.feature_selector.get_support()]
             
             study = optuna.create_study(direction='maximize')
             study.optimize(
-                lambda trial: self._objective(trial, X[self.selected_features], y, tscv),
+                lambda trial: self._objective(trial, X[self.selected_features.tolist()], y, tscv),
                 n_trials=MAX_TRIALS
             )
             
             self.model = GradientBoostingClassifier(**study.best_params)
-            self.model.fit(X[self.selected_features], y)
+            self.model.fit(X[self.selected_features.tolist()], y)
             
-            y_pred = self.model.predict(X[self.selected_features])
+            y_pred = self.model.predict(X[self.selected_features.tolist()])
             st.subheader("Model Validation")
             st.text(classification_report(y, y_pred))
             st.write("Confusion Matrix:")
@@ -233,16 +217,25 @@ class TradingModel:
         return np.mean(scores)
 
     def predict(self, X: pd.DataFrame) -> float:
+        """Fixed prediction with proper Index handling"""
         try:
-            if not self.selected_features or X.empty:
+            # Use .empty for pandas Index check
+            if self.selected_features.empty or X.empty:
                 return 0.5
+                
             if not hasattr(self, 'model') or self.model is None:
                 return 0.5
-            missing_features = [f for f in self.selected_features if f not in X.columns]
-            if missing_features:
-                logging.error(f"Missing features: {missing_features}")
+                
+            # Convert Index to list for DataFrame access
+            features = self.selected_features.tolist()
+            missing = [f for f in features if f not in X.columns]
+            
+            if missing:
+                logging.error(f"Missing features: {missing}")
                 return 0.5
-            return self.model.predict_proba(X[self.selected_features])[0][2]
+                
+            return self.model.predict_proba(X[features])[0][2]
+            
         except Exception as e:
             logging.error(f"Prediction failed: {str(e)}")
             return 0.5

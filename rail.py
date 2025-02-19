@@ -195,7 +195,7 @@ class TradingModel:
             progress_bar = st.progress(0)
             status_text = st.empty()
             
-            for _ in range(MAX_TRIALS - st.session_state.trials_completed):
+            while st.session_state.trials_completed < MAX_TRIALS:
                 trial = st.session_state.study.ask()
                 value = objective(trial)
                 st.session_state.study.tell(trial, value)
@@ -209,7 +209,7 @@ class TradingModel:
                     Trials Completed: {st.session_state.trials_completed}/{MAX_TRIALS}  
                     Best F1 Score: {st.session_state.study.best_value:.2%}
                 """)
-                time.sleep(0.1)  # Allow UI to update
+                time.sleep(0.1)
 
             self.selected_features = self._safe_feature_selection(X, y)
             
@@ -224,7 +224,7 @@ class TradingModel:
             smote = SMOTE(
                 random_state=42,
                 k_neighbors=min(5, min(y.value_counts()) - 1)
-            X_res, y_res = smote.fit_resample(X_sel, y))
+            X_res, y_res = smote.fit_resample(X_sel, y)
             
             best_params = st.session_state.study.best_params
             rf_params = {k[3:]: v for k, v in best_params.items() if k.startswith('rf_')}
@@ -249,7 +249,7 @@ class TradingModel:
             X_sel = X[self.selected_features]
             prob_rf = self.calibrated_rf.predict_proba(X_sel)
             prob_gb = self.calibrated_gb.predict_proba(X_sel)
-            return (0.6 * prob_rf + 0.4 * gb_preds)[0][2]
+            return (0.6 * prob_rf + 0.4 * prob_gb)[0][2]
         except Exception as e:
             logging.error(f"Prediction failed: {str(e)}")
             return 0.5
@@ -303,9 +303,9 @@ def main():
                 st.text(classification_report(y, np.argmax(preds, axis=1)))
         except Exception as e:
             st.error(f"Training failed: {str(e)}")
-            finally:
-                st.session_state.trials_completed = 0
-                st.session_state.study = None
+        finally:
+            st.session_state.trials_completed = 0
+            st.session_state.study = None
 
     if st.session_state.model and not processed_data.empty:
         latest_data = processed_data.drop(columns=['Target']).iloc[[-1]]

@@ -115,8 +115,8 @@ class TradingModel:
     def _validate_leakage(self, X: pd.DataFrame, y: pd.Series):
         """Ensure no future data in features"""
         for col in X.columns:
-            # Check if feature contains future information
-            if any(X[col].diff().shift(-1).fillna(0) != 0:
+            # Corrected line with proper parenthesis
+            if any(X[col].diff().shift(-1).fillna(0) != 0):
                 raise ValueError(f"Leakage detected in {col}")
 
     def _diagnostic_report(self, X: pd.DataFrame, y: pd.Series):

@@ -8,7 +8,7 @@ import optuna
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.feature_selection import RFECV
-from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.metrics import classification_report, confusion_matrix, f1_score
 from imblearn.under_sampling import RandomUnderSampler
 from datetime import datetime, timedelta
 import warnings
@@ -67,48 +67,43 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     
     df = df.copy()
     try:
-        # Calculate lagged price changes using numpy for 1D guarantee
-        df['Close_Lag1'] = df['Close'].shift(1).values  # Explicit 1D array
-        df['Returns'] = df['Close_Lag1'].pct_change().values
-        df['Log_Returns'] = np.log(df['Close_Lag1']).diff().values
+        # Calculate lagged price changes
+        df['Close_Lag1'] = df['Close'].shift(1)
+        df['Returns'] = df['Close_Lag1'].pct_change()
+        df['Log_Returns'] = np.log(df['Close_Lag1']).diff()
         
-        # Technical Indicators with explicit 1D conversion
+        # Technical Indicators (properly lagged)
         windows = [20, 50, 100, 200]
         for window in windows:
-            close_diff = df['Close_Lag1'].diff().values  # Convert to numpy array
+            df[f'SMA_{window}'] = df['Close_Lag1'].rolling(window).mean()
+            df[f'STD_{window}'] = df['Close_Lag1'].rolling(window).std()
             
-            # Calculate RSI components as 1D arrays
-            up = np.clip(close_diff, 0, np.inf)
-            down = np.abs(np.clip(close_diff, -np.inf, 0))
+            # Revised RSI calculation
+            delta = df['Close_Lag1'].diff()
+            gain = delta.clip(lower=0)
+            loss = -delta.clip(upper=0)
             
-            avg_gain = pd.Series(up).rolling(window).mean().values
-            avg_loss = pd.Series(down).rolling(window).mean().values
+            avg_gain = gain.rolling(window, min_periods=1).mean()
+            avg_loss = loss.rolling(window, min_periods=1).mean()
             
             # Handle division by zero
-            with np.errstate(divide='ignore', invalid='ignore'):
-                rs = np.divide(avg_gain, avg_loss, where=avg_loss!=0)
-                rs[avg_loss == 0] = 1.0  # When no losses, RS = 1
-                
+            avg_loss = avg_loss.replace(0, 1)
+            rs = avg_gain / avg_loss
             rsi = 100 - (100 / (1 + rs))
-            
-            df[f'SMA_{window}'] = df['Close_Lag1'].rolling(window).mean().values
-            df[f'STD_{window}'] = df['Close_Lag1'].rolling(window).std().values
             df[f'RSI_{window}'] = rsi
         
         # Volatility Features
-        df['Volatility'] = df['Log_Returns'].rolling(GARCH_WINDOW).std().values
+        df['Volatility'] = df['Log_Returns'].rolling(GARCH_WINDOW).std()
         
-        # Momentum Features with numpy conversion
+        # Momentum Features
         for period in [3, 7, 14]:
-            df[f'Momentum_{period}'] = df['Close_Lag1'].pct_change(period).values
+            df[f'Momentum_{period}'] = df['Close_Lag1'].pct_change(period)
         
-        # Target Engineering with strict 1D handling
-        future_returns = df['Close'].pct_change().shift(-1).values
-        df['Target'] = pd.cut(
-            future_returns,
-            bins=[-np.inf, -0.01, 0.01, np.inf],
-            labels=[0, 1, 2]
-        ).astype(float)  # Convert to numeric
+        # Target Engineering (future returns)
+        future_returns = df['Close'].pct_change().shift(-1)
+        df['Target'] = pd.cut(future_returns,
+                            bins=[-np.inf, -0.01, 0.01, np.inf],
+                            labels=[0, 1, 2])
         
         # Remove raw price data
         df = df.drop(columns=['Open', 'High', 'Low', 'Close', 'Volume', 'Close_Lag1'])
@@ -131,20 +126,15 @@ class TradingModel:
     def _validate_leakage(self, X: pd.DataFrame, y: pd.Series):
         """Ensure no future data in features"""
         for col in X.columns:
-            # Corrected line with proper parenthesis
             if any(X[col].diff().shift(-1).fillna(0) != 0):
                 raise ValueError(f"Leakage detected in {col}")
 
     def _diagnostic_report(self, X: pd.DataFrame, y: pd.Series):
         """Generate data health report"""
         st.subheader("Data Health Report")
-        
-        # Class distribution
         class_dist = y.value_counts(normalize=True)
         st.write("**Class Distribution:**")
         st.write(class_dist)
-        
-        # Feature correlation
         corr_matrix = X.corr().abs()
         avg_corr = corr_matrix.values[np.triu_indices_from(corr_matrix, k=1)].mean()
         st.write(f"**Average Feature Correlation:** {avg_corr:.2f}")
@@ -152,12 +142,9 @@ class TradingModel:
     def optimize_model(self, X: pd.DataFrame, y: pd.Series):
         try:
             tscv = TimeSeriesSplit(n_splits=3)
-            
-            # Data validation
             self._validate_leakage(X, y)
             self._diagnostic_report(X, y)
             
-            # Feature selection
             self.feature_selector = RFECV(
                 estimator=GradientBoostingClassifier(),
                 step=1,
@@ -167,19 +154,16 @@ class TradingModel:
             self.feature_selector.fit(X, y)
             self.selected_features = X.columns[self.feature_selector.get_support()].tolist()
             
-            # Optimization
             study = optuna.create_study(direction='maximize')
             study.optimize(
                 lambda trial: self._objective(trial, X[self.selected_features], y, tscv),
                 n_trials=MAX_TRIALS
             )
             
-            # Train final model
             best_params = study.best_params
             self.model = GradientBoostingClassifier(**best_params)
             self.model.fit(X[self.selected_features], y)
             
-            # Validation
             y_pred = self.model.predict(X[self.selected_features])
             st.subheader("Validation Report")
             st.write("**Classification Report:**")
@@ -205,14 +189,12 @@ class TradingModel:
             X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
             y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
             
-            # Handle imbalance
             rus = RandomUnderSampler(random_state=42)
             X_res, y_res = rus.fit_resample(X_train, y_train)
             
             model = GradientBoostingClassifier(**params)
             model.fit(X_res, y_res)
             
-            # Conservative scoring
             preds = model.predict(X_test)
             scores.append(f1_score(y_test, preds, average='weighted'))
             
@@ -253,7 +235,6 @@ def main():
             X = processed_data.drop(['Target'], axis=1)
             y = processed_data['Target']
             
-            # Final validation check
             if any(col in X.columns for col in ['Open', 'High', 'Low', 'Close', 'Volume']):
                 raise ValueError("Raw price data detected in features!")
             

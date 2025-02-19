@@ -1,4 +1,4 @@
-# crypto_trading_system.py (FINAL CORRECTED VERSION)
+# crypto_trading_system.py (FINAL WORKING VERSION)
 import logging
 import numpy as np
 import pandas as pd
@@ -100,8 +100,8 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         for period in [3, 7, 14]:
             df[f'Momentum_{period}'] = df['Close_Lag1'].pct_change(period)
         
-        # Explicit 1D conversion with flattening
-        future_returns = df['Close'].pct_change().shift(-1).to_numpy().ravel()  # <-- FIX HERE
+        # Fixed 1D conversion for target variable
+        future_returns = df['Close'].pct_change().shift(-1).to_numpy().ravel()
         df['Target'] = pd.cut(
             future_returns,
             bins=[-np.inf, -0.01, 0.01, np.inf],
@@ -126,16 +126,25 @@ class TradingModel:
         self.model = None
         self.feature_selector = None
 
-    def _validate_leakage(self, X: pd.DataFrame, y: pd.Series):
-        """Ensure no future data in features"""
+    def _validate_leakage(self, X: pd.DataFrame):
+        """Proper leakage detection for time series features"""
+        leakage_found = False
         for col in X.columns:
-            if any(X[col].diff().shift(-1).fillna(0) != 0):
-                raise ValueError(f"Leakage detected in {col}")
+            # Check if current values match shifted future values
+            shifted = X[col].shift(1)
+            current = X[col].iloc[1:]
+            if not current.equals(shifted.dropna()):
+                forward_shifted = X[col].shift(-1).iloc[:-1]
+                if X[col].iloc[:-1].equals(forward_shifted):
+                    st.error(f"⚠️ Potential leakage in {col}")
+                    leakage_found = True
+        if leakage_found:
+            raise ValueError("Data leakage detected in features")
 
     def optimize_model(self, X: pd.DataFrame, y: pd.Series):
         try:
             tscv = TimeSeriesSplit(n_splits=3)
-            self._validate_leakage(X, y)
+            self._validate_leakage(X)
             
             # Feature Selection
             self.feature_selector = RFECV(

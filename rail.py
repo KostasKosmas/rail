@@ -5,15 +5,13 @@ import pandas as pd
 import yfinance as yf
 import streamlit as st
 import optuna
-from sklearn.base import clone
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.feature_selection import RFECV
 from sklearn.metrics import classification_report, confusion_matrix
 from imblearn.under_sampling import RandomUnderSampler
 from datetime import datetime, timedelta
 import warnings
-from sklearn.cluster import KMeans
 
 # ======================
 # CONFIGURATION
@@ -25,7 +23,6 @@ TRADE_THRESHOLD_SELL = 0.42
 MAX_TRIALS = 50
 GARCH_WINDOW = 14
 MIN_FEATURES = 7
-VOLATILITY_CLUSTERS = 3
 
 warnings.filterwarnings("ignore", category=UserWarning)
 logging.basicConfig(level=logging.INFO)
@@ -70,34 +67,35 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     
     df = df.copy()
     try:
-        # Calculate returns and log returns
-        df['Returns'] = df['Close'].pct_change()
-        df['Log_Returns'] = np.log(df['Close']).diff()
+        # Calculate lagged price changes
+        df['Close_Lag1'] = df['Close'].shift(1)
+        df['Returns'] = df['Close_Lag1'].pct_change()
+        df['Log_Returns'] = np.log(df['Close_Lag1']).diff()
         
         # Technical Indicators (properly lagged)
         windows = [20, 50, 100, 200]
         for window in windows:
-            df[f'SMA_{window}'] = df['Close'].shift(1).rolling(window).mean()
-            df[f'STD_{window}'] = df['Close'].shift(1).rolling(window).std()
+            df[f'SMA_{window}'] = df['Close_Lag1'].rolling(window).mean()
+            df[f'STD_{window}'] = df['Close_Lag1'].rolling(window).std()
             df[f'RSI_{window}'] = 100 - (100 / (1 + (
-                df['Close'].diff().clip(lower=0).shift(1).rolling(window).mean() / 
-                df['Close'].diff().clip(upper=0).abs().shift(1).rolling(window).mean()
+                df['Close_Lag1'].diff().clip(lower=0).rolling(window).mean() / 
+                df['Close_Lag1'].diff().clip(upper=0).abs().rolling(window).mean()
             )))
         
         # Volatility Features
-        df['Volatility'] = df['Log_Returns'].shift(1).rolling(GARCH_WINDOW).std()
+        df['Volatility'] = df['Log_Returns'].rolling(GARCH_WINDOW).std()
         
-        # Momentum Features (lagged)
+        # Momentum Features
         for period in [3, 7, 14]:
-            df[f'Momentum_{period}'] = df['Close'].pct_change(period).shift(1)
+            df[f'Momentum_{period}'] = df['Close_Lag1'].pct_change(period)
         
         # Target Engineering (future returns)
-        df['Target'] = pd.cut(df['Returns'].shift(-1), 
+        df['Target'] = pd.cut(df['Close'].pct_change().shift(-1),
                             bins=[-np.inf, -0.01, 0.01, np.inf],
                             labels=[0, 1, 2])
         
-        # Remove raw price data to prevent leakage
-        df = df.drop(columns=['Open', 'High', 'Low', 'Close', 'Volume', 'Returns'])
+        # Remove raw price data
+        df = df.drop(columns=['Open', 'High', 'Low', 'Close', 'Volume', 'Close_Lag1'])
         
         return df.dropna().reset_index(drop=True)
     except Exception as e:
@@ -117,8 +115,9 @@ class TradingModel:
     def _validate_leakage(self, X: pd.DataFrame, y: pd.Series):
         """Ensure no future data in features"""
         for col in X.columns:
-            if any(X[col].diff().shift(-1).fillna(0) != 0):
-                raise ValueError(f"Potential leakage detected in {col}")
+            # Check if feature contains future information
+            if any(X[col].diff().shift(-1).fillna(0) != 0:
+                raise ValueError(f"Leakage detected in {col}")
 
     def _diagnostic_report(self, X: pd.DataFrame, y: pd.Series):
         """Generate data health report"""
@@ -133,13 +132,6 @@ class TradingModel:
         corr_matrix = X.corr().abs()
         avg_corr = corr_matrix.values[np.triu_indices_from(corr_matrix, k=1)].mean()
         st.write(f"**Average Feature Correlation:** {avg_corr:.2f}")
-        
-        # Feature importance baseline
-        baseline_model = RandomForestClassifier(n_estimators=100, random_state=42)
-        baseline_model.fit(X, y)
-        importances = pd.Series(baseline_model.feature_importances_, index=X.columns)
-        st.write("**Top 10 Features (Baseline):**")
-        st.write(importances.sort_values(ascending=False).head(10))
 
     def optimize_model(self, X: pd.DataFrame, y: pd.Series):
         try:
@@ -149,13 +141,9 @@ class TradingModel:
             self._validate_leakage(X, y)
             self._diagnostic_report(X, y)
             
-            # Class balancing
-            self.class_weights = dict(1 / (y.value_counts(normalize=True) * len(y) / len(np.unique(y))))
-            
             # Feature selection
             self.feature_selector = RFECV(
-                estimator=RandomForestClassifier(n_estimators=100, 
-                                                class_weight=self.class_weights),
+                estimator=GradientBoostingClassifier(),
                 step=1,
                 cv=tscv,
                 min_features_to_select=MIN_FEATURES
@@ -235,7 +223,7 @@ def main():
         col1, col2 = st.columns([3, 1])
         with col1:
             st.subheader(f"{symbol} Price Chart")
-            st.line_chart(raw_data['Close'])  # Use raw data for display
+            st.line_chart(raw_data['Close'])
             
         with col2:
             current_price = raw_data['Close'].iloc[-1].item()
@@ -250,11 +238,10 @@ def main():
             y = processed_data['Target']
             
             # Final validation check
-            price_columns = {'Open', 'High', 'Low', 'Close', 'Volume'}
-            if any(col in X.columns for col in price_columns):
+            if any(col in X.columns for col in ['Open', 'High', 'Low', 'Close', 'Volume']):
                 raise ValueError("Raw price data detected in features!")
             
-            with st.spinner("Training model with leakage checks..."):
+            with st.spinner("Training model..."):
                 model.optimize_model(X, y)
                 st.session_state.model = model
                 st.session_state.last_trained = datetime.now()

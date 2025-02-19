@@ -1,4 +1,4 @@
-# crypto_trading_system.py (FIXED MULTIINDEX & COLUMN CLEANING)
+# crypto_trading_system.py (FINAL FIXED VERSION)
 import logging
 import numpy as np
 import pandas as pd
@@ -54,25 +54,25 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
             end=end,
             interval=interval,
             progress=False,
-            auto_adjust=True
+            auto_adjust=False  # Explicit column handling
         )
         
-        # Handle MultiIndex columns
+        # Flatten MultiIndex columns
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = [f"{col[0]}_{col[1]}" for col in df.columns.values]
         
-        # Clean column names and remove symbol suffix
+        # Clean column names and remove symbol components
         symbol_clean = symbol.lower().replace("-", "_")
         new_columns = []
         for col in df.columns:
-            # Clean special characters and normalize
+            # Normalize column name
             col_clean = re.sub(r'[^a-zA-Z0-9]', '_', str(col)).strip('_').lower()
             
-            # Remove symbol suffix using regex
-            col_clean = re.sub(rf'_{symbol_clean}$', '', col_clean)
-            
-            # Remove any remaining symbol parts
-            col_clean = col_clean.replace(symbol_clean, '').strip('_')
+            # Remove symbol-related parts
+            parts = col_clean.split('_')
+            symbol_parts = symbol_clean.split('_')
+            filtered_parts = [p for p in parts if p not in symbol_parts]
+            col_clean = '_'.join(filtered_parts)
             
             new_columns.append(col_clean)
         
@@ -108,7 +108,7 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
         required_cols = ['open', 'high', 'low', 'close', 'volume']
         clean_df = pd.DataFrame(final_columns)[required_cols]
         
-        # Forward-fill missing values for crypto markets
+        # Handle missing data
         clean_df = clean_df.ffill().dropna()
         
         if clean_df.empty:
@@ -133,7 +133,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         if missing:
             raise ValueError(f"Missing required columns: {missing}")
 
-        # Feature engineering calculations
+        # Feature engineering pipeline
         df['close_lag1'] = df['close'].shift(1)
         df['returns'] = df['close_lag1'].pct_change().fillna(0)
         df['log_returns'] = np.log(df['close_lag1']).diff().fillna(0)
@@ -202,6 +202,7 @@ class TradingModel:
             tscv = TimeSeriesSplit(n_splits=3)
             self._validate_leakage(X)
             
+            # Feature selection with list-based features
             self.feature_selector = RFECV(
                 estimator=GradientBoostingClassifier(),
                 step=1,
@@ -211,15 +212,18 @@ class TradingModel:
             self.feature_selector.fit(X, y)
             self.selected_features = X.columns[self.feature_selector.get_support()].tolist()
             
+            # Hyperparameter optimization
             study = optuna.create_study(direction='maximize')
             study.optimize(
                 lambda trial: self._objective(trial, X[self.selected_features], y, tscv),
                 n_trials=MAX_TRIALS
             )
             
+            # Final model training
             self.model = GradientBoostingClassifier(**study.best_params)
             self.model.fit(X[self.selected_features], y)
             
+            # Validation reporting
             y_pred = self.model.predict(X[self.selected_features])
             st.subheader("Model Validation")
             st.text(classification_report(y, y_pred))
@@ -255,6 +259,7 @@ class TradingModel:
 
     def predict(self, X: pd.DataFrame) -> float:
         try:
+            # Explicit empty check for list-based features
             if not self.selected_features or X.empty:
                 return 0.5
                 

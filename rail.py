@@ -1,4 +1,4 @@
-# crypto_trading_system.py (FIXED SYMBOL SUFFIX HANDLING)
+# crypto_trading_system.py (FIXED MULTIINDEX & COLUMN CLEANING)
 import logging
 import numpy as np
 import pandas as pd
@@ -48,26 +48,35 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
     lookback_days = 59 if interval in ['15m', '30m'] else 180
     
     try:
-        # Fetch data with auto_adjust disabled for clearer column names
         df = yf.download(
             symbol, 
             start=end - timedelta(days=lookback_days),
             end=end,
             interval=interval,
             progress=False,
-            auto_adjust=False
+            auto_adjust=True
         )
         
         # Handle MultiIndex columns
         if isinstance(df.columns, pd.MultiIndex):
-            df.columns = ['_'.join(col).strip() for col in df.columns.values]
+            df.columns = [f"{col[0]}_{col[1]}" for col in df.columns.values]
         
         # Clean column names and remove symbol suffix
         symbol_clean = symbol.lower().replace("-", "_")
-        df.columns = [
-            re.sub(r'[^a-zA-Z0-9]', '_', col).strip('_').lower().replace(f"_{symbol_clean}", "")
-            for col in df.columns
-        ]
+        new_columns = []
+        for col in df.columns:
+            # Clean special characters and normalize
+            col_clean = re.sub(r'[^a-zA-Z0-9]', '_', str(col)).strip('_').lower()
+            
+            # Remove symbol suffix using regex
+            col_clean = re.sub(rf'_{symbol_clean}$', '', col_clean)
+            
+            # Remove any remaining symbol parts
+            col_clean = col_clean.replace(symbol_clean, '').strip('_')
+            
+            new_columns.append(col_clean)
+        
+        df.columns = new_columns
         
         # Column mapping with priority for standard names
         column_mapping = {
@@ -129,7 +138,6 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         df['returns'] = df['close_lag1'].pct_change().fillna(0)
         df['log_returns'] = np.log(df['close_lag1']).diff().fillna(0)
         
-        # Technical indicators
         windows = [20, 50, 100, 200]
         for window in windows:
             df[f'sma_{window}'] = df['close_lag1'].rolling(window).mean()
@@ -168,11 +176,11 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
 # ======================
-# MODEL PIPELINE 
+# MODEL PIPELINE (FIXED INDEX HANDLING)
 # ======================
 class TradingModel:
     def __init__(self):
-        self.selected_features = pd.Index([])
+        self.selected_features = []
         self.model = None
         self.feature_selector = None
 
@@ -201,18 +209,18 @@ class TradingModel:
                 min_features_to_select=MIN_FEATURES
             )
             self.feature_selector.fit(X, y)
-            self.selected_features = X.columns[self.feature_selector.get_support()]
+            self.selected_features = X.columns[self.feature_selector.get_support()].tolist()
             
             study = optuna.create_study(direction='maximize')
             study.optimize(
-                lambda trial: self._objective(trial, X[self.selected_features.tolist()], y, tscv),
+                lambda trial: self._objective(trial, X[self.selected_features], y, tscv),
                 n_trials=MAX_TRIALS
             )
             
             self.model = GradientBoostingClassifier(**study.best_params)
-            self.model.fit(X[self.selected_features.tolist()], y)
+            self.model.fit(X[self.selected_features], y)
             
-            y_pred = self.model.predict(X[self.selected_features.tolist()])
+            y_pred = self.model.predict(X[self.selected_features])
             st.subheader("Model Validation")
             st.text(classification_report(y, y_pred))
             st.write("Confusion Matrix:")
@@ -247,20 +255,18 @@ class TradingModel:
 
     def predict(self, X: pd.DataFrame) -> float:
         try:
-            if self.selected_features.empty or X.empty:
+            if not self.selected_features or X.empty:
                 return 0.5
                 
             if not hasattr(self, 'model') or self.model is None:
                 return 0.5
                 
-            features = self.selected_features.tolist()
-            missing = [f for f in features if f not in X.columns]
-            
+            missing = [f for f in self.selected_features if f not in X.columns]
             if missing:
                 logging.error(f"Missing features: {missing}")
                 return 0.5
                 
-            return self.model.predict_proba(X[features])[0][2]
+            return self.model.predict_proba(X[self.selected_features])[0][2]
             
         except Exception as e:
             logging.error(f"Prediction failed: {str(e)}")

@@ -8,7 +8,6 @@ import streamlit as st
 import optuna
 import warnings
 import os
-import requests
 from threading import Lock
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.model_selection import TimeSeriesSplit
@@ -32,15 +31,14 @@ GARCH_WINDOW = 14
 MIN_FEATURES = 7
 VOLATILITY_CLUSTERS = 3
 MIN_SAMPLES_FOR_SMOTE = 10
-UPDATE_INTERVAL = 0.5
 STUDY_DIR = "optuna_studies"
 STUDY_NAME = "main_study"
 STUDY_STORAGE = f"sqlite:///{STUDY_DIR}/trading_studies.db"
-YF_MAX_RETRIES = 3
-YF_RETRY_DELAY = 2
-YF_STATUS_URL = "https://query1.finance.yahoo.com/"
+YF_MAX_RETRIES = 5
+YF_RETRY_DELAY = 3
+MIN_DATA_POINTS = 100
 
-warnings.filterwarnings("ignore", category=UserWarning, message=".*ScriptRunContext.*")
+warnings.filterwarnings("ignore", category=UserWarning)
 logging.basicConfig(level=logging.INFO)
 progress_lock = Lock()
 
@@ -77,61 +75,61 @@ if 'training_progress' not in st.session_state:
     st.session_state.training_progress = TrainingProgress()
 
 # ======================
-# RESILIENT DATA PIPELINE
+# DATA PIPELINE
 # ======================
 @st.cache_data(ttl=300, show_spinner="Fetching market data...")
 def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
-    def check_yf_status():
-        try:
-            response = requests.get(YF_STATUS_URL, timeout=5)
-            return response.status_code == 200
-        except:
-            return False
+    params = {
+        'tickers': symbol,
+        'interval': interval,
+        'progress': False,
+        'auto_adjust': True,
+        'ignore_tz': True,
+        'actions': False,
+        'timeout': 10
+    }
+    
+    # Set period based on interval
+    interval_period_map = {
+        '1m': '7d', '5m': '60d', '15m': '60d', '30m': '60d',
+        '1h': '730d', '1d': 'max', '1wk': 'max', '1mo': 'max'
+    }
+    params['period'] = interval_period_map.get(interval, '60d')
 
+    df = pd.DataFrame()
     for attempt in range(YF_MAX_RETRIES):
         try:
-            if not check_yf_status():
-                raise ConnectionError("Yahoo Finance API unavailable")
-            
-            df = yf.download(
-                tickers=symbol,
-                period="60d" if interval in ['15m', '30m'] else "180d",
-                interval=interval,
-                progress=False,
-                auto_adjust=True,
-                ignore_tz=True,
-                actions=False,
-                timeout=10
-            )
-            
-            if df.empty:
-                continue
-
-            df = df.reset_index()
-            df.columns = [col.strftime('%Y-%m-%d %H:%M:%S') if isinstance(col, pd.Timestamp) else col 
-                         for col in df.columns]
-            
-            numeric_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
-            df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors='coerce')
-            df = df[df['Close'] > 0].dropna()
-            
-            if len(df) > 100:
-                return df.reset_index(drop=True)
-            
+            df = yf.download(**params)
+            if not df.empty and len(df) >= MIN_DATA_POINTS:
+                break
+            time.sleep(YF_RETRY_DELAY * (attempt + 1))
         except Exception as e:
             logging.warning(f"Attempt {attempt+1} failed: {str(e)}")
-            if attempt < YF_MAX_RETRIES - 1:
-                time.sleep(YF_RETRY_DELAY * (attempt + 1))
+            time.sleep(YF_RETRY_DELAY * (attempt + 1))
     
-    st.error("""🚨 Failed to fetch data. Possible reasons:
-             - Yahoo Finance service outage
-             - Invalid cryptocurrency symbol
-             - Network connectivity issues
-             Please try again later.""")
-    return pd.DataFrame()
+    if df.empty:
+        st.error("""
+        🔴 Data fetch failed. Possible solutions:
+        1. Check internet connection
+        2. Verify cryptocurrency symbol (e.g., BTC-USD)
+        3. Try a different time interval
+        4. Wait 5 minutes and reload
+        """)
+        return pd.DataFrame()
+
+    try:
+        df = df.reset_index()
+        df.columns = ['Date' if 'Date' in str(col) else col for col in df.columns]
+        numeric_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+        df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors='coerce')
+        df = df.dropna().reset_index(drop=True)
+        return df[(df['Close'] > 0) & (df['Volume'] >= 0)]
+    except Exception as e:
+        logging.error(f"Data processing failed: {str(e)}")
+        return pd.DataFrame()
 
 def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty or len(df) < 100:
+    if df.empty or len(df) < MIN_DATA_POINTS:
         return pd.DataFrame()
     
     try:
@@ -139,24 +137,23 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         df['Returns'] = df['Close'].pct_change()
         df['Log_Returns'] = np.log(df['Close']).diff()
         
-        windows = [20, 50, 100]
+        # Dynamic window calculation
+        max_window = min(200, len(df)//2)
+        windows = [w for w in [20, 50, 100, 200] if w <= max_window]
+        
         for window in windows:
-            if len(df) >= window:
-                df[f'SMA_{window}'] = df['Close'].rolling(window).mean()
-                df[f'STD_{window}'] = df['Close'].rolling(window).std()
-                df[f'RSI_{window}'] = 100 - (100 / (1 + (
-                    df['Close'].diff().clip(lower=0).rolling(window).mean() / 
-                    df['Close'].diff().clip(upper=0).abs().rolling(window).mean()
-                )))
+            df[f'SMA_{window}'] = df['Close'].rolling(window).mean()
+            df[f'STD_{window}'] = df['Close'].rolling(window).std()
+            df[f'RSI_{window}'] = 100 - (100 / (1 + (
+                df['Close'].diff().clip(lower=0).rolling(window).mean() / 
+                df['Close'].diff().clip(upper=0).abs().rolling(window).mean()
+            )))
 
-        if not df.empty:
-            df['Volatility'] = df['Log_Returns'].rolling(GARCH_WINDOW).std()
-            vol_series = df['Volatility'].dropna()
-            
-            if len(vol_series) >= VOLATILITY_CLUSTERS:
-                kmeans = KMeans(n_clusters=VOLATILITY_CLUSTERS)
-                clusters = kmeans.fit_predict(vol_series.values.reshape(-1, 1))
-                df['Vol_Cluster'] = pd.Series(clusters, index=vol_series.index).reindex(df.index, fill_value=-1)
+        df['Volatility'] = df['Log_Returns'].rolling(GARCH_WINDOW).std()
+        
+        if len(df) >= VOLATILITY_CLUSTERS * 2:
+            kmeans = KMeans(n_clusters=VOLATILITY_CLUSTERS)
+            df['Vol_Cluster'] = kmeans.fit_predict(df[['Volatility']].fillna(0))
         
         for period in [3, 7, 14]:
             df[f'Momentum_{period}'] = df['Close'].pct_change(period)
@@ -171,7 +168,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
 # ======================
-# ROBUST MODEL PIPELINE
+# MODEL PIPELINE
 # ======================
 class TradingModel:
     def __init__(self):
@@ -340,7 +337,7 @@ class TradingModel:
             return 0.5
 
 # ======================
-# ERROR-RESISTANT UI
+# MAIN INTERFACE
 # ======================
 def main():
     if 'training_progress' not in st.session_state:
@@ -354,7 +351,12 @@ def main():
         processed_data = calculate_features(raw_data)
     
     if processed_data.empty:
-        st.warning("No valid data available for analysis")
+        st.warning("""
+        ⚠️ Insufficient data for analysis. This could be because:
+        - The selected cryptocurrency isn't supported
+        - Yahoo Finance is experiencing temporary issues
+        - The selected time interval has no trading history
+        """)
         return
 
     col1, col2 = st.columns([3, 1])
@@ -367,11 +369,12 @@ def main():
             
     with col2:
         current_price = processed_data['Close'].iloc[-1].item()
-        current_vol = processed_data['Volatility'].iloc[-1].item()
+        current_vol = processed_data['Volatility'].iloc[-1].item() if 'Volatility' in processed_data else 0
         st.metric("Current Price", f"${current_price:,.2f}")
         st.metric("Volatility", f"{current_vol:.2%}")
 
-    if st.sidebar.button("🚀 Train Model"):
+    train_disabled = processed_data.empty or len(processed_data) < MIN_DATA_POINTS
+    if st.sidebar.button("🚀 Train Model", disabled=train_disabled):
         try:
             st.session_state.training_progress = TrainingProgress()
             model = TradingModel()
@@ -401,8 +404,8 @@ def main():
                         st.metric("Elapsed Time", f"{elapsed:.1f}s")
                         if progress.params:
                             st.write("Current Parameters:", progress.params)
-                    
-                    time.sleep(0.1)
+
+                 time.sleep(0.1)
                 
                 future.result()
                 model.train(X, y)

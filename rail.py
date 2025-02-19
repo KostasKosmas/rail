@@ -1,4 +1,4 @@
-# crypto_trading_system.py (FIXED COLUMN HANDLING VER 3)
+# crypto_trading_system.py (FIXED SYMBOL SUFFIX HANDLING)
 import logging
 import numpy as np
 import pandas as pd
@@ -55,17 +55,21 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
             end=end,
             interval=interval,
             progress=False,
-            auto_adjust=False  # Changed to handle columns explicitly
+            auto_adjust=False
         )
         
         # Handle MultiIndex columns
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = ['_'.join(col).strip() for col in df.columns.values]
         
-        # Clean column names aggressively
-        df.columns = [re.sub(r'[^a-zA-Z0-9]', '_', col).strip('_').lower() for col in df.columns]
+        # Clean column names and remove symbol suffix
+        symbol_clean = symbol.lower().replace("-", "_")
+        df.columns = [
+            re.sub(r'[^a-zA-Z0-9]', '_', col).strip('_').lower().replace(f"_{symbol_clean}", "")
+            for col in df.columns
+        ]
         
-        # Comprehensive column mapping
+        # Column mapping with priority for standard names
         column_mapping = {
             'open': ['open', 'opening_price', 'price_open', 'o'],
             'high': ['high', 'highest_price', 'price_high', 'h'],
@@ -74,7 +78,7 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
             'volume': ['volume', 'vol', 'v', 'adj_volume']
         }
         
-        # Column validation with fallback
+        # Validate and map columns
         final_columns = {}
         for standard_name, aliases in column_mapping.items():
             found = False
@@ -95,7 +99,7 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
         required_cols = ['open', 'high', 'low', 'close', 'volume']
         clean_df = pd.DataFrame(final_columns)[required_cols]
         
-        # Forward-fill missing values for crypto markets that never close
+        # Forward-fill missing values for crypto markets
         clean_df = clean_df.ffill().dropna()
         
         if clean_df.empty:
@@ -115,13 +119,12 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     
     df = df.copy()
     try:
-        # Validate presence of required columns
         required_cols = ['open', 'high', 'low', 'close', 'volume']
         missing = [col for col in required_cols if col not in df.columns]
         if missing:
             raise ValueError(f"Missing required columns: {missing}")
 
-        # Feature engineering pipeline
+        # Feature engineering calculations
         df['close_lag1'] = df['close'].shift(1)
         df['returns'] = df['close_lag1'].pct_change().fillna(0)
         df['log_returns'] = np.log(df['close_lag1']).diff().fillna(0)
@@ -129,14 +132,10 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         # Technical indicators
         windows = [20, 50, 100, 200]
         for window in windows:
-            # Moving averages
             df[f'sma_{window}'] = df['close_lag1'].rolling(window).mean()
             df[f'ema_{window}'] = df['close_lag1'].ewm(span=window, adjust=False).mean()
-            
-            # Volatility
             df[f'std_{window}'] = df['close_lag1'].rolling(window).std()
             
-            # RSI
             delta = df['close_lag1'].diff()
             gain = delta.clip(lower=0)
             loss = -delta.clip(upper=0)
@@ -148,15 +147,11 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
                 rs = avg_gain / avg_loss.replace(0, 1)
             df[f'rsi_{window}'] = 100 - (100 / (1 + rs))
 
-        # Modern volatility measure
         df['volatility'] = df['log_returns'].rolling(GARCH_WINDOW).std()
-        
-        # Momentum indicators
         for period in [3, 7, 14]:
             df[f'momentum_{period}'] = df['close_lag1'].pct_change(period)
             df[f'roc_{period}'] = (df['close_lag1'] / df['close_lag1'].shift(period) - 1)
         
-        # Target variable: future returns
         future_returns = df['close'].pct_change().shift(-1).to_numpy().ravel()
         df['target'] = pd.cut(
             future_returns,
@@ -165,7 +160,6 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
             ordered=False
         )
         
-        # Cleanup intermediate columns
         df = df.drop(columns=required_cols + ['close_lag1'])
         return df.dropna().reset_index(drop=True)
         
@@ -200,7 +194,6 @@ class TradingModel:
             tscv = TimeSeriesSplit(n_splits=3)
             self._validate_leakage(X)
             
-            # Feature selection
             self.feature_selector = RFECV(
                 estimator=GradientBoostingClassifier(),
                 step=1,
@@ -210,18 +203,15 @@ class TradingModel:
             self.feature_selector.fit(X, y)
             self.selected_features = X.columns[self.feature_selector.get_support()]
             
-            # Hyperparameter tuning
             study = optuna.create_study(direction='maximize')
             study.optimize(
                 lambda trial: self._objective(trial, X[self.selected_features.tolist()], y, tscv),
                 n_trials=MAX_TRIALS
             )
             
-            # Final model training
             self.model = GradientBoostingClassifier(**study.best_params)
             self.model.fit(X[self.selected_features.tolist()], y)
             
-            # Validation reporting
             y_pred = self.model.predict(X[self.selected_features.tolist()])
             st.subheader("Model Validation")
             st.text(classification_report(y, y_pred))
@@ -246,7 +236,6 @@ class TradingModel:
             X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
             y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
             
-            # Handle class imbalance
             rus = RandomUnderSampler(random_state=42)
             X_res, y_res = rus.fit_resample(X_train, y_train)
             

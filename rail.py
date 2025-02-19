@@ -1,4 +1,4 @@
-# crypto_trading_system.py (FIXED COLUMN ASSIGNMENT)
+# crypto_trading_system.py (FIXED COLUMN HANDLING)
 import logging
 import numpy as np
 import pandas as pd
@@ -48,43 +48,53 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
     lookback_days = 59 if interval in ['15m', '30m'] else 180
     
     try:
+        # Fetch data with different parameters
         df = yf.download(
             symbol, 
             start=end - timedelta(days=lookback_days),
             end=end,
             interval=interval,
             progress=False,
-            auto_adjust=False
+            auto_adjust=True
         )
         
-        # Flatten MultiIndex columns
+        # Handle MultiIndex columns
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = ['_'.join(col).strip() for col in df.columns.values]
         
-        # Clean and standardize column names
+        # Clean column names
         df.columns = [re.sub(r'\W+', '_', col).strip('_').lower() for col in df.columns]
         
-        # Handle known column aliases
-        column_precedence = {
-            'close': ['close', 'adj_close', 'adjusted_close'],
-            'volume': ['volume', 'adj_volume']
+        # Column name mapping with priority
+        column_mapping = {
+            'close': ['close', 'adj_close', 'adjusted_close', 'price', 'last'],
+            'open': ['open', 'opening_price'],
+            'high': ['high', 'day_high'],
+            'low': ['low', 'day_low'],
+            'volume': ['volume', 'vol', 'quantity']
         }
         
-        # Select preferred column names
+        # Find and rename columns
         final_columns = {}
-        for preferred, aliases in column_precedence.items():
+        for standard_name, aliases in column_mapping.items():
             for alias in aliases:
                 if alias in df.columns:
-                    final_columns[preferred] = df[alias]
+                    final_columns[standard_name] = df[alias]
                     break
-            if preferred not in final_columns:
-                raise ValueError(f"Missing {preferred} column")
+            else:
+                # Try partial match as last resort
+                matches = [col for col in df.columns if standard_name in col]
+                if matches:
+                    final_columns[standard_name] = df[matches[0]]
         
-        # Create clean dataframe with guaranteed single columns
-        clean_df = pd.DataFrame()
-        for col in ['open', 'high', 'low', 'close', 'volume']:
-            clean_df[col] = final_columns[col]
+        # Verify we have all required columns
+        required_cols = ['open', 'high', 'low', 'close', 'volume']
+        missing = [col for col in required_cols if col not in final_columns]
+        if missing:
+            raise ValueError(f"Missing columns after renaming: {missing}")
         
+        # Create clean dataframe
+        clean_df = pd.DataFrame({col: final_columns[col] for col in required_cols})
         return clean_df.reset_index(drop=True) if not clean_df.empty else pd.DataFrame()
         
     except Exception as e:
@@ -103,9 +113,8 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         if missing:
             raise ValueError(f"Missing required columns: {missing}")
 
-        # Ensure single column access
-        close_series = df['close'].squeeze()  # Convert to Series if needed
-        df['close_lag1'] = close_series.shift(1)
+        # Feature calculations
+        df['close_lag1'] = df['close'].shift(1)
         df['returns'] = df['close_lag1'].pct_change()
         df['log_returns'] = np.log(df['close_lag1']).diff()
         

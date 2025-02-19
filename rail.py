@@ -55,6 +55,8 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
             progress=False,
             auto_adjust=True
         )
+        # Ensure flat column index
+        df.columns = df.columns.str.replace(' ', '_')
         return df.reset_index(drop=True) if not df.empty else pd.DataFrame()
     except Exception as e:
         logging.error(f"Data fetch failed: {str(e)}")
@@ -71,6 +73,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         if not all(col in df.columns for col in required_cols):
             raise ValueError("Missing required price columns")
 
+        # Feature calculations
         df['Close_Lag1'] = df['Close'].shift(1)
         df['Returns'] = df['Close_Lag1'].pct_change()
         df['Log_Returns'] = np.log(df['Close_Lag1']).diff()
@@ -104,7 +107,9 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
             ordered=False
         )
         
+        # Ensure flat column names
         df = df.drop(columns=required_cols + ['Close_Lag1'])
+        df.columns = [str(col) for col in df.columns]
         return df.dropna().reset_index(drop=True)
         
     except Exception as e:
@@ -116,7 +121,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
 # ======================
 class TradingModel:
     def __init__(self):
-        self.selected_features = pd.Index([])
+        self.selected_features = []
         self.model = None
         self.feature_selector = None
 
@@ -138,6 +143,9 @@ class TradingModel:
             tscv = TimeSeriesSplit(n_splits=3)
             self._validate_leakage(X)
             
+            # Convert to flat column names
+            X.columns = [str(col) for col in X.columns]
+            
             self.feature_selector = RFECV(
                 estimator=GradientBoostingClassifier(),
                 step=1,
@@ -145,7 +153,7 @@ class TradingModel:
                 min_features_to_select=MIN_FEATURES
             )
             self.feature_selector.fit(X, y)
-            self.selected_features = X.columns[self.feature_selector.get_support()]
+            self.selected_features = X.columns[self.feature_selector.get_support()].tolist()
             
             study = optuna.create_study(direction='maximize')
             study.optimize(
@@ -190,25 +198,24 @@ class TradingModel:
         return np.mean(scores)
 
     def predict(self, X: pd.DataFrame) -> float:
-        """Fixed prediction with proper MultiIndex handling"""
+        """Robust prediction with proper type handling"""
         try:
-            # Check for empty features using pandas' empty property
-            if self.selected_features.empty or X.empty:
+            # Convert to flat column names
+            X.columns = [str(col) for col in X.columns]
+            
+            if not self.selected_features or X.empty:
                 return 0.5
                 
             if not hasattr(self, 'model') or self.model is None:
                 return 0.5
                 
-            # Convert Index to list for safe feature checking
-            required_features = self.selected_features.tolist()
-            missing_features = [f for f in required_features if f not in X.columns]
+            missing_features = [f for f in self.selected_features if f not in X.columns]
             
-            # Check missing features using length comparison
-            if len(missing_features) > 0:  # Fix: Use explicit length check
+            if len(missing_features) > 0:
                 logging.error(f"Missing features: {missing_features}")
                 return 0.5
                 
-            return self.model.predict_proba(X[required_features])[0][2]
+            return self.model.predict_proba(X[self.selected_features])[0][2]
             
         except Exception as e:
             logging.error(f"Prediction failed: {str(e)}")

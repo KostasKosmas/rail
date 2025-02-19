@@ -1,4 +1,4 @@
-# crypto_trading_system.py
+# crypto_trading_system.py (FINAL CORRECTED VERSION)
 import logging
 import numpy as np
 import pandas as pd
@@ -67,31 +67,39 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     
     df = df.copy()
     try:
+        # Validate required columns
+        required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+        if not all(col in df.columns for col in required_cols):
+            raise ValueError("Missing required price columns in DataFrame")
+
         # Calculate lagged price changes
         df['Close_Lag1'] = df['Close'].shift(1)
         df['Returns'] = df['Close_Lag1'].pct_change()
         df['Log_Returns'] = np.log(df['Close_Lag1']).diff()
         
-        # Technical Indicators (properly lagged)
+        # Technical Indicators
         windows = [20, 50, 100, 200]
         for window in windows:
+            # Simple Moving Averages
             df[f'SMA_{window}'] = df['Close_Lag1'].rolling(window).mean()
             df[f'STD_{window}'] = df['Close_Lag1'].rolling(window).std()
             
-            # Revised RSI calculation
+            # RSI Calculation (fixed dimensionality)
             delta = df['Close_Lag1'].diff()
             gain = delta.clip(lower=0)
             loss = -delta.clip(upper=0)
             
-            avg_gain = gain.rolling(window, min_periods=1).mean()
-            avg_loss = loss.rolling(window, min_periods=1).mean()
+            avg_gain = gain.rolling(window, min_periods=1).mean().values
+            avg_loss = loss.rolling(window, min_periods=1).mean().values
             
-            # Handle division by zero
-            avg_loss = avg_loss.replace(0, 1)
-            rs = avg_gain / avg_loss
+            # Handle division by zero and ensure 1D array
+            with np.errstate(divide='ignore', invalid='ignore'):
+                rs = np.divide(avg_gain, avg_loss, where=avg_loss!=0)
+                rs[avg_loss == 0] = 1  # Handle zero division cases
+                
             rsi = 100 - (100 / (1 + rs))
-            df[f'RSI_{window}'] = rsi
-        
+            df[f'RSI_{window}'] = rsi.astype(np.float64)
+
         # Volatility Features
         df['Volatility'] = df['Log_Returns'].rolling(GARCH_WINDOW).std()
         
@@ -99,18 +107,21 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         for period in [3, 7, 14]:
             df[f'Momentum_{period}'] = df['Close_Lag1'].pct_change(period)
         
-        # Target Engineering (future returns)
+        # Target Engineering
         future_returns = df['Close'].pct_change().shift(-1)
-        df['Target'] = pd.cut(future_returns,
-                            bins=[-np.inf, -0.01, 0.01, np.inf],
-                            labels=[0, 1, 2])
+        df['Target'] = pd.cut(
+            future_returns,
+            bins=[-np.inf, -0.01, 0.01, np.inf],
+            labels=[0, 1, 2],
+            ordered=False
+        )
         
-        # Remove raw price data
-        df = df.drop(columns=['Open', 'High', 'Low', 'Close', 'Volume', 'Close_Lag1'])
-        
+        # Cleanup
+        df = df.drop(columns=required_cols + ['Close_Lag1'])
         return df.dropna().reset_index(drop=True)
+        
     except Exception as e:
-        logging.error(f"Feature engineering failed: {str(e)}")
+        logging.error(f"Feature engineering failed: {str(e)}", exc_info=True)
         return pd.DataFrame()
 
 # ======================
@@ -121,7 +132,6 @@ class TradingModel:
         self.selected_features = []
         self.model = None
         self.feature_selector = None
-        self.class_weights = None
 
     def _validate_leakage(self, X: pd.DataFrame, y: pd.Series):
         """Ensure no future data in features"""
@@ -129,22 +139,12 @@ class TradingModel:
             if any(X[col].diff().shift(-1).fillna(0) != 0):
                 raise ValueError(f"Leakage detected in {col}")
 
-    def _diagnostic_report(self, X: pd.DataFrame, y: pd.Series):
-        """Generate data health report"""
-        st.subheader("Data Health Report")
-        class_dist = y.value_counts(normalize=True)
-        st.write("**Class Distribution:**")
-        st.write(class_dist)
-        corr_matrix = X.corr().abs()
-        avg_corr = corr_matrix.values[np.triu_indices_from(corr_matrix, k=1)].mean()
-        st.write(f"**Average Feature Correlation:** {avg_corr:.2f}")
-
     def optimize_model(self, X: pd.DataFrame, y: pd.Series):
         try:
             tscv = TimeSeriesSplit(n_splits=3)
             self._validate_leakage(X, y)
-            self._diagnostic_report(X, y)
             
+            # Feature Selection
             self.feature_selector = RFECV(
                 estimator=GradientBoostingClassifier(),
                 step=1,
@@ -152,28 +152,29 @@ class TradingModel:
                 min_features_to_select=MIN_FEATURES
             )
             self.feature_selector.fit(X, y)
-            self.selected_features = X.columns[self.feature_selector.get_support()].tolist()
+            self.selected_features = X.columns[self.feature_selector.get_support()]
             
+            # Hyperparameter Optimization
             study = optuna.create_study(direction='maximize')
             study.optimize(
                 lambda trial: self._objective(trial, X[self.selected_features], y, tscv),
                 n_trials=MAX_TRIALS
             )
             
-            best_params = study.best_params
-            self.model = GradientBoostingClassifier(**best_params)
+            # Final Model Training
+            self.model = GradientBoostingClassifier(**study.best_params)
             self.model.fit(X[self.selected_features], y)
             
+            # Validation Report
             y_pred = self.model.predict(X[self.selected_features])
-            st.subheader("Validation Report")
-            st.write("**Classification Report:**")
+            st.subheader("Model Validation")
             st.text(classification_report(y, y_pred))
-            st.write("**Confusion Matrix:**")
-            st.write(confusion_matrix(y, y_pred))
+            st.write("Confusion Matrix:")
+            st.dataframe(confusion_matrix(y, y_pred))
             
         except Exception as e:
-            logging.error(f"Optimization failed: {str(e)}")
-            raise
+            logging.error(f"Model training failed: {str(e)}", exc_info=True)
+            st.error("Model training failed. Check logs for details.")
 
     def _objective(self, trial, X: pd.DataFrame, y: pd.Series, cv):
         params = {
@@ -194,18 +195,14 @@ class TradingModel:
             
             model = GradientBoostingClassifier(**params)
             model.fit(X_res, y_res)
-            
-            preds = model.predict(X_test)
-            scores.append(f1_score(y_test, preds, average='weighted'))
+            scores.append(f1_score(y_test, model.predict(X_test), average='weighted'))
             
         return np.mean(scores)
 
     def predict(self, X: pd.DataFrame) -> float:
         if not self.selected_features or X.empty:
             return 0.5
-            
-        X_sel = X[self.selected_features]
-        return self.model.predict_proba(X_sel)[0][2]
+        return self.model.predict_proba(X[self.selected_features])[0][2]
 
 # ======================
 # MAIN INTERFACE
@@ -225,23 +222,21 @@ def main():
             
         with col2:
             current_price = raw_data['Close'].iloc[-1].item()
-            current_vol = processed_data['Volatility'].iloc[-1].item()
+            current_vol = processed_data['Volatility'].iloc[-1].item() if 'Volatility' in processed_data else 0
             st.metric("Current Price", f"${current_price:,.2f}")
             st.metric("Volatility", f"{current_vol:.2%}")
 
     if st.sidebar.button("🚀 Train Model") and not processed_data.empty:
         try:
             model = TradingModel()
-            X = processed_data.drop(['Target'], axis=1)
+            X = processed_data.drop(columns=['Target'])
             y = processed_data['Target']
             
-            if any(col in X.columns for col in ['Open', 'High', 'Low', 'Close', 'Volume']):
-                raise ValueError("Raw price data detected in features!")
-            
-            with st.spinner("Training model..."):
+            with st.spinner("Training AI model..."):
                 model.optimize_model(X, y)
                 st.session_state.model = model
                 st.session_state.last_trained = datetime.now()
+                st.success("Model trained successfully!")
                 
         except Exception as e:
             st.error(f"Training failed: {str(e)}")
@@ -251,7 +246,7 @@ def main():
         confidence = st.session_state.model.predict(latest_data)
         
         st.subheader("Trading Signal")
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
         col1.metric("Confidence Score", f"{confidence:.2%}")
         
         current_vol = processed_data['Volatility'].iloc[-1].item()

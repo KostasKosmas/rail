@@ -108,7 +108,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         for window in windows:
             df[f'sma_{window}'] = df['close'].rolling(window).mean()
             df[f'rsi_{window}'] = 100 - (100 / (1 + (df['close'].diff().clip(lower=0).rolling(window).mean() / 
-                                         df['close'].diff().clip(upper=0).abs().rolling(window).mean()))
+                                         df['close'].diff().clip(upper=0).abs().rolling(window).mean())))
         
         df['volatility'] = df['returns'].rolling(GARCH_WINDOW).std()
         df['target'] = np.where(df['close'].pct_change().shift(-1) > 0, 1, 0)

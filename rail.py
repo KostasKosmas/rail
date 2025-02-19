@@ -223,7 +223,7 @@ class TradingModel:
             
             smote = SMOTE(
                 random_state=42,
-                k_neighbors=min(5, min(y.value_counts()) - 1)
+                k_neighbors=min(5, min(y.value_counts()) - 1))
             X_res, y_res = smote.fit_resample(X_sel, y)
             
             best_params = st.session_state.study.best_params

@@ -1,17 +1,16 @@
 # crypto_trading_system.py
 import logging
-import time
 import numpy as np
 import pandas as pd
 import yfinance as yf
 import streamlit as st
 import optuna
+from sklearn.base import clone
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.feature_selection import SelectFromModel
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.metrics import f1_score, classification_report
-from imblearn.over_sampling import SMOTE
+from sklearn.feature_selection import RFECV
+from sklearn.metrics import classification_report, confusion_matrix, precision_recall_curve
+from imblearn.under_sampling import RandomUnderSampler
 from datetime import datetime, timedelta
 import warnings
 from sklearn.cluster import KMeans
@@ -27,7 +26,6 @@ MAX_TRIALS = 50
 GARCH_WINDOW = 14
 MIN_FEATURES = 7
 VOLATILITY_CLUSTERS = 3
-MIN_SAMPLES_FOR_SMOTE = 10
 
 warnings.filterwarnings("ignore", category=UserWarning)
 logging.basicConfig(level=logging.INFO)
@@ -42,13 +40,9 @@ if 'model' not in st.session_state:
     st.session_state.model = None
 if 'last_trained' not in st.session_state:
     st.session_state.last_trained = None
-if 'study' not in st.session_state:
-    st.session_state.study = None
-if 'trials_completed' not in st.session_state:
-    st.session_state.trials_completed = 0
 
 # ======================
-# DATA PIPELINE
+# DATA PIPELINE (REVISED)
 # ======================
 @st.cache_data(ttl=300, show_spinner="Fetching market data...")
 def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
@@ -76,29 +70,28 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     
     df = df.copy()
     try:
+        # Strictly time-lagged features only
         df['Returns'] = df['Close'].pct_change()
         df['Log_Returns'] = np.log(df['Close']).diff()
         
+        # Technical Indicators (lagged)
         windows = [20, 50, 100, 200]
         for window in windows:
-            df[f'SMA_{window}'] = df['Close'].rolling(window).mean()
-            df[f'STD_{window}'] = df['Close'].rolling(window).std()
+            df[f'SMA_{window}'] = df['Close'].shift(1).rolling(window).mean()
+            df[f'STD_{window}'] = df['Close'].shift(1).rolling(window).std()
             df[f'RSI_{window}'] = 100 - (100 / (1 + (
-                df['Close'].diff().clip(lower=0).rolling(window).mean() / 
-                df['Close'].diff().clip(upper=0).abs().rolling(window).mean()
+                df['Close'].diff().clip(lower=0).shift(1).rolling(window).mean() / 
+                df['Close'].diff().clip(upper=0).abs().shift(1).rolling(window).mean()
             )))
         
-        df['Volatility'] = df['Log_Returns'].rolling(GARCH_WINDOW).std()
+        # Volatility Features
+        df['Volatility'] = df['Log_Returns'].shift(1).rolling(GARCH_WINDOW).std()
         
-        vol_series = df['Volatility'].dropna()
-        if len(vol_series) >= VOLATILITY_CLUSTERS:
-            kmeans = KMeans(n_clusters=VOLATILITY_CLUSTERS)
-            clusters = kmeans.fit_predict(vol_series.values.reshape(-1, 1))
-            df['Vol_Cluster'] = pd.Series(clusters, index=vol_series.index).reindex(df.index, fill_value=-1)
-        
+        # Momentum Features (lagged)
         for period in [3, 7, 14]:
-            df[f'Momentum_{period}'] = df['Close'].pct_change(period)
+            df[f'Momentum_{period}'] = df['Close'].pct_change(period).shift(1)
         
+        # Target Engineering (strictly future)
         df['Target'] = pd.cut(df['Returns'].shift(-1), 
                             bins=[-np.inf, -0.01, 0.01, np.inf],
                             labels=[0, 1, 2])
@@ -109,153 +102,124 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
 # ======================
-# MODEL PIPELINE
+# MODEL PIPELINE (REVISED)
 # ======================
 class TradingModel:
     def __init__(self):
         self.selected_features = []
-        self.model_rf = RandomForestClassifier(class_weight='balanced', random_state=42)
-        self.model_gb = GradientBoostingClassifier(random_state=42)
-        self.calibrated_rf = None
-        self.calibrated_gb = None
+        self.model = None
+        self.feature_selector = None
+        self.class_weights = None
 
-    def _safe_feature_selection(self, X_train, y_train):
-        try:
-            selector = SelectFromModel(
-                GradientBoostingClassifier(n_estimators=100),
-                threshold="1.25*median"
-            )
-            selector.fit(X_train, y_train)
-            features = X_train.columns[selector.get_support()].tolist()
-            return features if len(features) >= MIN_FEATURES else X_train.columns[:MIN_FEATURES].tolist()
-        except Exception as e:
-            logging.error(f"Feature selection failed: {str(e)}")
-            return X_train.columns[:MIN_FEATURES].tolist()
+    def _validate_leakage(self, X: pd.DataFrame, y: pd.Series):
+        """Ensure no future data in features"""
+        for col in X.columns:
+            if any(X[col].diff().shift(-1).fillna(0) != 0):
+                raise ValueError(f"Potential leakage detected in {col}")
 
-    def optimize_models(self, X: pd.DataFrame, y: pd.Series):
+    def _diagnostic_report(self, X: pd.DataFrame, y: pd.Series):
+        """Generate data health report"""
+        st.subheader("Data Health Report")
+        
+        # Class distribution
+        class_dist = y.value_counts(normalize=True)
+        st.write("**Class Distribution:**")
+        st.write(class_dist)
+        
+        # Feature correlation
+        corr_matrix = X.corr().abs()
+        avg_corr = corr_matrix.values[np.triu_indices_from(corr_matrix, k=1)].mean()
+        st.write(f"**Average Feature Correlation:** {avg_corr:.2f}")
+        
+        # Feature importance baseline
+        baseline_model = RandomForestClassifier(n_estimators=100, random_state=42)
+        baseline_model.fit(X, y)
+        importances = pd.Series(baseline_model.feature_importances_, index=X.columns)
+        st.write("**Top 10 Features (Baseline):**")
+        st.write(importances.sort_values(ascending=False).head(10))
+
+    def optimize_model(self, X: pd.DataFrame, y: pd.Series):
         try:
             tscv = TimeSeriesSplit(n_splits=3)
             
-            if not st.session_state.study:
-                st.session_state.study = optuna.create_study(direction='maximize')
-                st.session_state.trials_completed = 0
-
-            def objective(trial):
-                scores = []
-                for train_idx, test_idx in tscv.split(X):
-                    X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
-                    y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
-                    
-                    # Per-fold feature selection
-                    features = self._safe_feature_selection(X_train, y_train)
-                    X_train = X_train[features]
-                    X_test = X_test[features]
-                    
-                    if len(X_train) < MIN_SAMPLES_FOR_SMOTE:
-                        continue
-                        
-                    class_counts = y_train.value_counts()
-                    if len(class_counts) < 1:
-                        continue
-                        
-                    minority_class_count = class_counts.min()
-                    safe_k_neighbors = min(5, minority_class_count - 1)
-                    if safe_k_neighbors < 1:
-                        continue
-                        
-                    try:
-                        smote = SMOTE(k_neighbors=safe_k_neighbors, random_state=42)
-                        X_res, y_res = smote.fit_resample(X_train, y_train)
-                    except:
-                        continue
-                    
-                    rf_params = {
-                        'n_estimators': trial.suggest_int('rf_n_estimators', 300, 1000),
-                        'max_depth': trial.suggest_int('rf_max_depth', 15, 40),
-                        'min_samples_split': trial.suggest_int('rf_min_samples_split', 10, 30)
-                    }
-                    
-                    gb_params = {
-                        'n_estimators': trial.suggest_int('gb_n_estimators', 300, 1000),
-                        'learning_rate': trial.suggest_float('gb_learning_rate', 0.05, 0.3, log=True),
-                        'max_depth': trial.suggest_int('gb_max_depth', 5, 15)
-                    }
-                    
-                    try:
-                        rf = RandomForestClassifier(**rf_params).fit(X_res, y_res)
-                        gb = GradientBoostingClassifier(**gb_params).fit(X_res, y_res)
-                        
-                        preds = 0.6 * rf.predict_proba(X_test) + 0.4 * gb.predict_proba(X_test)
-                        scores.append(f1_score(y_test, np.argmax(preds, axis=1), average='weighted'))
-                    except:
-                        pass
-                
-                return np.mean(scores) if scores else 0.0
-
-            progress_bar = st.progress(0)
-            status_text = st.empty()
+            # Data validation
+            self._validate_leakage(X, y)
+            self._diagnostic_report(X, y)
             
-            while st.session_state.trials_completed < MAX_TRIALS:
-                trial = st.session_state.study.ask()
-                value = objective(trial)
-                st.session_state.study.tell(trial, value)
-                st.session_state.trials_completed += 1
-                
-                # Update UI
-                progress = st.session_state.trials_completed / MAX_TRIALS
-                progress_bar.progress(progress)
-                status_text.markdown(f"""
-                    **Optimization Progress**  
-                    Trials Completed: {st.session_state.trials_completed}/{MAX_TRIALS}  
-                    Best F1 Score: {st.session_state.study.best_value:.2%}
-                """)
-                time.sleep(0.1)
-
-            self.selected_features = self._safe_feature_selection(X, y)
+            # Class balancing
+            self.class_weights = dict(1 / (y.value_counts(normalize=True) * len(y) / len(np.unique(y))))
+            
+            # Feature selection
+            self.feature_selector = RFECV(
+                estimator=RandomForestClassifier(n_estimators=100, 
+                                                class_weight=self.class_weights),
+                step=1,
+                cv=tscv,
+                min_features_to_select=MIN_FEATURES
+            )
+            self.feature_selector.fit(X, y)
+            self.selected_features = X.columns[self.feature_selector.get_support()].tolist()
+            
+            # Optimization
+            study = optuna.create_study(direction='maximize')
+            study.optimize(
+                lambda trial: self._objective(trial, X[self.selected_features], y, tscv),
+                n_trials=MAX_TRIALS
+            )
+            
+            # Train final model
+            best_params = study.best_params
+            self.model = GradientBoostingClassifier(**best_params)
+            self.model.fit(X[self.selected_features], y)
+            
+            # Validation
+            y_pred = self.model.predict(X[self.selected_features])
+            st.subheader("Validation Report")
+            st.write("**Classification Report:**")
+            st.text(classification_report(y, y_pred))
+            st.write("**Confusion Matrix:**")
+            st.write(confusion_matrix(y, y_pred))
             
         except Exception as e:
             logging.error(f"Optimization failed: {str(e)}")
             raise
 
-    def train(self, X: pd.DataFrame, y: pd.Series):
-        try:
-            X_sel = X[self.selected_features]
+    def _objective(self, trial, X: pd.DataFrame, y: pd.Series, cv):
+        params = {
+            'n_estimators': trial.suggest_int('n_estimators', 100, 500),
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+            'max_depth': trial.suggest_int('max_depth', 3, 15),
+            'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
+            'subsample': trial.suggest_float('subsample', 0.5, 1.0)
+        }
+        
+        scores = []
+        for train_idx, test_idx in cv.split(X):
+            X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+            y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
             
-            smote = SMOTE(
-                random_state=42,
-                k_neighbors=min(5, min(y.value_counts()) - 1))
-            X_res, y_res = smote.fit_resample(X_sel, y)
+            # Handle imbalance
+            rus = RandomUnderSampler(random_state=42)
+            X_res, y_res = rus.fit_resample(X_train, y_train)
             
-            best_params = st.session_state.study.best_params
-            rf_params = {k[3:]: v for k, v in best_params.items() if k.startswith('rf_')}
-            gb_params = {k[3:]: v for k, v in best_params.items() if k.startswith('gb_')}
+            model = GradientBoostingClassifier(**params)
+            model.fit(X_res, y_res)
             
-            self.model_rf.set_params(**rf_params).fit(X_res, y_res)
-            self.model_gb.set_params(**gb_params).fit(X_res, y_res)
+            # Conservative scoring
+            preds = model.predict(X_test)
+            scores.append(f1_score(y_test, preds, average='weighted'))
             
-            self.calibrated_rf = CalibratedClassifierCV(self.model_rf, cv=TimeSeriesSplit(3))
-            self.calibrated_gb = CalibratedClassifierCV(self.model_gb, cv=TimeSeriesSplit(3))
-            self.calibrated_rf.fit(X_sel, y)
-            self.calibrated_gb.fit(X_sel, y)
-        except Exception as e:
-            logging.error(f"Training failed: {str(e)}")
-            raise
+        return np.mean(scores)
 
     def predict(self, X: pd.DataFrame) -> float:
-        try:
-            if not self.selected_features or X.empty:
-                return 0.5
-                
-            X_sel = X[self.selected_features]
-            prob_rf = self.calibrated_rf.predict_proba(X_sel)
-            prob_gb = self.calibrated_gb.predict_proba(X_sel)
-            return (0.6 * prob_rf + 0.4 * prob_gb)[0][2]
-        except Exception as e:
-            logging.error(f"Prediction failed: {str(e)}")
+        if not self.selected_features or X.empty:
             return 0.5
+            
+        X_sel = X[self.selected_features]
+        return self.model.predict_proba(X_sel)[0][2]
 
 # ======================
-# INTERFACE
+# INTERFACE (REVISED)
 # ======================
 def main():
     st.sidebar.header("Settings")
@@ -282,30 +246,13 @@ def main():
             X = processed_data.drop(['Target'], axis=1)
             y = processed_data['Target']
             
-            if st.session_state.study and st.session_state.trials_completed < MAX_TRIALS:
-                st.warning("Resuming previous optimization...")
-            
-            with st.spinner("Optimizing trading models..."):
-                model.optimize_models(X, y)
-                model.train(X, y)
+            with st.spinner("Training model with leakage checks..."):
+                model.optimize_model(X, y)
                 st.session_state.model = model
                 st.session_state.last_trained = datetime.now()
                 
-                st.success(f"""
-                    Model training complete!  
-                    Best Validation F1: {st.session_state.study.best_value:.2%}  
-                    Trials Completed: {st.session_state.trials_completed}
-                """)
-                
-                # Show classification report
-                X_sel = X[model.selected_features]
-                preds = model.predict(X_sel)
-                st.text(classification_report(y, np.argmax(preds, axis=1)))
         except Exception as e:
             st.error(f"Training failed: {str(e)}")
-        finally:
-            st.session_state.trials_completed = 0
-            st.session_state.study = None
 
     if st.session_state.model and not processed_data.empty:
         latest_data = processed_data.drop(columns=['Target']).iloc[[-1]]

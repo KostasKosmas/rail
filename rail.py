@@ -1,4 +1,4 @@
-# crypto_trading_system.py (FINAL FIXED VERSION)
+# crypto_trading_system.py (FINAL WORKING VERSION)
 import logging
 import numpy as np
 import pandas as pd
@@ -37,6 +37,7 @@ if 'model' not in st.session_state:
 @st.cache_data(ttl=300, show_spinner="Fetching market data...")
 def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
     try:
+        # Fetch data with auto_adjust to handle different column names
         df = yf.download(
             symbol,
             period="60d" if interval in ['15m', '30m'] else "180d",
@@ -45,21 +46,40 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
             auto_adjust=True
         )
         
-        # Flatten MultiIndex columns
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = ['_'.join(col).strip() for col in df.columns.values]
+        # Clean and normalize column names
+        df.columns = [re.sub(r'\W+', '_', col.lower().strip()) for col in df.columns]
         
-        # Clean column names
-        df.columns = [re.sub(r'\W+', '_', col).strip('_').lower() for col in df.columns]
+        # Handle symbol-specific suffixes
+        symbol_parts = symbol.lower().replace('-', '_').split('_')
+        new_columns = []
+        for col in df.columns:
+            # Remove symbol parts from column names
+            parts = [p for p in col.split('_') if p not in symbol_parts]
+            new_columns.append('_'.join(parts).strip('_'))
         
-        # Column validation
-        required_cols = ['open', 'high', 'low', 'close', 'volume']
-        missing = [col for col in required_cols if col not in df.columns]
-        if missing:
-            st.error(f"Missing columns: {missing}")
-            return pd.DataFrame()
-            
-        return df[required_cols].ffill().dropna().reset_index(drop=True)
+        df.columns = new_columns
+        
+        # Column mapping with priority for standard names
+        column_map = {
+            'open': ['open', 'adj_open'],
+            'high': ['high', 'adj_high'],
+            'low': ['low', 'adj_low'],
+            'close': ['close', 'adj_close', 'adjusted_close'],
+            'volume': ['volume', 'adj_volume', 'adjusted_volume']
+        }
+        
+        # Build final columns with fallbacks
+        final_cols = {}
+        for standard, aliases in column_map.items():
+            for alias in aliases:
+                if alias in df.columns:
+                    final_cols[standard] = df[alias]
+                    break
+            else:
+                st.error(f"Missing required column: {standard}")
+                return pd.DataFrame()
+        
+        return pd.DataFrame(final_cols)[['open', 'high', 'low', 'close', 'volume']].ffill().dropna()
         
     except Exception as e:
         logging.error(f"Data fetch failed: {str(e)}")
@@ -74,19 +94,20 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         df['close_lag1'] = df['close'].shift(1)
         df['returns'] = df['close'].pct_change()
         
-        # Feature calculations
+        # Technical indicators
         windows = [20, 50, 100]
         for window in windows:
             df[f'sma_{window}'] = df['close'].rolling(window).mean()
             delta = df['close'].diff()
             gain = delta.clip(lower=0)
             loss = -delta.clip(upper=0)
-            rs = gain.rolling(window).mean() / loss.rolling(window).mean()
+            rs = (gain.rolling(window).mean() / 
+                 loss.rolling(window).mean().replace(0, 1))
             df[f'rsi_{window}'] = 100 - (100 / (1 + rs))
         
         df['volatility'] = df['returns'].rolling(GARCH_WINDOW).std()
         df['target'] = np.where(df['close'].pct_change().shift(-1) > 0.01, 2, 
-                              np.where(df['close'].pct_change().shift(-1) < -0.01, 0, 1))
+                        np.where(df['close'].pct_change().shift(-1) < -0.01, 0, 1))
         
         return df.dropna().drop(columns=['open', 'high', 'low', 'close', 'volume', 'close_lag1'])
     
@@ -97,25 +118,22 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
 # Model Pipeline
 class TradingModel:
     def __init__(self):
-        self.selected_features = []  # Store as list
+        self.selected_features = []
         self.model = None
-        self.selector = None
 
     def optimize_model(self, X: pd.DataFrame, y: pd.Series):
         try:
             tscv = TimeSeriesSplit(n_splits=3)
             
             # Feature selection
-            self.selector = RFECV(
+            selector = RFECV(
                 GradientBoostingClassifier(),
                 step=1,
                 cv=tscv,
                 min_features_to_select=MIN_FEATURES
             )
-            self.selector.fit(X, y)
-            
-            # Convert to list to avoid Index issues
-            self.selected_features = X.columns[self.selector.get_support()].tolist()
+            selector.fit(X, y)
+            self.selected_features = X.columns[selector.get_support()].tolist()
             
             # Hyperparameter tuning
             study = optuna.create_study(direction='maximize')
@@ -129,7 +147,7 @@ class TradingModel:
             self.model.fit(X[self.selected_features], y)
             
             # Validation
-            st.write("Model Report:")
+            st.write("Model Performance:")
             st.text(classification_report(y, self.model.predict(X[self.selected_features])))
             
         except Exception as e:
@@ -159,10 +177,8 @@ class TradingModel:
 
     def predict(self, X: pd.DataFrame) -> float:
         try:
-            # Explicit list-based checks
             if not self.selected_features or X.empty:
                 return 0.5
-                
             return self.model.predict_proba(X[self.selected_features])[0][2]
         except Exception as e:
             logging.error(f"Prediction error: {str(e)}")
@@ -176,7 +192,7 @@ def main():
     raw_data = fetch_data(symbol, PRIMARY_INTERVAL)
     processed_data = calculate_features(raw_data)
     
-    if not processed_data.empty:
+    if not raw_data.empty and not processed_data.empty:
         col1, col2 = st.columns([3, 1])
         with col1:
             st.subheader(f"{symbol} Price Chart")
@@ -203,11 +219,11 @@ def main():
         col1.metric("Confidence Score", f"{confidence:.2%}")
         
         if confidence > TRADE_THRESHOLD_BUY:
-            col2.success("STRONG BUY SIGNAL")
+            col2.success("STRONG BUY SIGNAL 🚀")
         elif confidence < TRADE_THRESHOLD_SELL:
-            col2.error("STRONG SELL SIGNAL")
+            col2.error("STRONG SELL SIGNAL 🔻")
         else:
-            col2.info("NEUTRAL POSITION")
+            col2.info("NEUTRAL POSITION 🛑")
 
 if __name__ == "__main__":
     main()

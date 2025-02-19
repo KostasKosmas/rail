@@ -47,41 +47,32 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
     lookback_days = 59 if interval in ['15m', '30m'] else 180
     
     try:
+        # Fetch data without auto-adjust to get raw columns
         df = yf.download(
             symbol, 
             start=end - timedelta(days=lookback_days),
             end=end,
             interval=interval,
             progress=False,
-            auto_adjust=True
+            auto_adjust=False  # Changed from True to preserve column names
         )
         
-        # Handle column names
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = ['_'.join(col).strip() for col in df.columns.values]
-        else:
-            df.columns = df.columns.str.replace(' ', '_')
-        
-        # Ensure required columns exist
-        column_aliases = {
-            'Close': ['Close', 'Adj_Close', 'Adjusted_Close'],
-            'Open': ['Open', 'Open_'],
-            'High': ['High', 'High_'],
-            'Low': ['Low', 'Low_'],
-            'Volume': ['Volume', 'Vol']
+        # Standardize column names
+        column_mapping = {
+            'Adj Close': 'Close',
+            'Adj_Close': 'Close',
+            'Adjusted Close': 'Close',
+            'Adj Volume': 'Volume',
+            'Adj_Volume': 'Volume'
         }
+        df = df.rename(columns=column_mapping)
+        df.columns = df.columns.str.replace(' ', '_')
         
-        # Rename columns using aliases
-        for standard_name, aliases in column_aliases.items():
-            for alias in aliases:
-                if alias in df.columns and standard_name not in df.columns:
-                    df.rename(columns={alias: standard_name}, inplace=True)
-                    break
-        
+        # Verify required columns
         required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
         missing = [col for col in required_cols if col not in df.columns]
         if missing:
-            raise ValueError(f"Missing columns: {missing}")
+            raise ValueError(f"Missing columns after renaming: {missing}")
             
         return df.reset_index(drop=True) if not df.empty else pd.DataFrame()
         

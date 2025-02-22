@@ -6,6 +6,7 @@ import yfinance as yf
 import streamlit as st
 import plotly.express as px
 import optuna
+import pandas_ta as ta
 from xgboost import XGBClassifier
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.feature_selection import RFECV
@@ -14,27 +15,25 @@ from imblearn.over_sampling import SMOTE
 from arch import arch_model
 from tqdm import tqdm
 import warnings
-import talib
-from sklearn.preprocessing import label_binarize
 import shap
+from sklearn.preprocessing import label_binarize
 
 # Configuration
 DEFAULT_SYMBOL = 'BTC-USD'
-PRIMARY_INTERVAL = '5m'  # Increased resolution
-TRADE_THRESHOLD_BUY = 0.60  # Stricter thresholds
+PRIMARY_INTERVAL = '15m'
+TRADE_THRESHOLD_BUY = 0.60
 TRADE_THRESHOLD_SELL = 0.40
-MAX_TRIALS = 50  # More thorough optimization
+MAX_TRIALS = 50
 GARCH_WINDOW = 21
 MIN_FEATURES = 10
-MIN_SAMPLES_PER_CLASS = 100
-HOLD_LOOKAHEAD = 6  # Increased prediction window
+HOLD_LOOKAHEAD = 6
 
 warnings.filterwarnings("ignore", category=UserWarning)
 logging.basicConfig(level=logging.INFO)
 
 # Streamlit UI
 st.set_page_config(page_title="AI Trading System", layout="wide")
-st.title("🚀 Enhanced Cryptocurrency Trading System")
+st.title("🚀 Pandas-TA Trading System")
 
 if 'model' not in st.session_state:
     st.session_state.model = None
@@ -44,111 +43,77 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
     try:
         df = yf.download(
             symbol,
-            period="180d",  # Longer history
+            period="180d",
             interval=interval,
             progress=False,
             auto_adjust=True
         )
-        
-        # Process column names
-        new_columns = []
-        for col in df.columns:
-            if isinstance(col, tuple):
-                col_name = col[0].lower()
-            else:
-                col_name = str(col).lower()
-            new_columns.append(col_name.replace(' ', '_'))
-        
-        df.columns = new_columns
-        required_cols = {'open', 'high', 'low', 'close', 'volume'}
-        
-        if not required_cols.issubset(df.columns):
-            missing = required_cols - set(df.columns)
-            st.error(f"Missing columns: {', '.join(missing)}")
-            return pd.DataFrame()
-            
-        return df[list(required_cols)].ffill().dropna()
-    
+        df.columns = [col.lower() for col in df.columns]
+        return df[['open', 'high', 'low', 'close', 'volume']].ffill().dropna()
     except Exception as e:
-        logging.error(f"Data fetch failed: {str(e)}", exc_info=True)
+        logging.error(f"Data fetch failed: {str(e)}")
         return pd.DataFrame()
 
-def calculate_advanced_features(df: pd.DataFrame) -> pd.DataFrame:
+def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     try:
         df = df.copy()
         
-        # Price Transformations
+        # Price transformations
         df['returns'] = df['close'].pct_change()
         df['log_returns'] = np.log(df['close']/df['close'].shift(1))
         
-        # Volatility Features
+        # Momentum indicators
+        df['rsi_14'] = ta.rsi(df['close'], length=14)
+        macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
+        df['macd'] = macd['MACD_12_26_9']
+        df['macd_signal'] = macd['MACDs_12_26_9']
+        df['adx_14'] = ta.adx(df['high'], df['low'], df['close'], length=14)['ADX_14']
+        
+        # Volatility features
+        df['atr_14'] = ta.atr(df['high'], df['low'], df['close'], length=14)
         df['volatility_21'] = df['returns'].rolling(21).std()
-        df['atr_14'] = talib.ATR(df['high'], df['low'], df['close'], timeperiod=14)
-        df['garch_vol'] = df['returns'].rolling(21).var()  # Simplified GARCH
         
-        # Momentum Indicators
-        df['rsi_14'] = talib.RSI(df['close'], timeperiod=14)
-        df['macd'], df['macd_signal'], _ = talib.MACD(df['close'])
-        df['adx_14'] = talib.ADX(df['high'], df['low'], df['close'], timeperiod=14)
+        # Volume analysis
+        df['volume_ma_21'] = ta.sma(df['volume'], length=21)
+        df['obv'] = ta.obv(df['close'], df['volume'])
         
-        # Volume Features
-        df['volume_ma_21'] = df['volume'].rolling(21).mean()
-        df['volume_change'] = df['volume'].pct_change()
+        # Pattern recognition
+        df['doji'] = ta.cdl_pattern(df['open'], df['high'], df['low'], df['close'], name="doji")
         
-        # Cycle Features
-        df['ht_dcperiod'] = talib.HT_DCPERIOD(df['close'])
-        
-        # Pattern Recognition
-        df['cdl_doji'] = talib.CDLDOJI(df['open'], df['high'], df['low'], df['close'])
-        
-        # Target Engineering
+        # Target engineering
         future_returns = df['close'].pct_change().shift(-HOLD_LOOKAHEAD)
-        df['target'] = pd.qcut(future_returns, q=5, labels=[0, 1, 2, 3, 4], duplicates='drop')
+        df['target'] = pd.qcut(future_returns, q=3, labels=[0, 1, 2], duplicates='drop')
         
         return df.dropna()
-    
     except Exception as e:
-        logging.error(f"Feature engineering failed: {str(e)}", exc_info=True)
+        logging.error(f"Feature engineering failed: {str(e)}")
         return pd.DataFrame()
 
-class EnhancedTradingModel:
+class TradingModel:
     def __init__(self):
         self.model = None
         self.selected_features = []
         self.explainer = None
         self.feature_importances = pd.DataFrame()
-        self.is_trained = False
 
     def optimize_model(self, X: pd.DataFrame, y: pd.Series) -> bool:
         try:
-            self._reset_state()
-            
-            if not self._validate_inputs(X, y):
-                return False
-
-            tscv = TimeSeriesSplit(n_splits=5)  # More validation folds
+            tscv = TimeSeriesSplit(n_splits=5)
             study = optuna.create_study(direction='maximize', sampler=optuna.samplers.TPESampler(seed=42))
             
             study.optimize(
                 lambda trial: self._objective(trial, X, y, tscv),
                 n_trials=MAX_TRIALS,
-                n_jobs=-1,
-                timeout=3600,
-                catch=(ValueError,)
+                n_jobs=-1
             )
             
-            if not study.best_trial:
-                st.error("Optimization failed - no successful trials")
-                return False
-                
-            self._train_final_model(X, y, study.best_params)
-            self._create_explainer(X)
-            self.is_trained = True
-            return True
-            
+            if study.best_trial:
+                self._train_final_model(X, y, study.best_params)
+                self._create_explainer(X)
+                return True
+            return False
         except Exception as e:
-            logging.error(f"Training failed: {str(e)}", exc_info=True)
-            st.error("Model training failed. Check logs for details.")
+            logging.error(f"Training failed: {str(e)}")
             return False
 
     def _create_explainer(self, X: pd.DataFrame):
@@ -159,31 +124,22 @@ class EnhancedTradingModel:
                 'feature': X[self.selected_features].columns,
                 'importance': np.abs(shap_values).mean(0)
             }).sort_values('importance', ascending=False)
-            
         except Exception as e:
-            logging.error(f"SHAP explanation failed: {str(e)}")
+            logging.error(f"SHAP error: {str(e)}")
 
     def _train_final_model(self, X: pd.DataFrame, y: pd.Series, params: dict):
         try:
             selector = RFECV(
-                XGBClassifier(**params, use_label_encoder=False),
+                XGBClassifier(**params),
                 step=1,
                 cv=TimeSeriesSplit(3),
-                min_features_to_select=MIN_FEATURES,
-                scoring='roc_auc_ovo'
+                min_features_to_select=MIN_FEATURES
             )
             selector.fit(X, y)
             self.selected_features = X.columns[selector.support_].tolist()
-            
-            self.model = XGBClassifier(
-                **params,
-                eval_metric='mlogloss',
-                use_label_encoder=False
-            )
-            self.model.fit(X[self.selected_features], y)
-            
+            self.model = XGBClassifier(**params).fit(X[self.selected_features], y)
         except Exception as e:
-            logging.error(f"Final training failed: {str(e)}")
+            logging.error(f"Training error: {str(e)}")
             raise
 
     def _objective(self, trial, X: pd.DataFrame, y: pd.Series, tscv) -> float:
@@ -193,101 +149,69 @@ class EnhancedTradingModel:
             'max_depth': trial.suggest_int('max_depth', 3, 9),
             'subsample': trial.suggest_float('subsample', 0.5, 1.0),
             'colsample_bytree': trial.suggest_float('colsample_bytree', 0.4, 1.0),
-            'gamma': trial.suggest_float('gamma', 0, 1.0),
-            'reg_alpha': trial.suggest_float('reg_alpha', 0, 1.0),
-            'reg_lambda': trial.suggest_float('reg_lambda', 0, 1.0)
+            'gamma': trial.suggest_float('gamma', 0, 1.0)
         }
         
         scores = []
-        
-        for train_idx, test_idx in tqdm(tscv.split(X), desc="Optimization Progress"):
+        for train_idx, test_idx in tqdm(tscv.split(X), desc="Optimizing"):
             X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
             y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
             
             try:
-                sm = SMOTE(sampling_strategy='not majority', random_state=42)
+                sm = SMOTE(sampling_strategy='not majority')
                 X_res, y_res = sm.fit_resample(X_train, y_train)
-                
-                model = XGBClassifier(**params, use_label_encoder=False)
-                model.fit(
-                    X_res, y_res,
-                    eval_set=[(X_test, y_test)],
-                    early_stopping_rounds=20,
-                    verbose=False
-                )
-                
+                model = XGBClassifier(**params).fit(X_res, y_res)
                 y_proba = model.predict_proba(X_test)
-                y_test_bin = label_binarize(y_test, classes=model.classes_)
-                
-                fold_scores = []
-                for class_idx in range(y_test_bin.shape[1]):
-                    if y_test_bin[:, class_idx].sum() > 0:
-                        fold_scores.append(roc_auc_score(
-                            y_test_bin[:, class_idx], 
-                            y_proba[:, class_idx]
-                        ))
-                
-                scores.append(np.nanmean(fold_scores) if fold_scores else 0.0)
-                    
-            except Exception as e:
+                scores.append(roc_auc_score(label_binarize(y_test, classes=model.classes_), y_proba, multi_class='ovo'))
+            except:
                 scores.append(0.0)
         
-        return np.nanmean(scores)
+        return np.mean(scores)
 
     def predict(self, X: pd.DataFrame) -> tuple:
-        if not self.is_trained or self.model is None or X.empty:
-            return 0.5, None
-            
         try:
             proba = self.model.predict_proba(X[self.selected_features])[0]
             explanation = self.explainer.shap_values(X[self.selected_features])[0]
             return np.max(proba), explanation
-            
-        except Exception as e:
-            logging.error(f"Prediction failed: {str(e)}")
+        except:
             return 0.5, None
 
 def main():
-    st.sidebar.header("Configuration")
-    symbol = st.sidebar.text_input("Asset Symbol", DEFAULT_SYMBOL).upper()
+    st.sidebar.header("Settings")
+    symbol = st.sidebar.text_input("Crypto Symbol", DEFAULT_SYMBOL).upper()
     
-    raw_data = fetch_data(symbol, PRIMARY_INTERVAL)
-    processed_data = calculate_advanced_features(raw_data)
+    with st.spinner("Loading market data..."):
+        raw_data = fetch_data(symbol, PRIMARY_INTERVAL)
+        processed_data = calculate_features(raw_data)
     
-    if not raw_data.empty and not processed_data.empty:
+    if not raw_data.empty:
+        st.subheader(f"{symbol} Market Analysis")
         col1, col2 = st.columns([3, 1])
         with col1:
-            st.subheader(f"{symbol} Market Overview")
             fig = px.line(raw_data, y='close', title="Price Chart")
             st.plotly_chart(fig, use_container_width=True)
-            
         with col2:
             st.metric("Current Price", f"${raw_data['close'].iloc[-1]:.2f}")
-            st.metric("24h Volatility", f"{processed_data['volatility_21'].iloc[-1]:.2%}")
-            st.metric("Market Sentiment", 
-                      processed_data['cdl_doji'].iloc[-1] and "Neutral" or "Directional")
+            st.metric("Volatility", f"{processed_data['volatility_21'].iloc[-1]:.2%}")
 
     if st.sidebar.button("🚀 Train Model") and not processed_data.empty:
-        with st.spinner("Training Next-Gen Trading Model..."):
-            model = EnhancedTradingModel()
-            X = processed_data.drop(columns=['target'])
-            y = processed_data['target']
-            
+        model = TradingModel()
+        X = processed_data.drop(columns=['target'])
+        y = processed_data['target']
+        
+        with st.spinner("Training AI Model..."):
             if model.optimize_model(X, y):
                 st.session_state.model = model
-                st.success("Model Training Successful!")
+                st.success("Model trained successfully!")
                 
                 st.subheader("Model Insights")
                 col1, col2 = st.columns(2)
                 with col1:
-                    st.write("Top Predictive Features:")
+                    st.write("Top Features:")
                     st.dataframe(model.feature_importances.head(10))
-                
                 with col2:
-                    st.write("Hyperparameter Configuration:")
+                    st.write("Model Configuration:")
                     st.json(model.model.get_params())
-            else:
-                st.error("Model training failed - check data quality")
 
     if st.session_state.model and not processed_data.empty:
         model = st.session_state.model
@@ -296,43 +220,31 @@ def main():
         confidence, explanation = model.predict(latest_data)
         current_vol = processed_data['volatility_21'].iloc[-1]
         
-        st.subheader("Trading Intelligence")
+        st.subheader("Trading Signal")
         col1, col2 = st.columns(2)
         
         with col1:
-            st.metric("Model Confidence", f"{confidence:.2%}")
-            st.write("Feature Impact Analysis:")
+            st.metric("Confidence Score", f"{confidence:.2%}")
             if explanation is not None:
+                st.write("Feature Impact:")
                 fig = px.bar(
                     x=model.selected_features,
                     y=explanation,
-                    labels={'x': 'Features', 'y': 'SHAP Value'},
+                    labels={'x': 'Features', 'y': 'Impact'},
                     height=300
                 )
                 st.plotly_chart(fig, use_container_width=True)
         
         with col2:
-            dynamic_buy = TRADE_THRESHOLD_BUY + (current_vol * 0.15)
-            dynamic_sell = TRADE_THRESHOLD_SELL - (current_vol * 0.15)
+            buy_thresh = TRADE_THRESHOLD_BUY + (current_vol * 0.15)
+            sell_thresh = TRADE_THRESHOLD_SELL - (current_vol * 0.15)
             
-            if confidence > dynamic_buy:
-                st.success("""
-                🚀 Strong Buy Signal
-                - High confidence in upward movement
-                - Confirmed by volume and momentum indicators
-                """)
-            elif confidence < dynamic_sell:
-                st.error("""
-                🔻 Strong Sell Signal
-                - High confidence in downward trend
-                - Supported by volatility and pattern analysis
-                """)
+            if confidence > buy_thresh:
+                st.success("🚀 Strong Buy Signal")
+            elif confidence < sell_thresh:
+                st.error("🔻 Strong Sell Signal")
             else:
-                st.info("""
-                🛑 Hold Position
-                - Market conditions uncertain
-                - Await stronger signals
-                """)
+                st.info("🛑 Hold Position")
 
 if __name__ == "__main__":
     main()

@@ -50,20 +50,18 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
             auto_adjust=True
         )
         
-        # Handle multi-index columns and extract base names
+        # Process column names to handle multi-index format
         new_columns = []
         for col in df.columns:
-            # Convert tuple to string if necessary
             if isinstance(col, tuple):
-                col_str = '_'.join(col)
+                # Extract the base column name (e.g., 'Open' from ('Open', 'BTC-USD'))
+                col_name = col[0].lower()
             else:
-                col_str = str(col)
+                col_name = str(col).lower()
             
-            # Standardize naming and extract base column name
-            col_str = col_str.lower().replace(' ', '_').replace('-', '_')
-            parts = col_str.split('_')
-            base_name = parts[-1]  # Get last part after splitting
-            new_columns.append(base_name)
+            # Standardize column names
+            col_name = col_name.replace(' ', '_').replace('-', '_')
+            new_columns.append(col_name)
         
         df.columns = new_columns
         

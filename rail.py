@@ -1,4 +1,4 @@
-# crypto_trading_system.py (FIXED COLUMN NAMES WITH SYMBOL SUFFIX)
+# crypto_trading_system.py (FIXED COLUMN NAMES WITH SYMBOL FORMAT HANDLING)
 import logging
 import numpy as np
 import pandas as pd
@@ -32,7 +32,7 @@ st.title("🚀 AI-Powered Cryptocurrency Trading System")
 if 'model' not in st.session_state:
     st.session_state.model = None
 
-# Fixed Data Pipeline with Dynamic Symbol Suffix Handling
+# Fixed Data Pipeline with Symbol Format Handling
 @st.cache_data(ttl=300, show_spinner="Fetching market data...")
 def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
     try:
@@ -49,7 +49,7 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
             df.columns = ['_'.join(map(str, col)).strip() for col in df.columns.values]
         
         # Clean column names and remove symbol suffix dynamically
-        symbol_clean = symbol.lower().replace('-', '_')
+        symbol_clean = re.sub(r'[^a-zA-Z0-9]', '_', symbol.lower()).strip('_')
         new_columns = []
         for col in df.columns:
             # Remove symbol suffix and clean column name

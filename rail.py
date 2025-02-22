@@ -50,20 +50,24 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
             auto_adjust=True
         )
         
-        # Handle multi-index columns and convert to strings
+        # Handle multi-index columns and extract base names
         new_columns = []
         for col in df.columns:
+            # Convert tuple to string if necessary
             if isinstance(col, tuple):
-                # Join tuple elements with underscore
                 col_str = '_'.join(col)
             else:
                 col_str = str(col)
-            # Standardize column names
+            
+            # Standardize naming and extract base column name
             col_str = col_str.lower().replace(' ', '_').replace('-', '_')
-            new_columns.append(col_str)
+            parts = col_str.split('_')
+            base_name = parts[-1]  # Get last part after splitting
+            new_columns.append(base_name)
+        
         df.columns = new_columns
         
-        # Check required columns
+        # Verify required columns exist
         required_cols = {'open', 'high', 'low', 'close', 'volume'}
         missing = required_cols - set(df.columns)
         if missing:

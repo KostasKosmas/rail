@@ -116,7 +116,6 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
             [2, 0], default=1
         )
         
-        # Keep all technical indicators
         return df.dropna().drop(columns=['open', 'high', 'low', 'close', 'volume'])
     
     except Exception as e:
@@ -129,19 +128,19 @@ class TradingModel:
         self.model = None
         self.required_features = REQUIRED_FEATURES
 
-    def optimize_model(self, X: pd.DataFrame, y: pd.Series):
+    def optimize_model(self, X: pd.DataFrame, y: pd.Series) -> bool:
         try:
             # Feature validation
             missing_features = [f for f in self.required_features if f not in X.columns]
             if missing_features:
                 st.error(f"Missing required features: {missing_features}")
-                return
+                return False
 
             # Class balance check
             class_counts = y.value_counts()
             if len(class_counts) < 3 or any(class_counts < MIN_SAMPLES_PER_CLASS):
                 st.error(f"Insufficient class samples: {class_counts.to_dict()}")
-                return
+                return False
 
             # Feature selection
             tscv = TimeSeriesSplit(n_splits=3)
@@ -173,7 +172,7 @@ class TradingModel:
             
             if not study.best_trial:
                 st.error("No successful trials completed")
-                return
+                return False
                 
             self.model = XGBClassifier(**study.best_params)
             self.model.fit(X_res[self.selected_features], y_res)
@@ -185,9 +184,12 @@ class TradingModel:
             st.write("Confusion Matrix:")
             st.dataframe(confusion_matrix(y, y_pred))
             
+            return True
+            
         except Exception as e:
             logging.error(f"Training failed: {str(e)}", exc_info=True)
             st.error("Model training failed. Check logs for details.")
+            return False
 
     def _objective(self, trial, X: pd.DataFrame, y: pd.Series, cv) -> float:
         params = {
@@ -275,9 +277,12 @@ def main():
             y = processed_data['target']
             
             with st.spinner("Training AI Model..."):
-                model.optimize_model(X, y)
-                st.session_state.model = model
-                st.success("Training completed!")
+                success = model.optimize_model(X, y)
+                if success:
+                    st.session_state.model = model
+                    st.success("Training completed!")
+                else:
+                    st.error("Model training failed. See errors above.")
                 
         except Exception as e:
             st.error(f"Training error: {str(e)}")

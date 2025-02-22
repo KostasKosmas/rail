@@ -88,13 +88,12 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
         df['returns'] = df['close'].pct_change()
         
-        # Explicit EMA calculations
+        # Technical indicators
         df['ema_12'] = df['close'].ewm(span=12, adjust=False).mean()
         df['ema_26'] = df['close'].ewm(span=26, adjust=False).mean()
         df['macd'] = df['ema_12'] - df['ema_26']
         df['signal'] = df['macd'].ewm(span=9, adjust=False).mean()
         
-        # SMA and RSI calculations
         for window in [20, 50, 100]:
             df[f'sma_{window}'] = df['close'].rolling(window).mean()
             delta = df['close'].diff()
@@ -127,63 +126,29 @@ class TradingModel:
         self.selected_features = []
         self.model = None
         self.required_features = REQUIRED_FEATURES
+        self.is_trained = False
 
     def optimize_model(self, X: pd.DataFrame, y: pd.Series) -> bool:
         try:
-            # Feature validation
-            missing_features = [f for f in self.required_features if f not in X.columns]
-            if missing_features:
-                st.error(f"Missing required features: {missing_features}")
+            self._reset_state()
+            if not self._validate_inputs(X, y):
                 return False
 
-            # Class balance check
-            class_counts = y.value_counts()
-            if len(class_counts) < 3 or any(class_counts < MIN_SAMPLES_PER_CLASS):
-                st.error(f"Insufficient class samples: {class_counts.to_dict()}")
-                return False
-
-            # Feature selection
-            tscv = TimeSeriesSplit(n_splits=3)
-            smote = SMOTE(random_state=42)
-            X_res, y_res = smote.fit_resample(X, y)
+            X_res, y_res = SMOTE(random_state=42).fit_resample(X, y)
+            self._perform_feature_selection(X_res, y_res)
             
-            selector = RFECV(
-                XGBClassifier(),
-                step=1,
-                cv=tscv,
-                min_features_to_select=MIN_FEATURES
-            )
-            selector.fit(X_res, y_res)
-            self.selected_features = X.columns[selector.support_].tolist()
-            
-            # Ensure required features are included
-            for feat in self.required_features:
-                if feat not in self.selected_features:
-                    self.selected_features.append(feat)
-
-            # Hyperparameter tuning
             study = optuna.create_study(direction='maximize')
             study.optimize(
-                lambda trial: self._objective(trial, X_res[self.selected_features], y_res, tscv),
+                lambda trial: self._objective(trial, X_res[self.selected_features], y_res),
                 n_trials=MAX_TRIALS,
                 n_jobs=-1,
                 catch=(ValueError,)
             )
             
-            if not study.best_trial:
-                st.error("No successful trials completed")
+            if not self._create_final_model(study, X_res[self.selected_features], y_res, X, y):
                 return False
-                
-            self.model = XGBClassifier(**study.best_params)
-            self.model.fit(X_res[self.selected_features], y_res)
             
-            # Validation reporting
-            st.subheader("Model Performance")
-            y_pred = self.model.predict(X[self.selected_features])
-            st.text(classification_report(y, y_pred))
-            st.write("Confusion Matrix:")
-            st.dataframe(confusion_matrix(y, y_pred))
-            
+            self.is_trained = True
             return True
             
         except Exception as e:
@@ -191,7 +156,62 @@ class TradingModel:
             st.error("Model training failed. Check logs for details.")
             return False
 
-    def _objective(self, trial, X: pd.DataFrame, y: pd.Series, cv) -> float:
+    def _reset_state(self):
+        self.selected_features = []
+        self.model = None
+        self.is_trained = False
+
+    def _validate_inputs(self, X: pd.DataFrame, y: pd.Series) -> bool:
+        missing_features = [f for f in self.required_features if f not in X.columns]
+        if missing_features:
+            st.error(f"Missing required features: {missing_features}")
+            return False
+
+        class_counts = y.value_counts()
+        if len(class_counts) < 3 or any(class_counts < MIN_SAMPLES_PER_CLASS):
+            st.error(f"Insufficient class samples: {class_counts.to_dict()}")
+            return False
+            
+        return True
+
+    def _perform_feature_selection(self, X: pd.DataFrame, y: pd.Series):
+        tscv = TimeSeriesSplit(n_splits=3)
+        selector = RFECV(
+            XGBClassifier(),
+            step=1,
+            cv=tscv,
+            min_features_to_select=MIN_FEATURES
+        )
+        selector.fit(X, y)
+        self.selected_features = X.columns[selector.support_].tolist()
+        
+        # Ensure required features are included
+        for feat in self.required_features:
+            if feat not in self.selected_features:
+                self.selected_features.append(feat)
+
+    def _create_final_model(self, study, X: pd.DataFrame, y: pd.Series, orig_X: pd.DataFrame, orig_y: pd.Series) -> bool:
+        if not study.best_trial:
+            st.error("No successful trials completed")
+            return False
+            
+        try:
+            self.model = XGBClassifier(**study.best_params)
+            self.model.fit(X, y)
+            
+            # Validation reporting
+            st.subheader("Model Performance")
+            y_pred = self.model.predict(orig_X[self.selected_features])
+            st.text(classification_report(orig_y, y_pred))
+            st.write("Confusion Matrix:")
+            st.dataframe(confusion_matrix(orig_y, y_pred))
+            
+            return True
+        except Exception as e:
+            logging.error(f"Model initialization failed: {str(e)}")
+            return False
+
+    def _objective(self, trial, X: pd.DataFrame, y: pd.Series) -> float:
         params = {
             'n_estimators': trial.suggest_int('n_estimators', 100, 500),
             'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
@@ -202,7 +222,9 @@ class TradingModel:
         }
         
         scores = []
-        for train_idx, test_idx in tqdm(cv.split(X), desc="CV Progress"):
+        tscv = TimeSeriesSplit(n_splits=3)
+        
+        for train_idx, test_idx in tqdm(tscv.split(X), desc="CV Progress"):
             X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
             y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
             
@@ -232,13 +254,11 @@ class TradingModel:
         return np.nanmean(scores) if scores else 0.0
 
     def predict(self, X: pd.DataFrame) -> float:
-        if self.model is None or X.empty:
+        if not self.is_trained or self.model is None or X.empty:
             return 0.5
             
         try:
-            # Check for all required features
-            missing = [f for f in self.selected_features + self.required_features 
-                      if f not in X.columns]
+            missing = [f for f in self.selected_features if f not in X.columns]
             if missing:
                 logging.error(f"Missing features: {missing}")
                 return 0.5
@@ -256,10 +276,9 @@ def main():
     processed_data = calculate_features(raw_data)
     
     if not raw_data.empty and not processed_data.empty:
-        # Feature validation check
         missing_features = [f for f in REQUIRED_FEATURES if f not in processed_data.columns]
         if missing_features:
-            st.error(f"Missing critical features in data: {missing_features}")
+            st.error(f"Missing critical features: {missing_features}")
             st.stop()
             
         col1, col2 = st.columns([3, 1])
@@ -277,27 +296,24 @@ def main():
             y = processed_data['target']
             
             with st.spinner("Training AI Model..."):
-                success = model.optimize_model(X, y)
-                if success:
+                if model.optimize_model(X, y):
                     st.session_state.model = model
                     st.success("Training completed!")
                 else:
                     st.error("Model training failed. See errors above.")
-                
         except Exception as e:
             st.error(f"Training error: {str(e)}")
 
     if st.session_state.model and not processed_data.empty:
+        model = st.session_state.model
         latest_data = processed_data.drop(columns=['target']).iloc[[-1]]
         
-        # Final prediction check
-        missing = [f for f in st.session_state.model.selected_features 
-                  if f not in latest_data.columns]
+        missing = [f for f in model.selected_features if f not in latest_data.columns]
         if missing:
             st.error(f"Missing features in latest data: {missing}")
             st.stop()
             
-        confidence = st.session_state.model.predict(latest_data)
+        confidence = model.predict(latest_data)
         
         st.subheader("Trading Signal")
         col1, col2 = st.columns(2)

@@ -1,4 +1,4 @@
-# crypto_trading_system.py (FIXED TUPLE ERROR)
+# crypto_trading_system.py (FIXED COLUMN NAMES)
 import logging
 import numpy as np
 import pandas as pd
@@ -32,7 +32,7 @@ st.title("🚀 AI-Powered Cryptocurrency Trading System")
 if 'model' not in st.session_state:
     st.session_state.model = None
 
-# Fixed Data Pipeline with Tuple Handling
+# Fixed Data Pipeline with Symbol Suffix Handling
 @st.cache_data(ttl=300, show_spinner="Fetching market data...")
 def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
     try:
@@ -44,20 +44,16 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
             auto_adjust=True
         )
         
-        # Convert all column names to strings
+        # Convert MultiIndex to flat column names
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = ['_'.join(map(str, col)).strip() for col in df.columns.values]
-        else:
-            df.columns = [str(col).strip() for col in df.columns]
         
-        # Clean column names safely
-        def clean_column_name(col: str) -> str:
-            # Convert tuple to string if needed
-            col_str = '_'.join(col) if isinstance(col, tuple) else str(col)
-            # Remove special characters
-            return re.sub(r'[^a-zA-Z0-9_]+', '_', col_str).lower().strip('_')
-        
-        df.columns = [clean_column_name(col) for col in df.columns]
+        # Clean column names and remove symbol suffix
+        symbol_clean = symbol.lower().replace('-', '_')
+        df.columns = [
+            re.sub(rf'_{symbol_clean}$', '', col.lower().strip('_'))
+            for col in df.columns
+        ]
         
         # Validate required columns
         required = ['open', 'high', 'low', 'close', 'volume']

@@ -4,6 +4,7 @@ import pandas as pd
 import yfinance as yf
 import streamlit as st
 import optuna
+from xgboost import XGBClassifier
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.feature_selection import RFECV
 from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
@@ -11,6 +12,7 @@ from imblearn.over_sampling import SMOTE
 from datetime import datetime, timedelta
 import warnings
 import re
+from tqdm import tqdm
 
 # Check if xgboost is installed
 try:
@@ -24,7 +26,7 @@ DEFAULT_SYMBOL = 'BTC-USD'
 PRIMARY_INTERVAL = '15m'
 TRADE_THRESHOLD_BUY = 0.58
 TRADE_THRESHOLD_SELL = 0.42
-MAX_TRIALS = 50
+MAX_TRIALS = 20  # Reduced from 50
 GARCH_WINDOW = 14
 MIN_FEATURES = 7
 
@@ -45,7 +47,7 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
         # Fetch data with auto_adjust to handle corporate actions
         df = yf.download(
             symbol,
-            period="60d" if interval in ['15m', '30m'] else "180d",
+            period="30d",  # Reduced from "60d" or "180d"
             interval=interval,
             progress=False,
             auto_adjust=True
@@ -101,6 +103,7 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
         logging.error(f"Data fetch failed: {str(e)}", exc_info=True)
         return pd.DataFrame()
 
+@st.cache_data
 def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or len(df) < 100:
         return pd.DataFrame()
@@ -175,11 +178,12 @@ class TradingModel:
             selector.fit(X_res, y_res)
             self.selected_features = X.columns[selector.get_support()].tolist()
             
-            # Hyperparameter optimization
+            # Hyperparameter optimization with parallel processing
             study = optuna.create_study(direction='maximize')
             study.optimize(
                 lambda trial: self._objective(trial, X_res[self.selected_features], y_res, tscv),
-                n_trials=MAX_TRIALS
+                n_trials=MAX_TRIALS,
+                n_jobs=-1  # Use all available CPU cores
             )
             
             # Final model training
@@ -204,23 +208,26 @@ class TradingModel:
 
     def _objective(self, trial, X: pd.DataFrame, y: pd.Series, cv):
         params = {
-            'n_estimators': trial.suggest_int('n_estimators', 100, 1000),
-            'learning_rate': trial.suggest_float('learning_rate', 0.001, 0.3, log=True),
-            'max_depth': trial.suggest_int('max_depth', 3, 20),
-            'min_samples_split': trial.suggest_int('min_samples_split', 2, 50),
-            'subsample': trial.suggest_float('subsample', 0.5, 1.0),
-            'max_features': trial.suggest_categorical('max_features', ['sqrt', 'log2', None])
+            'n_estimators': trial.suggest_int('n_estimators', 100, 500),
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+            'max_depth': trial.suggest_int('max_depth', 3, 15),
+            'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
+            'subsample': trial.suggest_float('subsample', 0.5, 1.0)
         }
         
         scores = []
-        for train_idx, test_idx in cv.split(X):
+        for train_idx, test_idx in tqdm(cv.split(X), desc="CV Progress"):
             X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
             y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
             
-            model = XGBClassifier(**params)
-            model.fit(X_train, y_train)
-            scores.append(roc_auc_score(y_test, model.predict_proba(X_test), multi_class='ovr'))
+            # Use SMOTE only once per trial
+            smote = SMOTE(random_state=42)
+            X_res, y_res = smote.fit_resample(X_train, y_train)
             
+            model = XGBClassifier(**params)
+            model.fit(X_res, y_res)
+            scores.append(roc_auc_score(y_test, model.predict_proba(X_test), multi_class='ovr'))
+        
         return np.mean(scores)
 
     def predict(self, X: pd.DataFrame) -> float:

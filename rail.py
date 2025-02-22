@@ -22,7 +22,7 @@ TRADE_THRESHOLD_SELL = 0.42
 MAX_TRIALS = 20
 GARCH_WINDOW = 14
 MIN_FEATURES = 7
-MIN_SAMPLES_PER_CLASS = 5
+MIN_SAMPLES_PER_CLASS = 50  # Increased minimum samples
 REQUIRED_FEATURES = ['ema_12', 'ema_26', 'macd', 'signal']
 
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -40,7 +40,7 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
     try:
         df = yf.download(
             symbol,
-            period="30d",
+            period="60d",  # Increased data period
             interval=interval,
             progress=False,
             auto_adjust=True
@@ -106,14 +106,11 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         
         df['volatility'] = df['returns'].rolling(GARCH_WINDOW).std()
         
-        # Target engineering
-        future_returns = df['close'].pct_change().shift(-1)
-        dynamic_threshold = df['volatility'].rolling(14).mean()
-        df['target'] = np.select(
-            [future_returns > dynamic_threshold, 
-             future_returns < -dynamic_threshold],
-            [2, 0], default=1
-        )
+        # Improved target engineering
+        future_returns = df['close'].pct_change().shift(-2)  # Look 2 periods ahead
+        df['target'] = pd.qcut(future_returns, 
+                             q=[0, 0.3, 0.7, 1], 
+                             labels=[0, 1, 2]).astype(int)
         
         return df.dropna().drop(columns=['open', 'high', 'low', 'close', 'volume'])
     
@@ -127,6 +124,7 @@ class TradingModel:
         self.model = None
         self.required_features = REQUIRED_FEATURES
         self.is_trained = False
+        self.classes_ = None
 
     def optimize_model(self, X: pd.DataFrame, y: pd.Series) -> bool:
         try:
@@ -134,19 +132,23 @@ class TradingModel:
             if not self._validate_inputs(X, y):
                 return False
 
-            X_res, y_res = SMOTE(random_state=42).fit_resample(X, y)
-            self._perform_feature_selection(X_res, y_res)
-            
+            tscv = TimeSeriesSplit(n_splits=3)
             study = optuna.create_study(direction='maximize')
+            
+            # Prevent data leakage in optimization
             study.optimize(
-                lambda trial: self._objective(trial, X_res[self.selected_features], y_res),
+                lambda trial: self._objective(trial, X, y, tscv),
                 n_trials=MAX_TRIALS,
                 n_jobs=-1,
                 catch=(ValueError,)
             )
             
-            if not self._create_final_model(study, X_res[self.selected_features], y_res, X, y):
+            if not study.best_trial:
+                st.error("No successful trials completed")
                 return False
+                
+            # Final training with best params
+            self._train_final_model(X, y, study.best_params)
             
             self.is_trained = True
             return True
@@ -160,6 +162,7 @@ class TradingModel:
         self.selected_features = []
         self.model = None
         self.is_trained = False
+        self.classes_ = None
 
     def _validate_inputs(self, X: pd.DataFrame, y: pd.Series) -> bool:
         missing_features = [f for f in self.required_features if f not in X.columns]
@@ -174,10 +177,11 @@ class TradingModel:
             
         return True
 
-    def _perform_feature_selection(self, X: pd.DataFrame, y: pd.Series):
+    def _train_final_model(self, X: pd.DataFrame, y: pd.Series, best_params: dict):
+        # Feature selection with time-series split
         tscv = TimeSeriesSplit(n_splits=3)
         selector = RFECV(
-            XGBClassifier(),
+            XGBClassifier(**best_params),
             step=1,
             cv=tscv,
             min_features_to_select=MIN_FEATURES
@@ -185,56 +189,72 @@ class TradingModel:
         selector.fit(X, y)
         self.selected_features = X.columns[selector.support_].tolist()
         
-        # Ensure required features are included
+        # Ensure required features
         for feat in self.required_features:
             if feat not in self.selected_features:
                 self.selected_features.append(feat)
 
-    def _create_final_model(self, study, X: pd.DataFrame, y: pd.Series, orig_X: pd.DataFrame, orig_y: pd.Series) -> bool:
-        if not study.best_trial:
-            st.error("No successful trials completed")
-            return False
-            
-        try:
-            self.model = XGBClassifier(**study.best_params)
-            self.model.fit(X, y)
-            
-            # Validation reporting
-            st.subheader("Model Performance")
-            y_pred = self.model.predict(orig_X[self.selected_features])
-            st.text(classification_report(orig_y, y_pred))
-            st.write("Confusion Matrix:")
-            st.dataframe(confusion_matrix(orig_y, y_pred))
-            
-            return True
-        except Exception as e:
-            logging.error(f"Model initialization failed: {str(e)}")
-            return False
+        # Train final model with selected features
+        self.model = XGBClassifier(**best_params)
+        self.model.fit(X[self.selected_features], y)
+        self.classes_ = self.model.classes_
 
-    def _objective(self, trial, X: pd.DataFrame, y: pd.Series) -> float:
+        # Validation with walk-forward split
+        st.subheader("Validation Performance")
+        X_sorted = X.sort_index()
+        y_sorted = y.sort_index()
+        
+        tscv = TimeSeriesSplit(n_splits=3)
+        reports = []
+        for fold, (train_idx, test_idx) in enumerate(tscv.split(X_sorted)):
+            X_train, X_test = X_sorted.iloc[train_idx], X_sorted.iloc[test_idx]
+            y_train, y_test = y_sorted.iloc[train_idx], y_sorted.iloc[test_idx]
+            
+            # Apply SMOTE only to training data
+            sm = SMOTE(random_state=42)
+            X_res, y_res = sm.fit_resample(X_train, y_train)
+            
+            model = XGBClassifier(**best_params)
+            model.fit(X_res[self.selected_features], y_res)
+            
+            y_pred = model.predict(X_test[self.selected_features])
+            reports.append(classification_report(y_test, y_pred, output_dict=True))
+            
+        # Aggregate results
+        avg_precision = np.mean([r['weighted avg']['precision'] for r in reports])
+        avg_recall = np.mean([r['weighted avg']['recall'] for r in reports])
+        avg_f1 = np.mean([r['weighted avg']['f1-score'] for r in reports])
+        
+        st.write(f"Average Validation Performance (3-fold time series split):")
+        st.write(f"Precision: {avg_precision:.2f}, Recall: {avg_recall:.2f}, F1: {avg_f1:.2f}")
+
+    def _objective(self, trial, X: pd.DataFrame, y: pd.Series, tscv) -> float:
         params = {
             'n_estimators': trial.suggest_int('n_estimators', 100, 500),
             'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
             'max_depth': trial.suggest_int('max_depth', 3, 9),
             'subsample': trial.suggest_float('subsample', 0.5, 1.0),
             'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
-            'gamma': trial.suggest_float('gamma', 0, 0.5)
+            'gamma': trial.suggest_float('gamma', 0, 0.5),
+            'enable_categorical': True
         }
         
         scores = []
-        tscv = TimeSeriesSplit(n_splits=3)
         
         for train_idx, test_idx in tqdm(tscv.split(X), desc="CV Progress"):
             X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
             y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
             
             try:
-                X_bal, y_bal = SMOTE(random_state=42).fit_resample(X_train, y_train)
+                # Apply SMOTE only to training fold
+                sm = SMOTE(random_state=42)
+                X_res, y_res = sm.fit_resample(X_train, y_train)
+                
                 model = XGBClassifier(**params)
-                model.fit(X_bal, y_bal)
+                model.fit(X_res, y_res)
                 
                 y_proba = model.predict_proba(X_test)
-                y_test_bin = label_binarize(y_test, classes=np.unique(y_bal))
+                y_test_bin = label_binarize(y_test, classes=model.classes_)
                 
                 fold_scores = []
                 for class_idx in range(y_test_bin.shape[1]):
@@ -263,7 +283,9 @@ class TradingModel:
                 logging.error(f"Missing features: {missing}")
                 return 0.5
                 
-            return self.model.predict_proba(X[self.selected_features])[0][2]
+            # Get probability for class 2 (buy signal)
+            proba = self.model.predict_proba(X[self.selected_features])[0][2]
+            return max(0.0, min(1.0, proba))  # Clamp between 0-1
         except Exception as e:
             logging.error(f"Prediction failed: {str(e)}")
             return 0.5

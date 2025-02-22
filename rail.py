@@ -22,7 +22,7 @@ TRADE_THRESHOLD_SELL = 0.42
 MAX_TRIALS = 20
 GARCH_WINDOW = 14
 MIN_FEATURES = 7
-MIN_SAMPLES_PER_CLASS = 50  # Increased minimum samples
+MIN_SAMPLES_PER_CLASS = 50
 REQUIRED_FEATURES = ['ema_12', 'ema_26', 'macd', 'signal']
 
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -40,7 +40,7 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
     try:
         df = yf.download(
             symbol,
-            period="60d",  # Increased data period
+            period="60d",
             interval=interval,
             progress=False,
             auto_adjust=True
@@ -106,13 +106,27 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         
         df['volatility'] = df['returns'].rolling(GARCH_WINDOW).std()
         
-        # Improved target engineering
-        future_returns = df['close'].pct_change().shift(-2)  # Look 2 periods ahead
-        df['target'] = pd.qcut(future_returns, 
-                             q=[0, 0.3, 0.7, 1], 
-                             labels=[0, 1, 2]).astype(int)
+        # Improved target engineering with NaN handling
+        future_returns = df['close'].pct_change().shift(-2).dropna()
         
-        return df.dropna().drop(columns=['open', 'high', 'low', 'close', 'volume'])
+        # Create quantile bins with duplicate handling
+        try:
+            bins = pd.qcut(
+                future_returns,
+                q=[0, 0.3, 0.7, 1],
+                labels=[0, 1, 2],
+                duplicates='drop'
+            )
+        except ValueError as e:
+            st.error(f"Quantile binning failed: {str(e)}")
+            return pd.DataFrame()
+        
+        # Align indices and handle remaining NaNs
+        df = df.join(bins.rename('target'), how='inner')
+        df = df.dropna(subset=['target'])
+        df['target'] = df['target'].astype(int)
+        
+        return df.drop(columns=['open', 'high', 'low', 'close', 'volume']).dropna()
     
     except Exception as e:
         logging.error(f"Feature engineering failed: {str(e)}", exc_info=True)
@@ -135,7 +149,6 @@ class TradingModel:
             tscv = TimeSeriesSplit(n_splits=3)
             study = optuna.create_study(direction='maximize')
             
-            # Prevent data leakage in optimization
             study.optimize(
                 lambda trial: self._objective(trial, X, y, tscv),
                 n_trials=MAX_TRIALS,
@@ -147,7 +160,6 @@ class TradingModel:
                 st.error("No successful trials completed")
                 return False
                 
-            # Final training with best params
             self._train_final_model(X, y, study.best_params)
             
             self.is_trained = True
@@ -178,7 +190,6 @@ class TradingModel:
         return True
 
     def _train_final_model(self, X: pd.DataFrame, y: pd.Series, best_params: dict):
-        # Feature selection with time-series split
         tscv = TimeSeriesSplit(n_splits=3)
         selector = RFECV(
             XGBClassifier(**best_params),
@@ -189,17 +200,14 @@ class TradingModel:
         selector.fit(X, y)
         self.selected_features = X.columns[selector.support_].tolist()
         
-        # Ensure required features
         for feat in self.required_features:
             if feat not in self.selected_features:
                 self.selected_features.append(feat)
 
-        # Train final model with selected features
         self.model = XGBClassifier(**best_params)
         self.model.fit(X[self.selected_features], y)
         self.classes_ = self.model.classes_
 
-        # Validation with walk-forward split
         st.subheader("Validation Performance")
         X_sorted = X.sort_index()
         y_sorted = y.sort_index()
@@ -210,7 +218,6 @@ class TradingModel:
             X_train, X_test = X_sorted.iloc[train_idx], X_sorted.iloc[test_idx]
             y_train, y_test = y_sorted.iloc[train_idx], y_sorted.iloc[test_idx]
             
-            # Apply SMOTE only to training data
             sm = SMOTE(random_state=42)
             X_res, y_res = sm.fit_resample(X_train, y_train)
             
@@ -220,7 +227,6 @@ class TradingModel:
             y_pred = model.predict(X_test[self.selected_features])
             reports.append(classification_report(y_test, y_pred, output_dict=True))
             
-        # Aggregate results
         avg_precision = np.mean([r['weighted avg']['precision'] for r in reports])
         avg_recall = np.mean([r['weighted avg']['recall'] for r in reports])
         avg_f1 = np.mean([r['weighted avg']['f1-score'] for r in reports])
@@ -235,8 +241,7 @@ class TradingModel:
             'max_depth': trial.suggest_int('max_depth', 3, 9),
             'subsample': trial.suggest_float('subsample', 0.5, 1.0),
             'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
-            'gamma': trial.suggest_float('gamma', 0, 0.5),
-            'enable_categorical': True
+            'gamma': trial.suggest_float('gamma', 0, 0.5)
         }
         
         scores = []
@@ -246,7 +251,6 @@ class TradingModel:
             y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
             
             try:
-                # Apply SMOTE only to training fold
                 sm = SMOTE(random_state=42)
                 X_res, y_res = sm.fit_resample(X_train, y_train)
                 
@@ -283,9 +287,8 @@ class TradingModel:
                 logging.error(f"Missing features: {missing}")
                 return 0.5
                 
-            # Get probability for class 2 (buy signal)
             proba = self.model.predict_proba(X[self.selected_features])[0][2]
-            return max(0.0, min(1.0, proba))  # Clamp between 0-1
+            return max(0.0, min(1.0, proba))
         except Exception as e:
             logging.error(f"Prediction failed: {str(e)}")
             return 0.5

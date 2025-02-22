@@ -23,6 +23,7 @@ MAX_TRIALS = 20
 GARCH_WINDOW = 14
 MIN_FEATURES = 7
 MIN_SAMPLES_PER_CLASS = 5
+REQUIRED_FEATURES = ['ema_12', 'ema_26', 'macd', 'signal']
 
 warnings.filterwarnings("ignore", category=UserWarning)
 logging.basicConfig(level=logging.INFO)
@@ -87,7 +88,13 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
         df['returns'] = df['close'].pct_change()
         
-        # Technical Indicators
+        # Explicit EMA calculations
+        df['ema_12'] = df['close'].ewm(span=12, adjust=False).mean()
+        df['ema_26'] = df['close'].ewm(span=26, adjust=False).mean()
+        df['macd'] = df['ema_12'] - df['ema_26']
+        df['signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+        
+        # SMA and RSI calculations
         for window in [20, 50, 100]:
             df[f'sma_{window}'] = df['close'].rolling(window).mean()
             delta = df['close'].diff()
@@ -99,10 +106,8 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
             df[f'rsi_{window}'] = 100 - (100 / (1 + rs))
         
         df['volatility'] = df['returns'].rolling(GARCH_WINDOW).std()
-        df['macd'] = df['close'].ewm(span=12).mean() - df['close'].ewm(span=26).mean()
-        df['signal'] = df['macd'].ewm(span=9).mean()
         
-        # Target Engineering
+        # Target engineering
         future_returns = df['close'].pct_change().shift(-1)
         dynamic_threshold = df['volatility'].rolling(14).mean()
         df['target'] = np.select(
@@ -111,6 +116,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
             [2, 0], default=1
         )
         
+        # Keep all technical indicators
         return df.dropna().drop(columns=['open', 'high', 'low', 'close', 'volume'])
     
     except Exception as e:
@@ -121,34 +127,42 @@ class TradingModel:
     def __init__(self):
         self.selected_features = []
         self.model = None
-        self.classes_ = []
+        self.required_features = REQUIRED_FEATURES
 
     def optimize_model(self, X: pd.DataFrame, y: pd.Series):
         try:
-            # Class Validation
+            # Feature validation
+            missing_features = [f for f in self.required_features if f not in X.columns]
+            if missing_features:
+                st.error(f"Missing required features: {missing_features}")
+                return
+
+            # Class balance check
             class_counts = y.value_counts()
             if len(class_counts) < 3 or any(class_counts < MIN_SAMPLES_PER_CLASS):
                 st.error(f"Insufficient class samples: {class_counts.to_dict()}")
                 return
 
-            # Feature Selection
+            # Feature selection
             tscv = TimeSeriesSplit(n_splits=3)
+            smote = SMOTE(random_state=42)
+            X_res, y_res = smote.fit_resample(X, y)
+            
             selector = RFECV(
                 XGBClassifier(),
                 step=1,
                 cv=tscv,
                 min_features_to_select=MIN_FEATURES
             )
-            
-            # Handle Class Imbalance
-            smote = SMOTE(random_state=42)
-            X_res, y_res = smote.fit_resample(X, y)
-            self.classes_ = np.unique(y_res)
-            
             selector.fit(X_res, y_res)
             self.selected_features = X.columns[selector.support_].tolist()
             
-            # Hyperparameter Optimization
+            # Ensure required features are included
+            for feat in self.required_features:
+                if feat not in self.selected_features:
+                    self.selected_features.append(feat)
+
+            # Hyperparameter tuning
             study = optuna.create_study(direction='maximize')
             study.optimize(
                 lambda trial: self._objective(trial, X_res[self.selected_features], y_res, tscv),
@@ -164,7 +178,7 @@ class TradingModel:
             self.model = XGBClassifier(**study.best_params)
             self.model.fit(X_res[self.selected_features], y_res)
             
-            # Validation
+            # Validation reporting
             st.subheader("Model Performance")
             y_pred = self.model.predict(X[self.selected_features])
             st.text(classification_report(y, y_pred))
@@ -191,16 +205,12 @@ class TradingModel:
             y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
             
             try:
-                # Balance training data
                 X_bal, y_bal = SMOTE(random_state=42).fit_resample(X_train, y_train)
-                
-                # Train model
                 model = XGBClassifier(**params)
                 model.fit(X_bal, y_bal)
                 
-                # Calculate ROC AUC
                 y_proba = model.predict_proba(X_test)
-                y_test_bin = label_binarize(y_test, classes=self.classes_)
+                y_test_bin = label_binarize(y_test, classes=np.unique(y_bal))
                 
                 fold_scores = []
                 for class_idx in range(y_test_bin.shape[1]):
@@ -212,10 +222,7 @@ class TradingModel:
                             )
                         )
                 
-                if fold_scores:
-                    scores.append(np.mean(fold_scores))
-                else:
-                    scores.append(0.0)
+                scores.append(np.mean(fold_scores) if fold_scores else 0.0)
                     
             except Exception as e:
                 scores.append(0.0)
@@ -227,9 +234,11 @@ class TradingModel:
             return 0.5
             
         try:
-            missing = [f for f in self.selected_features if f not in X.columns]
+            # Check for all required features
+            missing = [f for f in self.selected_features + self.required_features 
+                      if f not in X.columns]
             if missing:
-                logging.warning(f"Missing features: {missing}")
+                logging.error(f"Missing features: {missing}")
                 return 0.5
                 
             return self.model.predict_proba(X[self.selected_features])[0][2]
@@ -245,6 +254,12 @@ def main():
     processed_data = calculate_features(raw_data)
     
     if not raw_data.empty and not processed_data.empty:
+        # Feature validation check
+        missing_features = [f for f in REQUIRED_FEATURES if f not in processed_data.columns]
+        if missing_features:
+            st.error(f"Missing critical features in data: {missing_features}")
+            st.stop()
+            
         col1, col2 = st.columns([3, 1])
         with col1:
             st.subheader(f"{symbol} Price Chart")
@@ -269,6 +284,14 @@ def main():
 
     if st.session_state.model and not processed_data.empty:
         latest_data = processed_data.drop(columns=['target']).iloc[[-1]]
+        
+        # Final prediction check
+        missing = [f for f in st.session_state.model.selected_features 
+                  if f not in latest_data.columns]
+        if missing:
+            st.error(f"Missing features in latest data: {missing}")
+            st.stop()
+            
         confidence = st.session_state.model.predict(latest_data)
         
         st.subheader("Trading Signal")

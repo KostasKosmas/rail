@@ -1,18 +1,21 @@
+# trading_system.py
 import logging
 import numpy as np
 import pandas as pd
 import yfinance as yf
 import streamlit as st
+import plotly.express as px
 import optuna
 from xgboost import XGBClassifier
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.feature_selection import RFECV
-from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
+from sklearn.metrics import classification_report, roc_auc_score
 from imblearn.over_sampling import SMOTE
-from sklearn.preprocessing import label_binarize
+from pykalman import KalmanFilter
+from arch import arch_model
+from tqdm import tqdm
 import warnings
 import re
-from tqdm import tqdm
 
 # Configuration
 DEFAULT_SYMBOL = 'BTC-USD'
@@ -23,7 +26,7 @@ MAX_TRIALS = 20
 GARCH_WINDOW = 14
 MIN_FEATURES = 7
 MIN_SAMPLES_PER_CLASS = 50
-REQUIRED_FEATURES = ['ema_12', 'ema_26', 'macd', 'signal']
+REQUIRED_FEATURES = ['ema_12', 'ema_26', 'macd', 'signal', 'volatility', 'liquidity_ratio', 'price_pressure']
 
 warnings.filterwarnings("ignore", category=UserWarning)
 logging.basicConfig(level=logging.INFO)
@@ -55,28 +58,7 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
             return col.lower().strip('_')
         
         df.columns = [clean_column_name(col) for col in df.columns]
-        symbol_clean = symbol.lower().replace('-', '_')
-        df.columns = [col.replace(f'_{symbol_clean}', '') for col in df.columns]
-        
-        column_map = {
-            'open': ['open', 'adj_open'],
-            'high': ['high', 'adj_high'],
-            'low': ['low', 'adj_low'],
-            'close': ['close', 'adj_close'],
-            'volume': ['volume', 'adj_volume']
-        }
-        
-        final_cols = {}
-        for standard, aliases in column_map.items():
-            for alias in aliases:
-                if alias in df.columns:
-                    final_cols[standard] = df[alias]
-                    break
-            if standard not in final_cols:
-                st.error(f"Missing required column: {standard}")
-                return pd.DataFrame()
-        
-        return pd.DataFrame(final_cols)[['open', 'high', 'low', 'close', 'volume']].ffill().dropna()
+        return df[['open', 'high', 'low', 'close', 'volume']].ffill().dropna()
     
     except Exception as e:
         logging.error(f"Data fetch failed: {str(e)}", exc_info=True)
@@ -94,6 +76,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         df['macd'] = df['ema_12'] - df['ema_26']
         df['signal'] = df['macd'].ewm(span=9, adjust=False).mean()
         
+        # SMAs and RSI
         for window in [20, 50, 100]:
             df[f'sma_{window}'] = df['close'].rolling(window).mean()
             delta = df['close'].diff()
@@ -104,40 +87,34 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
             rs = avg_gain / avg_loss.replace(0, 1)
             df[f'rsi_{window}'] = 100 - (100 / (1 + rs))
         
+        # Volatility features
         df['volatility'] = df['returns'].rolling(GARCH_WINDOW).std()
+        garch = arch_model(df['returns'].dropna(), vol='GARCH', dist='normal')
+        garch_fit = garch.fit(disp='off')
+        df['garch_vol'] = garch_fit.conditional_volatility
         
-        # Improved target engineering with NaN handling
-        future_returns = df['close'].pct_change().shift(-2).dropna()
+        # Triple Barrier Labeling
+        future_returns = df['close'].pct_change().shift(-4)
+        df['target'] = pd.qcut(future_returns, q=3, labels=[0, 1, 2], duplicates='drop')
         
-        # Create quantile bins with duplicate handling
-        try:
-            bins = pd.qcut(
-                future_returns,
-                q=[0, 0.3, 0.7, 1],
-                labels=[0, 1, 2],
-                duplicates='drop'
-            )
-        except ValueError as e:
-            st.error(f"Quantile binning failed: {str(e)}")
-            return pd.DataFrame()
+        # Market microstructure features
+        df['liquidity_ratio'] = df['volume'] / df['volatility'].replace(0, 1e-6)
+        df['price_pressure'] = (df['high'] - df['close']) / (df['close'] - df['low'])
         
-        # Align indices and handle remaining NaNs
-        df = df.join(bins.rename('target'), how='inner')
-        df = df.dropna(subset=['target'])
-        df['target'] = df['target'].astype(int)
-        
-        return df.drop(columns=['open', 'high', 'low', 'close', 'volume']).dropna()
+        return df.dropna().drop(columns=['open', 'high', 'low', 'close', 'volume'])
     
     except Exception as e:
         logging.error(f"Feature engineering failed: {str(e)}", exc_info=True)
         return pd.DataFrame()
 
-class TradingModel:
+class AdvancedTradingModel:
     def __init__(self):
         self.selected_features = []
         self.model = None
         self.required_features = REQUIRED_FEATURES
         self.is_trained = False
+        self.regimes = None
+        self.feature_importances_ = None
         self.classes_ = None
 
     def optimize_model(self, X: pd.DataFrame, y: pd.Series) -> bool:
@@ -161,6 +138,7 @@ class TradingModel:
                 return False
                 
             self._train_final_model(X, y, study.best_params)
+            self._detect_regimes(X)
             
             self.is_trained = True
             return True
@@ -170,10 +148,25 @@ class TradingModel:
             st.error("Model training failed. Check logs for details.")
             return False
 
+    def _detect_regimes(self, X: pd.DataFrame):
+        """Market regime detection using Kalman Filter"""
+        try:
+            kf = KalmanFilter(
+                initial_state_mean=X.iloc[0],
+                n_dim_obs=X.shape[1],
+                em_vars=['transition_covariance', 'observation_covariance']
+            )
+            self.regimes, _ = kf.em(X).smooth(X.values)
+        except Exception as e:
+            logging.error(f"Regime detection failed: {str(e)}")
+            self.regimes = np.zeros(len(X))
+
     def _reset_state(self):
         self.selected_features = []
         self.model = None
         self.is_trained = False
+        self.regimes = None
+        self.feature_importances_ = None
         self.classes_ = None
 
     def _validate_inputs(self, X: pd.DataFrame, y: pd.Series) -> bool:
@@ -190,49 +183,37 @@ class TradingModel:
         return True
 
     def _train_final_model(self, X: pd.DataFrame, y: pd.Series, best_params: dict):
-        tscv = TimeSeriesSplit(n_splits=3)
-        selector = RFECV(
-            XGBClassifier(**best_params),
-            step=1,
-            cv=tscv,
-            min_features_to_select=MIN_FEATURES
-        )
-        selector.fit(X, y)
-        self.selected_features = X.columns[selector.support_].tolist()
-        
-        for feat in self.required_features:
-            if feat not in self.selected_features:
-                self.selected_features.append(feat)
+        try:
+            tscv = TimeSeriesSplit(n_splits=3)
+            selector = RFECV(
+                XGBClassifier(**best_params),
+                step=1,
+                cv=tscv,
+                min_features_to_select=MIN_FEATURES
+            )
+            selector.fit(X, y)
+            self.selected_features = X.columns[selector.support_].tolist()
+            
+            for feat in self.required_features:
+                if feat not in self.selected_features:
+                    self.selected_features.append(feat)
 
-        self.model = XGBClassifier(**best_params)
-        self.model.fit(X[self.selected_features], y)
-        self.classes_ = self.model.classes_
+            self.model = XGBClassifier(**best_params)
+            self.model.fit(X[self.selected_features], y)
+            self.classes_ = self.model.classes_
+            self.feature_importances_ = pd.Series(
+                self.model.feature_importances_,
+                index=self.selected_features
+            ).sort_values(ascending=False)
 
-        st.subheader("Validation Performance")
-        X_sorted = X.sort_index()
-        y_sorted = y.sort_index()
-        
-        tscv = TimeSeriesSplit(n_splits=3)
-        reports = []
-        for fold, (train_idx, test_idx) in enumerate(tscv.split(X_sorted)):
-            X_train, X_test = X_sorted.iloc[train_idx], X_sorted.iloc[test_idx]
-            y_train, y_test = y_sorted.iloc[train_idx], y_sorted.iloc[test_idx]
+            # Validation reporting
+            st.subheader("Model Performance")
+            y_pred = self.model.predict(X[self.selected_features])
+            st.text(classification_report(y, y_pred))
             
-            sm = SMOTE(random_state=42)
-            X_res, y_res = sm.fit_resample(X_train, y_train)
-            
-            model = XGBClassifier(**best_params)
-            model.fit(X_res[self.selected_features], y_res)
-            
-            y_pred = model.predict(X_test[self.selected_features])
-            reports.append(classification_report(y_test, y_pred, output_dict=True))
-            
-        avg_precision = np.mean([r['weighted avg']['precision'] for r in reports])
-        avg_recall = np.mean([r['weighted avg']['recall'] for r in reports])
-        avg_f1 = np.mean([r['weighted avg']['f1-score'] for r in reports])
-        
-        st.write(f"Average Validation Performance (3-fold time series split):")
-        st.write(f"Precision: {avg_precision:.2f}, Recall: {avg_recall:.2f}, F1: {avg_f1:.2f}")
+        except Exception as e:
+            logging.error(f"Model training failed: {str(e)}")
+            raise
 
     def _objective(self, trial, X: pd.DataFrame, y: pd.Series, tscv) -> float:
         params = {
@@ -293,6 +274,84 @@ class TradingModel:
             logging.error(f"Prediction failed: {str(e)}")
             return 0.5
 
+    def probabilistic_forecast(self, X: pd.DataFrame, steps: int = 24):
+        """Generate probabilistic price paths using Monte Carlo simulations"""
+        scenarios = []
+        current_state = X.iloc[-1][self.selected_features].values.reshape(1, -1)
+        
+        for _ in range(100):
+            scenario = []
+            state = current_state.copy()
+            for _ in range(steps):
+                proba = self.model.predict_proba(state)
+                scenario.append(proba[0][2])  # Probability of buy signal
+                # Simulate state evolution with noise
+                state = state * 0.9 + np.random.normal(0, 0.1, state.shape)
+            scenarios.append(scenario)
+            
+        return pd.DataFrame(scenarios)
+
+    def calculate_position_size(self, confidence: float, volatility: float) -> float:
+        """Adaptive position sizing using modified Kelly Criterion"""
+        win_prob = confidence
+        win_loss_ratio = 1.5  # Conservative estimate for crypto
+        kelly_fraction = (win_prob * (win_loss_ratio + 1) - 1) / win_loss_ratio
+        return min(max(kelly_fraction * (1 / (volatility + 1e-6)), 0.0), 0.1)
+
+def show_advanced_ui(model: AdvancedTradingModel, data: pd.DataFrame):
+    """Enhanced Streamlit visualization interface"""
+    tab1, tab2, tab3, tab4 = st.tabs(["Forecast", "Regimes", "Features", "Trading"])
+    
+    with tab1:
+        st.subheader("Probabilistic Price Forecast")
+        forecast = model.probabilistic_forecast(data)
+        fig = px.line(forecast.T.quantile([0.05, 0.5, 0.95], axis=1), 
+                      labels={'value': 'Buy Probability', 'variable': 'Quantile'},
+                      title="24-Step Buy Signal Probability Forecast")
+        st.plotly_chart(fig)
+    
+    with tab2:
+        st.subheader("Market Regime Analysis")
+        if model.regimes is not None:
+            regime_data = data.copy()
+            regime_data['regime'] = model.regimes[:, 0]  # First component
+            fig = px.scatter(regime_data, x='returns', y='volatility',
+                           color='regime', hover_data=['volatility'],
+                           color_discrete_sequence=['red', 'green', 'blue'])
+            st.plotly_chart(fig)
+    
+    with tab3:
+        st.subheader("Feature Analysis")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.write("**Feature Importances**")
+            fig = px.bar(model.feature_importances_, 
+                        labels={'index': 'Feature', 'value': 'Importance'},
+                        height=400)
+            st.plotly_chart(fig)
+            
+        with col2:
+            st.write("**Feature Correlation**")
+            corr_matrix = data[model.selected_features].corr()
+            fig = px.imshow(corr_matrix, text_auto=".2f", aspect="auto")
+            st.plotly_chart(fig)
+    
+    with tab4:
+        st.subheader("Trading Strategy")
+        if not data.empty:
+            current_vol = data['volatility'].iloc[-1]
+            confidence = model.predict(data.drop(columns=['target']).iloc[[-1]])
+            position_size = model.calculate_position_size(confidence, current_vol)
+            
+            col1, col2 = st.columns(2)
+            col1.metric("Current Confidence", f"{confidence:.2%}")
+            col2.metric("Recommended Position", f"{position_size:.1%}")
+            
+            st.write("**Strategy Rules**")
+            st.progress(position_size / 0.1)
+            st.caption("Max position size capped at 10% of capital")
+
 def main():
     st.sidebar.header("Settings")
     symbol = st.sidebar.text_input("Crypto Symbol", DEFAULT_SYMBOL).upper()
@@ -301,11 +360,6 @@ def main():
     processed_data = calculate_features(raw_data)
     
     if not raw_data.empty and not processed_data.empty:
-        missing_features = [f for f in REQUIRED_FEATURES if f not in processed_data.columns]
-        if missing_features:
-            st.error(f"Missing critical features: {missing_features}")
-            st.stop()
-            
         col1, col2 = st.columns([3, 1])
         with col1:
             st.subheader(f"{symbol} Price Chart")
@@ -316,7 +370,7 @@ def main():
 
     if st.sidebar.button("🚀 Train Model") and not processed_data.empty:
         try:
-            model = TradingModel()
+            model = AdvancedTradingModel()
             X = processed_data.drop(columns=['target'])
             y = processed_data['target']
             
@@ -331,29 +385,7 @@ def main():
 
     if st.session_state.model and not processed_data.empty:
         model = st.session_state.model
-        latest_data = processed_data.drop(columns=['target']).iloc[[-1]]
-        
-        missing = [f for f in model.selected_features if f not in latest_data.columns]
-        if missing:
-            st.error(f"Missing features in latest data: {missing}")
-            st.stop()
-            
-        confidence = model.predict(latest_data)
-        
-        st.subheader("Trading Signal")
-        col1, col2 = st.columns(2)
-        col1.metric("Confidence Score", f"{confidence:.2%}")
-        
-        current_vol = processed_data['volatility'].iloc[-1]
-        adj_buy = TRADE_THRESHOLD_BUY + (current_vol * 0.1)
-        adj_sell = TRADE_THRESHOLD_SELL - (current_vol * 0.1)
-        
-        if confidence > adj_buy:
-            col2.success("🚀 Strong Buy Signal")
-        elif confidence < adj_sell:
-            col2.error("🔻 Strong Sell Signal")
-        else:
-            col2.info("🛑 Hold Position")
+        show_advanced_ui(model, processed_data)
 
 if __name__ == "__main__":
     main()

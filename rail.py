@@ -9,7 +9,7 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.feature_selection import RFECV
 from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
 from imblearn.over_sampling import SMOTE
-from datetime import datetime, timedelta
+from sklearn.preprocessing import label_binarize
 import warnings
 import re
 from tqdm import tqdm
@@ -26,7 +26,7 @@ DEFAULT_SYMBOL = 'BTC-USD'
 PRIMARY_INTERVAL = '15m'
 TRADE_THRESHOLD_BUY = 0.58
 TRADE_THRESHOLD_SELL = 0.42
-MAX_TRIALS = 20  # Reduced from 50
+MAX_TRIALS = 20
 GARCH_WINDOW = 14
 MIN_FEATURES = 7
 
@@ -40,39 +40,29 @@ st.title("🚀 AI-Powered Cryptocurrency Trading System")
 if 'model' not in st.session_state:
     st.session_state.model = None
 
-# Improved Data Pipeline with Robust Column Handling
 @st.cache_data(ttl=300, show_spinner="Fetching market data...")
 def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
     try:
-        # Fetch data with auto_adjust to handle corporate actions
         df = yf.download(
             symbol,
-            period="30d",  # Reduced from "60d" or "180d"
+            period="30d",
             interval=interval,
             progress=False,
             auto_adjust=True
         )
         
-        # Convert MultiIndex columns to strings
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = ['_'.join(map(str, col)).strip() for col in df.columns.values]
         
-        # Enhanced column cleaning pipeline
         def clean_column_name(col: str) -> str:
-            # Convert camelCase to snake_case
             col = re.sub(r'([a-z])([A-Z])', r'\1_\2', str(col))
-            # Replace all non-alphanumeric characters with underscores
             col = re.sub(r'[^a-zA-Z0-9]+', '_', col)
-            # Convert to lowercase and strip underscores
             return col.lower().strip('_')
         
         df.columns = [clean_column_name(col) for col in df.columns]
-        
-        # Remove symbol-specific suffixes
         symbol_clean = symbol.lower().replace('-', '_')
         df.columns = [col.replace(f'_{symbol_clean}', '') for col in df.columns]
         
-        # Comprehensive column mapping with fallbacks
         column_map = {
             'open': ['open', 'adj_open', 'adjusted_open', 'opening_price'],
             'high': ['high', 'adj_high', 'adjusted_high', 'highest_price'],
@@ -90,10 +80,7 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
                     found = True
                     break
             if not found:
-                available = "\n".join(df.columns)
-                st.error(f"""Missing required column: {standard.upper()}
-                          Tried: {aliases}
-                          Available columns:\n{available}""")
+                st.error(f"Missing required column: {standard.upper()}")
                 return pd.DataFrame()
         
         clean_df = pd.DataFrame(final_cols)[['open', 'high', 'low', 'close', 'volume']]
@@ -110,17 +97,13 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     
     try:
         df = df.copy()
-        # Feature engineering
         df['close_lag1'] = df['close'].shift(1)
         df['returns'] = df['close'].pct_change()
         
-        # Technical indicators
         windows = [20, 50, 100]
         for window in windows:
-            # Simple Moving Average
             df[f'sma_{window}'] = df['close'].rolling(window).mean()
             
-            # Relative Strength Index
             delta = df['close'].diff()
             gain = delta.clip(lower=0)
             loss = -delta.clip(upper=0)
@@ -129,16 +112,12 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
             rs = avg_gain / avg_loss.replace(0, 1)
             df[f'rsi_{window}'] = 100 - (100 / (1 + rs))
         
-        # Volatility calculation
         df['volatility'] = df['returns'].rolling(GARCH_WINDOW).std()
-        
-        # MACD Indicator
         df['ema_12'] = df['close'].ewm(span=12, adjust=False).mean()
         df['ema_26'] = df['close'].ewm(span=26, adjust=False).mean()
         df['macd'] = df['ema_12'] - df['ema_26']
         df['signal'] = df['macd'].ewm(span=9, adjust=False).mean()
         
-        # Target variable (dynamic threshold based on volatility)
         future_returns = df['close'].pct_change().shift(-1)
         dynamic_threshold = df['volatility'].rolling(window=14).mean()
         df['target'] = np.select(
@@ -147,14 +126,12 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
             default=1
         )
         
-        # Cleanup original columns
         return df.dropna().drop(columns=['open', 'high', 'low', 'close', 'volume', 'close_lag1'])
     
     except Exception as e:
         logging.error(f"Feature engineering failed: {str(e)}", exc_info=True)
         return pd.DataFrame()
 
-# Model Pipeline with Enhanced Stability
 class TradingModel:
     def __init__(self):
         self.selected_features = []
@@ -163,12 +140,9 @@ class TradingModel:
     def optimize_model(self, X: pd.DataFrame, y: pd.Series):
         try:
             tscv = TimeSeriesSplit(n_splits=3)
-            
-            # Address class imbalance using SMOTE
             smote = SMOTE(random_state=42)
             X_res, y_res = smote.fit_resample(X, y)
             
-            # Feature selection
             selector = RFECV(
                 XGBClassifier(),
                 step=1,
@@ -178,26 +152,22 @@ class TradingModel:
             selector.fit(X_res, y_res)
             self.selected_features = X.columns[selector.get_support()].tolist()
             
-            # Hyperparameter optimization with parallel processing
             study = optuna.create_study(direction='maximize')
             study.optimize(
                 lambda trial: self._objective(trial, X_res[self.selected_features], y_res, tscv),
                 n_trials=MAX_TRIALS,
-                n_jobs=-1  # Use all available CPU cores
+                n_jobs=-1
             )
             
-            # Final model training
             self.model = XGBClassifier(**study.best_params)
             self.model.fit(X_res[self.selected_features], y_res)
             
-            # Validation report
             st.subheader("Model Validation")
             y_pred = self.model.predict(X[self.selected_features])
             st.text(classification_report(y, y_pred))
             st.write("Confusion Matrix:")
             st.dataframe(confusion_matrix(y, y_pred))
             
-            # ROC-AUC Score
             y_proba = self.model.predict_proba(X[self.selected_features])
             roc_auc = roc_auc_score(y, y_proba, multi_class='ovr')
             st.metric("ROC-AUC Score", f"{roc_auc:.2f}")
@@ -211,8 +181,9 @@ class TradingModel:
             'n_estimators': trial.suggest_int('n_estimators', 100, 500),
             'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
             'max_depth': trial.suggest_int('max_depth', 3, 15),
-            'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
-            'subsample': trial.suggest_float('subsample', 0.5, 1.0)
+            'subsample': trial.suggest_float('subsample', 0.5, 1.0),
+            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
+            'gamma': trial.suggest_float('gamma', 0, 1)
         }
         
         scores = []
@@ -220,13 +191,31 @@ class TradingModel:
             X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
             y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
             
-            # Use SMOTE only once per trial
             smote = SMOTE(random_state=42)
             X_res, y_res = smote.fit_resample(X_train, y_train)
             
             model = XGBClassifier(**params)
             model.fit(X_res, y_res)
-            scores.append(roc_auc_score(y_test, model.predict_proba(X_test), multi_class='ovr'))
+            
+            y_proba = model.predict_proba(X_test)
+            labels = np.unique(y_res)
+            
+            try:
+                y_test_bin = label_binarize(y_test, classes=labels)
+                n_classes = y_test_bin.shape[1]
+                
+                auc_scores = []
+                for i in range(n_classes):
+                    if np.sum(y_test_bin[:, i]) >= 1:
+                        auc = roc_auc_score(y_test_bin[:, i], y_proba[:, i])
+                        auc_scores.append(auc)
+                
+                if len(auc_scores) > 0:
+                    scores.append(np.mean(auc_scores))
+                else:
+                    scores.append(0.0)
+            except Exception as e:
+                scores.append(0.0)
         
         return np.mean(scores)
 
@@ -235,7 +224,6 @@ class TradingModel:
             if not self.selected_features or X.empty:
                 return 0.5
                 
-            # Check for missing features
             missing = [f for f in self.selected_features if f not in X.columns]
             if missing:
                 logging.error(f"Missing features: {missing}")
@@ -246,7 +234,6 @@ class TradingModel:
             logging.error(f"Prediction failed: {str(e)}")
             return 0.5
 
-# Main Interface with Robust Checks
 def main():
     st.sidebar.header("Settings")
     symbol = st.sidebar.text_input("Cryptocurrency Symbol", DEFAULT_SYMBOL).upper()
@@ -254,7 +241,6 @@ def main():
     raw_data = fetch_data(symbol, PRIMARY_INTERVAL)
     processed_data = calculate_features(raw_data)
     
-    # Display data if available
     if not raw_data.empty and not processed_data.empty:
         col1, col2 = st.columns([3, 1])
         with col1:
@@ -266,7 +252,6 @@ def main():
             st.metric("Current Price", f"${current_price:.2f}")
             st.metric("Volatility", f"{current_vol:.2%}")
 
-    # Model training
     if st.sidebar.button("🚀 Train Model") and not processed_data.empty:
         try:
             model = TradingModel()
@@ -281,7 +266,6 @@ def main():
         except Exception as e:
             st.error(f"Training failed: {str(e)}")
 
-    # Prediction and trading signal
     if st.session_state.model and not processed_data.empty:
         latest_data = processed_data.drop(columns=['target']).iloc[[-1]]
         confidence = st.session_state.model.predict(latest_data)

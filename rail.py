@@ -1,15 +1,14 @@
-# crypto_trading_system.py (FIXED COLUMN HANDLING)
 import logging
 import numpy as np
 import pandas as pd
 import yfinance as yf
 import streamlit as st
 import optuna
-from sklearn.ensemble import GradientBoostingClassifier
+from xgboost import XGBClassifier
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.feature_selection import RFECV
-from sklearn.metrics import classification_report, confusion_matrix, f1_score
-from imblearn.under_sampling import RandomUnderSampler
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
+from imblearn.over_sampling import SMOTE
 from datetime import datetime, timedelta
 import warnings
 import re
@@ -124,10 +123,17 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         # Volatility calculation
         df['volatility'] = df['returns'].rolling(GARCH_WINDOW).std()
         
-        # Target variable (1% threshold)
+        # MACD Indicator
+        df['ema_12'] = df['close'].ewm(span=12, adjust=False).mean()
+        df['ema_26'] = df['close'].ewm(span=26, adjust=False).mean()
+        df['macd'] = df['ema_12'] - df['ema_26']
+        df['signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+        
+        # Target variable (dynamic threshold based on volatility)
         future_returns = df['close'].pct_change().shift(-1)
+        dynamic_threshold = df['volatility'].rolling(window=14).mean()
         df['target'] = np.select(
-            [future_returns > 0.01, future_returns < -0.01],
+            [future_returns > dynamic_threshold, future_returns < -dynamic_threshold],
             [2, 0],
             default=1
         )
@@ -149,26 +155,30 @@ class TradingModel:
         try:
             tscv = TimeSeriesSplit(n_splits=3)
             
-            # Feature selection with list-based features
+            # Address class imbalance using SMOTE
+            smote = SMOTE(random_state=42)
+            X_res, y_res = smote.fit_resample(X, y)
+            
+            # Feature selection
             selector = RFECV(
-                GradientBoostingClassifier(),
+                XGBClassifier(),
                 step=1,
                 cv=tscv,
                 min_features_to_select=MIN_FEATURES
             )
-            selector.fit(X, y)
+            selector.fit(X_res, y_res)
             self.selected_features = X.columns[selector.get_support()].tolist()
             
             # Hyperparameter optimization
             study = optuna.create_study(direction='maximize')
             study.optimize(
-                lambda trial: self._objective(trial, X[self.selected_features], y, tscv),
+                lambda trial: self._objective(trial, X_res[self.selected_features], y_res, tscv),
                 n_trials=MAX_TRIALS
             )
             
             # Final model training
-            self.model = GradientBoostingClassifier(**study.best_params)
-            self.model.fit(X[self.selected_features], y)
+            self.model = XGBClassifier(**study.best_params)
+            self.model.fit(X_res[self.selected_features], y_res)
             
             # Validation report
             st.subheader("Model Validation")
@@ -177,17 +187,23 @@ class TradingModel:
             st.write("Confusion Matrix:")
             st.dataframe(confusion_matrix(y, y_pred))
             
+            # ROC-AUC Score
+            y_proba = self.model.predict_proba(X[self.selected_features])
+            roc_auc = roc_auc_score(y, y_proba, multi_class='ovr')
+            st.metric("ROC-AUC Score", f"{roc_auc:.2f}")
+            
         except Exception as e:
             logging.error(f"Model training failed: {str(e)}", exc_info=True)
             st.error("Model training failed. Check logs for details.")
 
     def _objective(self, trial, X: pd.DataFrame, y: pd.Series, cv):
         params = {
-            'n_estimators': trial.suggest_int('n_estimators', 100, 500),
-            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
-            'max_depth': trial.suggest_int('max_depth', 3, 15),
-            'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
-            'subsample': trial.suggest_float('subsample', 0.5, 1.0)
+            'n_estimators': trial.suggest_int('n_estimators', 100, 1000),
+            'learning_rate': trial.suggest_float('learning_rate', 0.001, 0.3, log=True),
+            'max_depth': trial.suggest_int('max_depth', 3, 20),
+            'min_samples_split': trial.suggest_int('min_samples_split', 2, 50),
+            'subsample': trial.suggest_float('subsample', 0.5, 1.0),
+            'max_features': trial.suggest_categorical('max_features', ['sqrt', 'log2', None])
         }
         
         scores = []
@@ -195,12 +211,9 @@ class TradingModel:
             X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
             y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
             
-            rus = RandomUnderSampler(random_state=42)
-            X_res, y_res = rus.fit_resample(X_train, y_train)
-            
-            model = GradientBoostingClassifier(**params)
-            model.fit(X_res, y_res)
-            scores.append(f1_score(y_test, model.predict(X_test), average='weighted'))
+            model = XGBClassifier(**params)
+            model.fit(X_train, y_train)
+            scores.append(roc_auc_score(y_test, model.predict_proba(X_test), multi_class='ovr'))
             
         return np.mean(scores)
 

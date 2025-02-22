@@ -4,7 +4,6 @@ import pandas as pd
 import yfinance as yf
 import streamlit as st
 import optuna
-from xgboost import XGBClassifier
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.feature_selection import RFECV
 from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
@@ -12,6 +11,13 @@ from imblearn.over_sampling import SMOTE
 from datetime import datetime, timedelta
 import warnings
 import re
+
+# Check if xgboost is installed
+try:
+    from xgboost import XGBClassifier
+except ImportError:
+    st.error("The 'xgboost' library is not installed. Please install it using `pip install xgboost`.")
+    st.stop()
 
 # Configuration
 DEFAULT_SYMBOL = 'BTC-USD'

@@ -11,9 +11,9 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.feature_selection import RFECV
 from sklearn.metrics import classification_report, roc_auc_score
 from imblearn.over_sampling import SMOTE
-from pykalman import KalmanFilter
 from arch import arch_model
 from tqdm import tqdm
+from filterpy.kalman import KalmanFilter
 import warnings
 import re
 
@@ -26,7 +26,7 @@ MAX_TRIALS = 20
 GARCH_WINDOW = 14
 MIN_FEATURES = 7
 MIN_SAMPLES_PER_CLASS = 50
-REQUIRED_FEATURES = ['ema_12', 'ema_26', 'macd', 'signal', 'volatility', 'liquidity_ratio', 'price_pressure']
+REQUIRED_FEATURES = ['ema_12', 'ema_26', 'macd', 'signal', 'volatility', 'liquidity_ratio']
 
 warnings.filterwarnings("ignore", category=UserWarning)
 logging.basicConfig(level=logging.INFO)
@@ -76,7 +76,6 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         df['macd'] = df['ema_12'] - df['ema_26']
         df['signal'] = df['macd'].ewm(span=9, adjust=False).mean()
         
-        # SMAs and RSI
         for window in [20, 50, 100]:
             df[f'sma_{window}'] = df['close'].rolling(window).mean()
             delta = df['close'].diff()
@@ -99,7 +98,6 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         
         # Market microstructure features
         df['liquidity_ratio'] = df['volume'] / df['volatility'].replace(0, 1e-6)
-        df['price_pressure'] = (df['high'] - df['close']) / (df['close'] - df['low'])
         
         return df.dropna().drop(columns=['open', 'high', 'low', 'close', 'volume'])
     
@@ -107,7 +105,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         logging.error(f"Feature engineering failed: {str(e)}", exc_info=True)
         return pd.DataFrame()
 
-class AdvancedTradingModel:
+class TradingModel:
     def __init__(self):
         self.selected_features = []
         self.model = None
@@ -115,7 +113,6 @@ class AdvancedTradingModel:
         self.is_trained = False
         self.regimes = None
         self.feature_importances_ = None
-        self.classes_ = None
 
     def optimize_model(self, X: pd.DataFrame, y: pd.Series) -> bool:
         try:
@@ -151,12 +148,16 @@ class AdvancedTradingModel:
     def _detect_regimes(self, X: pd.DataFrame):
         """Market regime detection using Kalman Filter"""
         try:
-            kf = KalmanFilter(
-                initial_state_mean=X.iloc[0],
-                n_dim_obs=X.shape[1],
-                em_vars=['transition_covariance', 'observation_covariance']
-            )
-            self.regimes, _ = kf.em(X).smooth(X.values)
+            kf = KalmanFilter(dim_x=1, dim_z=1)
+            kf.x = np.array([X.iloc[0].mean()])
+            kf.F = np.array([[1.0]])
+            kf.H = np.array([[1.0]])
+            kf.P *= 1000.0
+            kf.R = 5
+            kf.Q = 0.01
+            
+            means, _, _, _ = kf.batch_filter(X.values)
+            self.regimes = np.where(means > np.median(means), 1, 0)
         except Exception as e:
             logging.error(f"Regime detection failed: {str(e)}")
             self.regimes = np.zeros(len(X))
@@ -167,7 +168,6 @@ class AdvancedTradingModel:
         self.is_trained = False
         self.regimes = None
         self.feature_importances_ = None
-        self.classes_ = None
 
     def _validate_inputs(self, X: pd.DataFrame, y: pd.Series) -> bool:
         missing_features = [f for f in self.required_features if f not in X.columns]
@@ -200,7 +200,6 @@ class AdvancedTradingModel:
 
             self.model = XGBClassifier(**best_params)
             self.model.fit(X[self.selected_features], y)
-            self.classes_ = self.model.classes_
             self.feature_importances_ = pd.Series(
                 self.model.feature_importances_,
                 index=self.selected_features
@@ -274,83 +273,35 @@ class AdvancedTradingModel:
             logging.error(f"Prediction failed: {str(e)}")
             return 0.5
 
-    def probabilistic_forecast(self, X: pd.DataFrame, steps: int = 24):
-        """Generate probabilistic price paths using Monte Carlo simulations"""
-        scenarios = []
-        current_state = X.iloc[-1][self.selected_features].values.reshape(1, -1)
+    def show_analysis(self, data: pd.DataFrame):
+        """Display advanced analytics"""
+        tab1, tab2 = st.tabs(["Features", "Regimes"])
         
-        for _ in range(100):
-            scenario = []
-            state = current_state.copy()
-            for _ in range(steps):
-                proba = self.model.predict_proba(state)
-                scenario.append(proba[0][2])  # Probability of buy signal
-                # Simulate state evolution with noise
-                state = state * 0.9 + np.random.normal(0, 0.1, state.shape)
-            scenarios.append(scenario)
-            
-        return pd.DataFrame(scenarios)
-
-    def calculate_position_size(self, confidence: float, volatility: float) -> float:
-        """Adaptive position sizing using modified Kelly Criterion"""
-        win_prob = confidence
-        win_loss_ratio = 1.5  # Conservative estimate for crypto
-        kelly_fraction = (win_prob * (win_loss_ratio + 1) - 1) / win_loss_ratio
-        return min(max(kelly_fraction * (1 / (volatility + 1e-6)), 0.0), 0.1)
-
-def show_advanced_ui(model: AdvancedTradingModel, data: pd.DataFrame):
-    """Enhanced Streamlit visualization interface"""
-    tab1, tab2, tab3, tab4 = st.tabs(["Forecast", "Regimes", "Features", "Trading"])
-    
-    with tab1:
-        st.subheader("Probabilistic Price Forecast")
-        forecast = model.probabilistic_forecast(data)
-        fig = px.line(forecast.T.quantile([0.05, 0.5, 0.95], axis=1), 
-                      labels={'value': 'Buy Probability', 'variable': 'Quantile'},
-                      title="24-Step Buy Signal Probability Forecast")
-        st.plotly_chart(fig)
-    
-    with tab2:
-        st.subheader("Market Regime Analysis")
-        if model.regimes is not None:
-            regime_data = data.copy()
-            regime_data['regime'] = model.regimes[:, 0]  # First component
-            fig = px.scatter(regime_data, x='returns', y='volatility',
-                           color='regime', hover_data=['volatility'],
-                           color_discrete_sequence=['red', 'green', 'blue'])
-            st.plotly_chart(fig)
-    
-    with tab3:
-        st.subheader("Feature Analysis")
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.write("**Feature Importances**")
-            fig = px.bar(model.feature_importances_, 
-                        labels={'index': 'Feature', 'value': 'Importance'},
-                        height=400)
-            st.plotly_chart(fig)
-            
-        with col2:
-            st.write("**Feature Correlation**")
-            corr_matrix = data[model.selected_features].corr()
-            fig = px.imshow(corr_matrix, text_auto=".2f", aspect="auto")
-            st.plotly_chart(fig)
-    
-    with tab4:
-        st.subheader("Trading Strategy")
-        if not data.empty:
-            current_vol = data['volatility'].iloc[-1]
-            confidence = model.predict(data.drop(columns=['target']).iloc[[-1]])
-            position_size = model.calculate_position_size(confidence, current_vol)
-            
+        with tab1:
+            st.subheader("Feature Analysis")
             col1, col2 = st.columns(2)
-            col1.metric("Current Confidence", f"{confidence:.2%}")
-            col2.metric("Recommended Position", f"{position_size:.1%}")
             
-            st.write("**Strategy Rules**")
-            st.progress(position_size / 0.1)
-            st.caption("Max position size capped at 10% of capital")
+            with col1:
+                st.write("**Feature Importances**")
+                fig = px.bar(self.feature_importances_, 
+                            labels={'index': 'Feature', 'value': 'Importance'},
+                            height=400)
+                st.plotly_chart(fig)
+            
+            with col2:
+                st.write("**Feature Correlations**")
+                corr_matrix = data[self.selected_features].corr()
+                fig = px.imshow(corr_matrix, text_auto=".2f", aspect="auto")
+                st.plotly_chart(fig)
+        
+        with tab2:
+            st.subheader("Market Regimes")
+            if self.regimes is not None:
+                regime_data = data.copy()
+                regime_data['regime'] = self.regimes
+                fig = px.line(regime_data, y='close', color='regime',
+                            title="Price with Regime Detection")
+                st.plotly_chart(fig)
 
 def main():
     st.sidebar.header("Settings")
@@ -370,7 +321,7 @@ def main():
 
     if st.sidebar.button("🚀 Train Model") and not processed_data.empty:
         try:
-            model = AdvancedTradingModel()
+            model = TradingModel()
             X = processed_data.drop(columns=['target'])
             y = processed_data['target']
             
@@ -385,7 +336,26 @@ def main():
 
     if st.session_state.model and not processed_data.empty:
         model = st.session_state.model
-        show_advanced_ui(model, processed_data)
+        latest_data = processed_data.drop(columns=['target']).iloc[[-1]]
+        
+        confidence = model.predict(latest_data)
+        current_vol = processed_data['volatility'].iloc[-1]
+        
+        st.subheader("Trading Signal")
+        col1, col2 = st.columns(2)
+        col1.metric("Confidence Score", f"{confidence:.2%}")
+        
+        adj_buy = TRADE_THRESHOLD_BUY + (current_vol * 0.1)
+        adj_sell = TRADE_THRESHOLD_SELL - (current_vol * 0.1)
+        
+        if confidence > adj_buy:
+            col2.success("🚀 Strong Buy Signal")
+        elif confidence < adj_sell:
+            col2.error("🔻 Strong Sell Signal")
+        else:
+            col2.info("🛑 Hold Position")
+        
+        model.show_analysis(processed_data)
 
 if __name__ == "__main__":
     main()

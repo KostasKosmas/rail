@@ -49,16 +49,18 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
             auto_adjust=True
         )
         
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = ['_'.join(col).strip() for col in df.columns.values]
+        # Standardize column names
+        df.columns = [col.lower().replace(' ', '_').replace('-', '_') 
+                     for col in df.columns]
         
-        def clean_column_name(col: str) -> str:
-            col = re.sub(r'([a-z])([A-Z])', r'\1_\2', str(col))
-            col = re.sub(r'[^a-zA-Z0-9]+', '_', col)
-            return col.lower().strip('_')
+        # Check required columns
+        required_cols = {'open', 'high', 'low', 'close', 'volume'}
+        missing = required_cols - set(df.columns)
+        if missing:
+            st.error(f"Missing columns: {', '.join(missing)}")
+            return pd.DataFrame()
         
-        df.columns = [clean_column_name(col) for col in df.columns]
-        return df[['open', 'high', 'low', 'close', 'volume']].ffill().dropna()
+        return df[list(required_cols)].ffill().dropna()
     
     except Exception as e:
         logging.error(f"Data fetch failed: {str(e)}", exc_info=True)
@@ -68,6 +70,12 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
 def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     try:
         df = df.copy()
+        required_cols = {'open', 'high', 'low', 'close', 'volume'}
+        if not required_cols.issubset(df.columns):
+            missing = required_cols - set(df.columns)
+            raise KeyError(f"Missing columns: {', '.join(missing)}")
+        
+        # Feature calculations
         df['returns'] = df['close'].pct_change()
         
         # Technical indicators
@@ -76,28 +84,15 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         df['macd'] = df['ema_12'] - df['ema_26']
         df['signal'] = df['macd'].ewm(span=9, adjust=False).mean()
         
-        for window in [20, 50, 100]:
-            df[f'sma_{window}'] = df['close'].rolling(window).mean()
-            delta = df['close'].diff()
-            gain = delta.where(delta > 0, 0)
-            loss = -delta.where(delta < 0, 0)
-            avg_gain = gain.rolling(window).mean()
-            avg_loss = loss.rolling(window).mean()
-            rs = avg_gain / avg_loss.replace(0, 1)
-            df[f'rsi_{window}'] = 100 - (100 / (1 + rs))
-        
-        # Volatility features
+        # Volatility
         df['volatility'] = df['returns'].rolling(GARCH_WINDOW).std()
-        garch = arch_model(df['returns'].dropna(), vol='GARCH', dist='normal')
-        garch_fit = garch.fit(disp='off')
-        df['garch_vol'] = garch_fit.conditional_volatility
         
-        # Triple Barrier Labeling
+        # Liquidity ratio
+        df['liquidity_ratio'] = df['volume'] / df['volatility'].replace(0, 1e-6)
+        
+        # Target engineering
         future_returns = df['close'].pct_change().shift(-4)
         df['target'] = pd.qcut(future_returns, q=3, labels=[0, 1, 2], duplicates='drop')
-        
-        # Market microstructure features
-        df['liquidity_ratio'] = df['volume'] / df['volatility'].replace(0, 1e-6)
         
         return df.dropna().drop(columns=['open', 'high', 'low', 'close', 'volume'])
     
@@ -135,8 +130,6 @@ class TradingModel:
                 return False
                 
             self._train_final_model(X, y, study.best_params)
-            self._detect_regimes(X)
-            
             self.is_trained = True
             return True
             
@@ -144,23 +137,6 @@ class TradingModel:
             logging.error(f"Training failed: {str(e)}", exc_info=True)
             st.error("Model training failed. Check logs for details.")
             return False
-
-    def _detect_regimes(self, X: pd.DataFrame):
-        """Market regime detection using Kalman Filter"""
-        try:
-            kf = KalmanFilter(dim_x=1, dim_z=1)
-            kf.x = np.array([X.iloc[0].mean()])
-            kf.F = np.array([[1.0]])
-            kf.H = np.array([[1.0]])
-            kf.P *= 1000.0
-            kf.R = 5
-            kf.Q = 0.01
-            
-            means, _, _, _ = kf.batch_filter(X.values)
-            self.regimes = np.where(means > np.median(means), 1, 0)
-        except Exception as e:
-            logging.error(f"Regime detection failed: {str(e)}")
-            self.regimes = np.zeros(len(X))
 
     def _reset_state(self):
         self.selected_features = []
@@ -172,7 +148,7 @@ class TradingModel:
     def _validate_inputs(self, X: pd.DataFrame, y: pd.Series) -> bool:
         missing_features = [f for f in self.required_features if f not in X.columns]
         if missing_features:
-            st.error(f"Missing required features: {missing_features}")
+            st.error(f"Missing required features: {', '.join(missing_features)}")
             return False
 
         class_counts = y.value_counts()
@@ -205,7 +181,6 @@ class TradingModel:
                 index=self.selected_features
             ).sort_values(ascending=False)
 
-            # Validation reporting
             st.subheader("Model Performance")
             y_pred = self.model.predict(X[self.selected_features])
             st.text(classification_report(y, y_pred))
@@ -264,7 +239,7 @@ class TradingModel:
         try:
             missing = [f for f in self.selected_features if f not in X.columns]
             if missing:
-                logging.error(f"Missing features: {missing}")
+                logging.error(f"Missing features: {', '.join(missing)}")
                 return 0.5
                 
             proba = self.model.predict_proba(X[self.selected_features])[0][2]
@@ -272,36 +247,6 @@ class TradingModel:
         except Exception as e:
             logging.error(f"Prediction failed: {str(e)}")
             return 0.5
-
-    def show_analysis(self, data: pd.DataFrame):
-        """Display advanced analytics"""
-        tab1, tab2 = st.tabs(["Features", "Regimes"])
-        
-        with tab1:
-            st.subheader("Feature Analysis")
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.write("**Feature Importances**")
-                fig = px.bar(self.feature_importances_, 
-                            labels={'index': 'Feature', 'value': 'Importance'},
-                            height=400)
-                st.plotly_chart(fig)
-            
-            with col2:
-                st.write("**Feature Correlations**")
-                corr_matrix = data[self.selected_features].corr()
-                fig = px.imshow(corr_matrix, text_auto=".2f", aspect="auto")
-                st.plotly_chart(fig)
-        
-        with tab2:
-            st.subheader("Market Regimes")
-            if self.regimes is not None:
-                regime_data = data.copy()
-                regime_data['regime'] = self.regimes
-                fig = px.line(regime_data, y='close', color='regime',
-                            title="Price with Regime Detection")
-                st.plotly_chart(fig)
 
 def main():
     st.sidebar.header("Settings")
@@ -354,8 +299,6 @@ def main():
             col2.error("🔻 Strong Sell Signal")
         else:
             col2.info("🛑 Hold Position")
-        
-        model.show_analysis(processed_data)
 
 if __name__ == "__main__":
     main()

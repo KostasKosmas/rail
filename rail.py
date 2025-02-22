@@ -16,6 +16,7 @@ from tqdm import tqdm
 from filterpy.kalman import KalmanFilter
 import warnings
 import re
+from sklearn.preprocessing import label_binarize
 
 # Configuration
 DEFAULT_SYMBOL = 'BTC-USD'
@@ -49,9 +50,18 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
             auto_adjust=True
         )
         
-        # Standardize column names
-        df.columns = [col.lower().replace(' ', '_').replace('-', '_') 
-                     for col in df.columns]
+        # Handle multi-index columns and convert to strings
+        new_columns = []
+        for col in df.columns:
+            if isinstance(col, tuple):
+                # Join tuple elements with underscore
+                col_str = '_'.join(col)
+            else:
+                col_str = str(col)
+            # Standardize column names
+            col_str = col_str.lower().replace(' ', '_').replace('-', '_')
+            new_columns.append(col_str)
+        df.columns = new_columns
         
         # Check required columns
         required_cols = {'open', 'high', 'low', 'close', 'volume'}

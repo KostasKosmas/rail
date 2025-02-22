@@ -1,4 +1,4 @@
-# crypto_trading_system.py (FIXED COLUMN NAMES)
+# crypto_trading_system.py (FIXED COLUMN NAMES WITH SYMBOL SUFFIX)
 import logging
 import numpy as np
 import pandas as pd
@@ -32,7 +32,7 @@ st.title("🚀 AI-Powered Cryptocurrency Trading System")
 if 'model' not in st.session_state:
     st.session_state.model = None
 
-# Fixed Data Pipeline with Symbol Suffix Handling
+# Fixed Data Pipeline with Dynamic Symbol Suffix Handling
 @st.cache_data(ttl=300, show_spinner="Fetching market data...")
 def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
     try:
@@ -48,12 +48,15 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = ['_'.join(map(str, col)).strip() for col in df.columns.values]
         
-        # Clean column names and remove symbol suffix
+        # Clean column names and remove symbol suffix dynamically
         symbol_clean = symbol.lower().replace('-', '_')
-        df.columns = [
-            re.sub(rf'_{symbol_clean}$', '', col.lower().strip('_'))
-            for col in df.columns
-        ]
+        new_columns = []
+        for col in df.columns:
+            # Remove symbol suffix and clean column name
+            col_clean = re.sub(rf'_{symbol_clean}$', '', col.lower().strip('_'))
+            new_columns.append(col_clean)
+        
+        df.columns = new_columns
         
         # Validate required columns
         required = ['open', 'high', 'low', 'close', 'volume']

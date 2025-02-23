@@ -74,8 +74,8 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
             st.error("No data returned from Yahoo Finance")
             return pd.DataFrame()
         
-        # Standardize column names
-        df.columns = [col.lower().replace(' ', '_') for col in df.columns]
+        # Convert column names to strings before processing
+        df.columns = [str(col).lower().replace(' ', '_') for col in df.columns]  # FIXED
         required_cols = ['open', 'high', 'low', 'close', 'volume']
         
         if not all(col in df.columns for col in required_cols):

@@ -29,25 +29,24 @@ logging.basicConfig(level=logging.INFO)
 
 # Streamlit UI
 st.set_page_config(page_title="AI Trading System", layout="wide")
-st.title("🚀 Robust Trading System")
+st.title("🚀 Final Trading System")
 
 if 'model' not in st.session_state:
     st.session_state.model = None
 
 def clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
-    """Standardize column names from yfinance response"""
+    """Properly handle Yahoo Finance column names"""
     if isinstance(df.columns, pd.MultiIndex):
-        # Handle multi-index columns (like those from yfinance)
-        df.columns = ['_'.join(col).lower().replace(' ', '_') for col in df.columns]
+        # Extract just the metric names (Open, High, Low, Close, Volume)
+        df.columns = df.columns.get_level_values(0).str.lower()
     else:
-        # Handle regular columns
-        df.columns = [str(col).lower().replace(' ', '_') for col in df.columns]
+        df.columns = df.columns.str.lower()
     return df
 
 @st.cache_data(ttl=300, show_spinner="Fetching market data...")
 def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
     try:
-        # Adjust period based on interval to avoid Yahoo Finance limitations
+        # Adjust period based on interval
         period_map = {
             '1m': '7d',
             '2m': '60d',
@@ -73,14 +72,15 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
             
         df = clean_column_names(df)
         
-        # Ensure required columns exist
-        required_cols = {'open', 'high', 'low', 'close', 'volume'}
-        missing_cols = required_cols - set(df.columns)
-        if missing_cols:
-            st.error(f"Missing columns: {', '.join(missing_cols)}")
+        # Verify required columns
+        required_cols = ['open', 'high', 'low', 'close', 'volume']
+        missing = [col for col in required_cols if col not in df.columns]
+        
+        if missing:
+            st.error(f"Missing columns: {', '.join(missing)}")
             return pd.DataFrame()
             
-        return df[list(required_cols)].ffill().dropna()
+        return df[required_cols].ffill().dropna()
     
     except Exception as e:
         logging.error(f"Data fetch failed: {str(e)}")
@@ -111,7 +111,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         future_returns = df['close'].pct_change().shift(-HOLD_LOOKAHEAD).fillna(0)
         df['target'] = pd.qcut(future_returns, q=3, labels=[0, 1, 2], duplicates='drop')
         
-        return df.dropna().astype(np.float32)
+        return df.dropna()
         
     except Exception as e:
         logging.error(f"Feature engineering failed: {str(e)}")

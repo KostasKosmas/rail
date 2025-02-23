@@ -6,6 +6,8 @@ import yfinance as yf
 import streamlit as st
 import plotly.express as px
 import optuna
+from optuna.samplers import TPESampler
+from optuna.pruners import MedianPruner
 import requests
 from xgboost import XGBClassifier
 from sklearn.model_selection import TimeSeriesSplit
@@ -19,13 +21,16 @@ DEFAULT_SYMBOL = 'BTC-USD'
 INTERVAL_OPTIONS = ["15m", "30m", "1h", "1d"]
 TRADE_THRESHOLD_BUY = 0.65
 TRADE_THRESHOLD_SELL = 0.35
-MAX_TRIALS = 50
+MAX_TRIALS = 30
 GARCH_WINDOW = 21
-MIN_FEATURES = 10
+MIN_FEATURES = 8
 HOLD_LOOKAHEAD = 6
 MAX_RETRIES = 3
-VALIDATION_WINDOW = 21
-MIN_CLASS_SAMPLES = 100  # Minimum samples per class
+VALIDATION_WINDOW = 14
+MIN_CLASS_SAMPLES = 75
+N_JOBS = 2
+EARLY_STOPPING_ROUNDS = 10
+OPTUNA_SEED = 42
 
 warnings.filterwarnings("ignore", category=UserWarning)
 logging.basicConfig(level=logging.INFO)
@@ -101,8 +106,10 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
     """Data acquisition and preprocessing pipeline"""
     try:
         period_map = {
-            '15m': '60d', '30m': '60d', 
-            '1h': '730d', '1d': 'max'
+            '15m': '60d', 
+            '30m': '60d', 
+            '1h': '730d', 
+            '1d': 'max'
         }
         
         df = safe_yf_download(
@@ -166,7 +173,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         # Volatility metrics
         df['volatility'] = df['returns'].rolling(GARCH_WINDOW).std().fillna(0)
         
-        # ATR calculation with vectorized operations
+        # ATR calculation
         try:
             prev_close = df['close'].shift(1).bfill()
             tr = pd.DataFrame({
@@ -183,7 +190,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         df['volume_ma'] = df['volume'].rolling(14).mean().fillna(0)
         df['volume_change'] = df['volume'].pct_change().fillna(0)
 
-        # Target engineering with class validation
+        # Target engineering
         try:
             future_returns = df['close'].pct_change(HOLD_LOOKAHEAD).shift(-HOLD_LOOKAHEAD)
             valid_returns = future_returns.dropna()
@@ -192,7 +199,6 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
                 st.error("Insufficient data for target calculation")
                 return pd.DataFrame()
                 
-            # Create quantile-based classes with minimum samples
             df['target'], bins = pd.qcut(
                 valid_returns, 
                 q=3, 
@@ -201,7 +207,6 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
                 duplicates='drop'
             )
             
-            # Validate class distribution
             class_counts = df['target'].value_counts()
             if len(class_counts) < 3 or any(class_counts < MIN_CLASS_SAMPLES):
                 st.error("Insufficient samples in some classes")
@@ -233,7 +238,7 @@ class TradingModel:
         st.rerun()
 
     def optimize_model(self, X: pd.DataFrame, y: pd.Series) -> bool:
-        """Optimization pipeline with real-time progress tracking"""
+        """Optimized optimization pipeline with early stopping and parallel processing"""
         try:
             if X.empty or y.nunique() < 2:
                 st.error("Insufficient training data")
@@ -252,13 +257,19 @@ class TradingModel:
                         study.best_value
                     )
 
-            tscv = TimeSeriesSplit(n_splits=3, test_size=VALIDATION_WINDOW)
+            sampler = TPESampler(n_startup_trials=10, seed=OPTUNA_SEED)
+            pruner = MedianPruner(n_startup_trials=5, n_warmup_steps=10)
             
-            self.study = optuna.create_study(direction='maximize')
+            self.study = optuna.create_study(
+                direction='maximize',
+                sampler=sampler,
+                pruner=pruner
+            )
+
             self.study.optimize(
-                lambda trial: self._objective(trial, X, y, tscv),
+                lambda trial: self._objective(trial, X, y),
                 n_trials=MAX_TRIALS,
-                n_jobs=1,
+                n_jobs=N_JOBS,
                 callbacks=[ProgressTracker(self)],
                 show_progress_bar=False
             )
@@ -272,16 +283,22 @@ class TradingModel:
             return False
 
     def _train_final_model(self, X: pd.DataFrame, y: pd.Series, params: dict) -> bool:
-        """Final model training with feature selection"""
+        """Optimized final training with early stopping and feature selection"""
         try:
-            X = X.ffill().bfill()
-            
+            params.update({
+                'early_stopping_rounds': EARLY_STOPPING_ROUNDS,
+                'eval_metric': 'auc',
+                'tree_method': 'hist',
+                'enable_categorical': False
+            })
+
+            tscv = TimeSeriesSplit(n_splits=3)
             selector = RFECV(
                 XGBClassifier(**params),
-                step=1,
-                cv=TimeSeriesSplit(3),
+                step=2,
+                cv=tscv,
                 min_features_to_select=MIN_FEATURES,
-                scoring='accuracy'
+                scoring='roc_auc_ovo'
             )
             selector.fit(X, y)
             self.selected_features = X.columns[selector.support_]
@@ -289,12 +306,12 @@ class TradingModel:
             if len(self.selected_features) < MIN_FEATURES:
                 raise ValueError("Insufficient features selected for modeling")
 
-            self.model = XGBClassifier(
-                **params,
-                tree_method='hist',
-                eval_metric='logloss',
-                enable_categorical=False
-            ).fit(X[self.selected_features], y)
+            self.model = XGBClassifier(**params)
+            self.model.fit(
+                X[self.selected_features], y,
+                eval_set=[(X[self.selected_features], y)],
+                verbose=False
+            )
             
             self.feature_importances = pd.Series(
                 self.model.feature_importances_,
@@ -307,49 +324,49 @@ class TradingModel:
             st.error(f"Model training error: {str(e)}")
             return False
 
-    def _objective(self, trial, X: pd.DataFrame, y: pd.Series, tscv) -> float:
-        """Objective function for Optuna optimization"""
+    def _objective(self, trial, X: pd.DataFrame, y: pd.Series) -> float:
+        """Optimized objective function with pruning and early stopping"""
         params = {
-            'n_estimators': trial.suggest_int('n_estimators', 100, 500),
-            'learning_rate': trial.suggest_float('learning_rate', 1e-3, 0.3, log=True),
-            'max_depth': trial.suggest_int('max_depth', 3, 9),
-            'subsample': trial.suggest_float('subsample', 0.5, 1.0),
-            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
-            'gamma': trial.suggest_float('gamma', 0, 0.5),
-            'reg_alpha': trial.suggest_float('reg_alpha', 0, 1),
-            'reg_lambda': trial.suggest_float('reg_lambda', 0, 1)
+            'n_estimators': trial.suggest_int('n_estimators', 100, 300),
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.2, log=True),
+            'max_depth': trial.suggest_int('max_depth', 3, 6),
+            'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
+            'gamma': trial.suggest_float('gamma', 0, 0.3),
+            'reg_alpha': trial.suggest_float('reg_alpha', 0, 0.5),
+            'reg_lambda': trial.suggest_float('reg_lambda', 0, 0.5),
+            'tree_method': 'hist',
+            'enable_categorical': False
         }
         
         scores = []
-        for train_idx, test_idx in tscv.split(X):
-            X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
-            y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+        tscv = TimeSeriesSplit(n_splits=3, test_size=VALIDATION_WINDOW)
+        
+        for fold, (train_idx, test_idx) in enumerate(tscv.split(X)):
+            X_train, X_val = X.iloc[train_idx], X.iloc[test_idx]
+            y_train, y_val = y.iloc[train_idx], y.iloc[test_idx]
             
             try:
-                # Check for minimum class samples in test set
-                if y_test.nunique() < 2:
-                    continue
-                
                 model = XGBClassifier(**params)
-                model.fit(X_train, y_train)
-                y_proba = model.predict_proba(X_test)
+                model.fit(
+                    X_train, y_train,
+                    eval_set=[(X_val, y_val)],
+                    early_stopping_rounds=EARLY_STOPPING_ROUNDS,
+                    verbose=False
+                )
                 
-                # Handle class mismatch between y_test and y_proba
-                present_classes = np.unique(y_test)
-                if y_proba.shape[1] != len(present_classes):
-                    continue
+                trial.report(model.best_score, step=fold)
                 
-                scores.append(roc_auc_score(
-                    y_test, 
-                    y_proba, 
-                    multi_class='ovo',
-                    labels=present_classes
-                ))
+                if trial.should_prune():
+                    raise optuna.TrialPruned()
+                
+                y_proba = model.predict_proba(X_val)
+                scores.append(roc_auc_score(y_val, y_proba, multi_class='ovo'))
             except Exception as e:
                 scores.append(0.0)
-                logging.warning(f"Trial failed: {str(e)}")
+                continue
         
-        return np.mean(scores) if scores else 0.0  # Return 0 if all folds failed
+        return np.mean(scores) if scores else 0.0
 
     def predict(self, X: pd.DataFrame) -> float:
         """Generate prediction with confidence score"""

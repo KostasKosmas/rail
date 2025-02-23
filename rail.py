@@ -152,7 +152,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
                 lambda x: max(x.high - x.low, 
                              abs(x.high - x.close.shift()), 
                              abs(x.low - x.close.shift()))
-            ).rolling(14).mean()
+            ).rolling(14).mean())
         
         # Volume analysis
         df['volume_ma'] = df['volume'].rolling(14).mean()

@@ -315,7 +315,7 @@ class TradingModel:
                 raise ValueError("NaN values in prediction data")
                 
             proba = self.model.predict_proba(X_clean)[0]
-            return max(0.0, min(1.0, np.max(proba))
+            return max(0.0, min(1.0, np.max(proba)))
         except Exception as e:
             logging.error(f"Prediction failed: {str(e)}")
             return 0.5

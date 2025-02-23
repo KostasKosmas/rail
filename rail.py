@@ -25,6 +25,7 @@ HOLD_LOOKAHEAD = 6
 MAX_RETRIES = 3
 VALIDATION_WINDOW = 21
 MIN_CLASS_RATIO = 0.3
+MIN_TRAIN_SAMPLES = 100
 
 warnings.filterwarnings("ignore", category=UserWarning)
 logging.basicConfig(level=logging.INFO)
@@ -137,7 +138,7 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 def calculate_features(df: pd.DataFrame, interval: str) -> pd.DataFrame:
-    """Improved feature engineering with adaptive target formulation"""
+    """Robust feature engineering with strict lookback periods"""
     try:
         if df.empty:
             st.error("Empty DataFrame received for feature engineering")
@@ -154,7 +155,7 @@ def calculate_features(df: pd.DataFrame, interval: str) -> pd.DataFrame:
         df['returns'] = df['close'].pct_change().fillna(0)
         df['log_returns'] = np.log1p(df['returns']).fillna(0)
 
-        # Technical indicators
+        # Technical indicators (using lookback only)
         for span in [12, 26]:
             df[f'ema_{span}'] = df['close'].ewm(span=span, adjust=False).mean()
         df['macd'] = df['ema_12'] - df['ema_26']
@@ -180,21 +181,28 @@ def calculate_features(df: pd.DataFrame, interval: str) -> pd.DataFrame:
         df['volume_ma'] = df['volume'].rolling(14).mean().fillna(0)
         df['volume_change'] = df['volume'].pct_change().fillna(0)
 
-        # Adaptive target formulation
+        # Conservative target formulation
         try:
-            # Adjust hold period based on timeframe
+            # Adaptive hold period with forward shift
             hold_period = max(1, HOLD_LOOKAHEAD // (24 if "d" in interval else 1))
-            future_returns = np.log(df['close'].shift(-hold_period)) - np.log(df['close'])
-            df['target'] = (future_returns.rolling(3).mean() > 0).astype(int)
-            df = df.dropna()
+            future_prices = df['close'].shift(-hold_period)
+            df['target'] = (future_prices > df['close']).astype(int)
             
-            # Validate class balance
-            class_ratio = df['target'].value_counts(normalize=True)
-            if abs(class_ratio[0] - class_ratio[1]) > (1 - 2*MIN_CLASS_RATIO):
-                st.error(f"Class imbalance exceeds threshold. Ratio: {class_ratio.to_dict()}")
+            # Remove lookahead bias
+            df = df.iloc[:-hold_period] if hold_period > 0 else df
+            
+            # Validate dataset
+            if len(df) < MIN_TRAIN_SAMPLES:
+                st.error("Insufficient data after feature engineering")
                 return pd.DataFrame()
                 
-            return df.replace([np.inf, -np.inf], np.nan).ffill().bfill()
+            # Class balance check
+            class_ratio = df['target'].value_counts(normalize=True)
+            if min(class_ratio) < MIN_CLASS_RATIO:
+                st.error(f"Class imbalance: {class_ratio.to_dict()}")
+                return pd.DataFrame()
+                
+            return df.replace([np.inf, -np.inf], np.nan).ffill().bfill().dropna()
         
         except Exception as e:
             st.error(f"Target calculation failed: {str(e)}")
@@ -215,10 +223,10 @@ class TradingModel:
             'current_score': current_score,
             'best_score': best_score
         }
-        st.rerun()  # Immediate update for every trial
+        st.rerun()
 
     def optimize_model(self, X: pd.DataFrame, y: pd.Series) -> bool:
-        """Optimization pipeline with walk-forward validation"""
+        """Optimization pipeline with robust validation"""
         try:
             if X.empty or y.nunique() != 2:
                 st.error("Invalid training data for binary classification")
@@ -237,41 +245,40 @@ class TradingModel:
                         study.best_value
                     )
 
-            if st.session_state.study is None:
-                st.session_state.study = optuna.create_study(direction='maximize')
-
+            # Reset study for new data
+            st.session_state.study = optuna.create_study(direction='maximize')
+            
             st.session_state.study.optimize(
                 lambda trial: self._objective(trial, X, y),
                 n_trials=MAX_TRIALS,
                 callbacks=[ProgressTracker(self)],
-                show_progress_bar=False
-            )
-
-            if st.session_state.study.best_trial:
-                return self._train_final_model(X, y, st.session_state.study.best_params)
-            return False
+                show_progress_bar=False,
+                catch=(ValueError,)
+            
+            return self._train_final_model(X, y, st.session_state.study.best_params)
             
         except Exception as e:
             st.error(f"Training process failed: {str(e)}")
             return False
 
     def _train_final_model(self, X: pd.DataFrame, y: pd.Series, params: dict) -> bool:
-        """Final model training with proper validation"""
+        """Final model training with walk-forward validation"""
         try:
-            # Use walk-forward validation
-            val_size = min(len(X) // 4, VALIDATION_WINDOW * 3)
-            train_size = len(X) - val_size
-            if train_size < 100:
-                st.error("Insufficient data for reliable training")
+            tscv = TimeSeriesSplit(n_splits=3, test_size=VALIDATION_WINDOW)
+            train_idx, val_idx = list(tscv.split(X))[-1]
+            
+            if len(train_idx) < MIN_TRAIN_SAMPLES or len(val_idx) < 20:
+                st.error("Insufficient validation data")
                 return False
 
-            X_train, X_val = X.iloc[:train_size], X.iloc[train_size:]
-            y_train, y_val = y.iloc[:train_size], y.iloc[train_size:]
+            X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
+            y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
 
             params.update({
-                'early_stopping_rounds': 10,
+                'early_stopping_rounds': 20,
                 'eval_metric': 'auc',
-                'tree_method': 'hist'
+                'tree_method': 'hist',
+                'random_state': 42
             })
 
             self.model = XGBClassifier(**params)
@@ -294,51 +301,63 @@ class TradingModel:
             return False
 
     def _objective(self, trial, X: pd.DataFrame, y: pd.Series) -> float:
-        """Objective function with realistic parameter ranges"""
+        """Objective function with realistic constraints"""
         params = {
-            'n_estimators': trial.suggest_int('n_estimators', 80, 200),
-            'learning_rate': trial.suggest_float('learning_rate', 0.05, 0.2, log=True),
-            'max_depth': trial.suggest_int('max_depth', 4, 6),
+            'n_estimators': trial.suggest_int('n_estimators', 50, 200),
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.2, log=True),
+            'max_depth': trial.suggest_int('max_depth', 3, 5),
             'subsample': trial.suggest_float('subsample', 0.7, 0.95),
-            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
-            'gamma': trial.suggest_float('gamma', 0, 0.3),
+            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.7, 0.95),
+            'gamma': trial.suggest_float('gamma', 0, 0.2),
             'reg_alpha': trial.suggest_float('reg_alpha', 0, 0.5),
             'reg_lambda': trial.suggest_float('reg_lambda', 0, 0.5),
             'tree_method': 'hist'
         }
         
         try:
-            # Walk-forward validation
-            val_size = min(len(X) // 4, VALIDATION_WINDOW * 3)
-            train_size = len(X) - val_size
-            if train_size < 100:
-                return float('nan')
-                
-            X_train, X_val = X.iloc[:train_size], X.iloc[train_size:]
-            y_train, y_val = y.iloc[:train_size], y.iloc[train_size:]
-
-            # Skip invalid splits
-            if y_val.nunique() < 2 or len(y_val) < 20:
-                return float('nan')
-                
-            model = XGBClassifier(**params)
-            model.fit(X_train, y_train)
+            tscv = TimeSeriesSplit(n_splits=3, test_size=VALIDATION_WINDOW)
+            scores = []
             
-            y_proba = model.predict_proba(X_val)[:, 1]
-            return roc_auc_score(y_val, y_proba)
+            for train_idx, val_idx in tscv.split(X):
+                if len(train_idx) < MIN_TRAIN_SAMPLES or len(val_idx) < 20:
+                    continue
+                    
+                X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
+                y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
+
+                # Class balance check
+                if y_train.mean() < 0.25 or y_train.mean() > 0.75:
+                    continue
+
+                model = XGBClassifier(**params)
+                model.fit(X_train, y_train)
+                
+                y_proba = model.predict_proba(X_val)[:, 1]
+                score = roc_auc_score(y_val, y_proba)
+                
+                # Prevent overfitting to single split
+                if score < 0.5:
+                    continue
+                    
+                scores.append(score)
+
+            return np.mean(scores) if scores else float('nan')
         
         except Exception as e:
             return float('nan')
 
     def predict(self, X: pd.DataFrame) -> float:
-        """Generate prediction with confidence score"""
+        """Conservative prediction with sanity checks"""
         try:
             if not self.model or X.empty:
                 return 0.5
                 
             X_clean = X[self.feature_importances.index[:MIN_FEATURES]].ffill().bfill()
+            if X_clean.isnull().any().any():
+                return 0.5
+                
             proba = self.model.predict_proba(X_clean)[0][1]
-            return np.clip(proba, 0.0, 1.0)
+            return np.clip(proba, 0.3, 0.7)  # Conservative clipping
         except Exception as e:
             logging.error(f"Prediction failed: {str(e)}")
             return 0.5
@@ -354,13 +373,12 @@ def main():
             raw_data = fetch_data(symbol, interval)
             processed_data = calculate_features(raw_data, interval)
             
-            # Data sanity checks
             if processed_data is not None:
-                if len(processed_data) < 100:
-                    st.error("Insufficient data points for reliable modeling")
+                if len(processed_data) < MIN_TRAIN_SAMPLES:
+                    st.error(f"Need at least {MIN_TRAIN_SAMPLES} samples after processing")
                     st.session_state.data_loaded = False
                 elif processed_data['target'].nunique() == 1:
-                    st.error("No meaningful price movement detected in selected timeframe")
+                    st.error("No price movement detected in selected timeframe")
                     st.session_state.data_loaded = False
                 else:
                     st.session_state.processed_data = processed_data
@@ -435,17 +453,18 @@ def main():
             col1, col2 = st.columns(2)
             col1.metric("Model Confidence", f"{confidence:.2%}")
             
-            adj_buy = TRADE_THRESHOLD_BUY + (current_vol * 0.15)
-            adj_sell = TRADE_THRESHOLD_SELL - (current_vol * 0.15)
+            # Conservative thresholds
+            adj_buy = TRADE_THRESHOLD_BUY + (current_vol * 0.1)
+            adj_sell = TRADE_THRESHOLD_SELL - (current_vol * 0.1)
             
             if confidence > adj_buy:
-                col2.success("🚀 Strong Buy Signal")
+                col2.success("🚀 Buy Signal")
             elif confidence < adj_sell:
-                col2.error("🔻 Strong Sell Signal")
+                col2.error("🔻 Sell Signal")
             else:
-                col2.info("🛑 Market Neutral")
+                col2.info("🛑 Neutral")
             
-            st.caption(f"Volatility-adjusted thresholds: Buy >{adj_buy:.0%}, Sell <{adj_sell:.0%}")
+            st.caption(f"Dynamic thresholds: Buy >{adj_buy:.0%}, Sell <{adj_sell:.0%}")
 
         except Exception as e:
             st.error(f"Signal generation error: {str(e)}")

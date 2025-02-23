@@ -6,8 +6,6 @@ import yfinance as yf
 import streamlit as st
 import plotly.express as px
 import optuna
-from optuna.samplers import TPESampler
-from optuna.pruners import MedianPruner
 import requests
 from xgboost import XGBClassifier
 from sklearn.model_selection import TimeSeriesSplit
@@ -21,16 +19,13 @@ DEFAULT_SYMBOL = 'BTC-USD'
 INTERVAL_OPTIONS = ["15m", "30m", "1h", "1d"]
 TRADE_THRESHOLD_BUY = 0.65
 TRADE_THRESHOLD_SELL = 0.35
-MAX_TRIALS = 30
+MAX_TRIALS = 50
 GARCH_WINDOW = 21
-MIN_FEATURES = 8
+MIN_FEATURES = 10
 HOLD_LOOKAHEAD = 6
 MAX_RETRIES = 3
-VALIDATION_WINDOW = 14
-MIN_CLASS_SAMPLES = 75
-N_JOBS = 2
-EARLY_STOPPING_ROUNDS = 10
-OPTUNA_SEED = 42
+VALIDATION_WINDOW = 21
+MIN_CLASS_SAMPLES = 100
 
 warnings.filterwarnings("ignore", category=UserWarning)
 logging.basicConfig(level=logging.INFO)
@@ -89,7 +84,6 @@ def normalize_columns(symbol: str, columns) -> list:
                       .replace(' ', '_') \
                       .replace(f"{normalized_symbol}_", "")
         
-        # Handle common column variations
         col = {
             'adjclose': 'close',
             'adjusted_close': 'close',
@@ -106,10 +100,8 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
     """Data acquisition and preprocessing pipeline"""
     try:
         period_map = {
-            '15m': '60d', 
-            '30m': '60d', 
-            '1h': '730d', 
-            '1d': 'max'
+            '15m': '60d', '30m': '60d', 
+            '1h': '730d', '1d': 'max'
         }
         
         df = safe_yf_download(
@@ -122,10 +114,8 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
             st.error("Data source returned empty dataset")
             return pd.DataFrame()
 
-        # Column normalization
         df.columns = normalize_columns(symbol, df.columns)
         
-        # Validate required columns
         required_cols = ['open', 'high', 'low', 'close', 'volume']
         missing_cols = [col for col in required_cols if col not in df.columns]
         
@@ -133,7 +123,6 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
             st.error(f"Missing critical columns: {', '.join(missing_cols)}")
             return pd.DataFrame()
 
-        # Clean and validate data
         df = df[required_cols] \
             .replace([np.inf, -np.inf], np.nan) \
             .ffill() \
@@ -160,7 +149,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
 
         df = df.copy()
         
-        # Price dynamics features
+        # Price dynamics
         df['returns'] = df['close'].pct_change().fillna(0)
         df['log_returns'] = np.log1p(df['returns']).fillna(0)
 
@@ -170,10 +159,10 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         df['macd'] = df['ema_12'] - df['ema_26']
         df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
 
-        # Volatility metrics
+        # Volatility
         df['volatility'] = df['returns'].rolling(GARCH_WINDOW).std().fillna(0)
         
-        # ATR calculation
+        # ATR
         try:
             prev_close = df['close'].shift(1).bfill()
             tr = pd.DataFrame({
@@ -186,11 +175,11 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
             st.error(f"Missing column for ATR calculation: {str(e)}")
             return pd.DataFrame()
 
-        # Volume analysis
+        # Volume
         df['volume_ma'] = df['volume'].rolling(14).mean().fillna(0)
         df['volume_change'] = df['volume'].pct_change().fillna(0)
 
-        # Target engineering
+        # Target
         try:
             future_returns = df['close'].pct_change(HOLD_LOOKAHEAD).shift(-HOLD_LOOKAHEAD)
             valid_returns = future_returns.dropna()
@@ -238,7 +227,7 @@ class TradingModel:
         st.rerun()
 
     def optimize_model(self, X: pd.DataFrame, y: pd.Series) -> bool:
-        """Optimized optimization pipeline with early stopping and parallel processing"""
+        """Optimization pipeline with validation checks"""
         try:
             if X.empty or y.nunique() < 2:
                 st.error("Insufficient training data")
@@ -257,19 +246,11 @@ class TradingModel:
                         study.best_value
                     )
 
-            sampler = TPESampler(n_startup_trials=10, seed=OPTUNA_SEED)
-            pruner = MedianPruner(n_startup_trials=5, n_warmup_steps=10)
-            
-            self.study = optuna.create_study(
-                direction='maximize',
-                sampler=sampler,
-                pruner=pruner
-            )
-
+            self.study = optuna.create_study(direction='maximize')
             self.study.optimize(
                 lambda trial: self._objective(trial, X, y),
                 n_trials=MAX_TRIALS,
-                n_jobs=N_JOBS,
+                n_jobs=1,
                 callbacks=[ProgressTracker(self)],
                 show_progress_bar=False
             )
@@ -283,40 +264,34 @@ class TradingModel:
             return False
 
     def _train_final_model(self, X: pd.DataFrame, y: pd.Series, params: dict) -> bool:
-        """Optimized final training with early stopping and feature selection"""
+        """Final model training with proper validation split"""
         try:
-            params.update({
-                'early_stopping_rounds': EARLY_STOPPING_ROUNDS,
-                'eval_metric': 'auc',
-                'tree_method': 'hist',
-                'enable_categorical': False
-            })
-
             tscv = TimeSeriesSplit(n_splits=3)
-            selector = RFECV(
-                XGBClassifier(**params),
-                step=2,
-                cv=tscv,
-                min_features_to_select=MIN_FEATURES,
-                scoring='roc_auc_ovo'
-            )
-            selector.fit(X, y)
-            self.selected_features = X.columns[selector.support_]
+            train_idx, val_idx = list(tscv.split(X))[-1]  # Use last split
             
-            if len(self.selected_features) < MIN_FEATURES:
-                raise ValueError("Insufficient features selected for modeling")
+            X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
+            y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
+
+            params.update({
+                'early_stopping_rounds': 10,
+                'eval_metric': 'auc',
+                'tree_method': 'hist'
+            })
 
             self.model = XGBClassifier(**params)
             self.model.fit(
-                X[self.selected_features], y,
-                eval_set=[(X[self.selected_features], y)],
+                X_train, y_train,
+                eval_set=[(X_val, y_val)],
                 verbose=False
             )
             
+            # Feature importance
             self.feature_importances = pd.Series(
                 self.model.feature_importances_,
-                index=self.selected_features
+                index=X.columns
             ).sort_values(ascending=False)
+            
+            self.selected_features = self.feature_importances.nlargest(MIN_FEATURES).index.tolist()
 
             return True
 
@@ -325,45 +300,41 @@ class TradingModel:
             return False
 
     def _objective(self, trial, X: pd.DataFrame, y: pd.Series) -> float:
-        """Optimized objective function with pruning and early stopping"""
+        """Objective function with enhanced validation"""
         params = {
             'n_estimators': trial.suggest_int('n_estimators', 100, 300),
-            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.2, log=True),
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
             'max_depth': trial.suggest_int('max_depth', 3, 6),
             'subsample': trial.suggest_float('subsample', 0.6, 1.0),
             'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
             'gamma': trial.suggest_float('gamma', 0, 0.3),
             'reg_alpha': trial.suggest_float('reg_alpha', 0, 0.5),
             'reg_lambda': trial.suggest_float('reg_lambda', 0, 0.5),
-            'tree_method': 'hist',
-            'enable_categorical': False
+            'tree_method': 'hist'
         }
         
         scores = []
         tscv = TimeSeriesSplit(n_splits=3, test_size=VALIDATION_WINDOW)
         
-        for fold, (train_idx, test_idx) in enumerate(tscv.split(X)):
+        for train_idx, test_idx in tscv.split(X):
             X_train, X_val = X.iloc[train_idx], X.iloc[test_idx]
             y_train, y_val = y.iloc[train_idx], y.iloc[test_idx]
             
             try:
+                if y_val.nunique() < 2:
+                    continue
+                    
                 model = XGBClassifier(**params)
                 model.fit(
                     X_train, y_train,
                     eval_set=[(X_val, y_val)],
-                    early_stopping_rounds=EARLY_STOPPING_ROUNDS,
+                    early_stopping_rounds=10,
                     verbose=False
                 )
-                
-                trial.report(model.best_score, step=fold)
-                
-                if trial.should_prune():
-                    raise optuna.TrialPruned()
                 
                 y_proba = model.predict_proba(X_val)
                 scores.append(roc_auc_score(y_val, y_proba, multi_class='ovo'))
             except Exception as e:
-                scores.append(0.0)
                 continue
         
         return np.mean(scores) if scores else 0.0
@@ -375,9 +346,6 @@ class TradingModel:
                 return 0.5
                 
             X_clean = X[self.selected_features].ffill().bfill()
-            if X_clean.isnull().values.any():
-                raise ValueError("NaN values in prediction data")
-                
             proba = self.model.predict_proba(X_clean)[0]
             return np.clip(np.max(proba), 0.0, 1.0)
         except Exception as e:
@@ -390,7 +358,6 @@ def main():
     symbol = st.sidebar.text_input("Asset Symbol", DEFAULT_SYMBOL).upper().strip()
     interval = st.sidebar.selectbox("Time Interval", INTERVAL_OPTIONS, index=2)
     
-    # Data loading section
     if st.sidebar.button("🔄 Load Market Data"):
         with st.spinner("Fetching and processing data..."):
             raw_data = fetch_data(symbol, interval)
@@ -399,7 +366,6 @@ def main():
             st.session_state.data_loaded = True
             st.rerun()
 
-    # Display market data
     if st.session_state.get('data_loaded', False):
         if st.session_state.processed_data is not None:
             raw_data = fetch_data(symbol, interval)
@@ -414,10 +380,8 @@ def main():
             with col2:
                 st.metric("Current Price", f"${raw_data['close'].iloc[-1]:.2f}")
                 st.metric("Market Volatility", 
-                         f"{st.session_state.processed_data['volatility'].iloc[-1]:.2%}",
-                         help="21-day rolling volatility")
+                         f"{st.session_state.processed_data['volatility'].iloc[-1]:.2%}")
 
-    # Training progress display
     if st.session_state.training_progress['completed'] > 0:
         st.subheader("Training Progress")
         prog = st.session_state.training_progress
@@ -426,7 +390,6 @@ def main():
         cols[1].metric("Current Score", f"{prog['current_score']:.2%}")
         cols[2].metric("Best Score", f"{prog['best_score']:.2%}")
 
-    # Model training section
     if st.sidebar.button("🚀 Train Trading Model") and st.session_state.data_loaded:
         if st.session_state.processed_data is None:
             st.error("No valid data available for training")
@@ -457,7 +420,6 @@ def main():
                         use_container_width=True
                     )
 
-    # Trading signals section
     if st.session_state.model and st.session_state.processed_data is not None:
         try:
             processed_data = st.session_state.processed_data

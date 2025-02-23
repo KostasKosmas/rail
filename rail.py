@@ -14,8 +14,6 @@ from imblearn.over_sampling import SMOTE
 from arch import arch_model
 from tqdm import tqdm
 import warnings
-import shap
-from sklearn.preprocessing import label_binarize
 
 # Configuration
 DEFAULT_SYMBOL = 'BTC-USD'
@@ -32,7 +30,7 @@ logging.basicConfig(level=logging.INFO)
 
 # Streamlit UI
 st.set_page_config(page_title="AI Trading System", layout="wide")
-st.title("🚀 Fixed Trading System")
+st.title("🚀 Stable Trading System")
 
 if 'model' not in st.session_state:
     st.session_state.model = None
@@ -61,18 +59,17 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         df['returns'] = df['close'].pct_change()
         
         # Momentum indicators
-        df['rsi_14'] = df.ta.rsi(length=14)
-        macd = df.ta.macd(fast=12, slow=26, signal=9)
-        df['macd'] = macd['MACD_12_26_9']
-        df['macd_signal'] = macd['MACDs_12_26_9']
+        df['rsi_14'] = df['close'].rolling(14).apply(lambda x: 100 - (100 / (1 + (x.ewm(alpha=1/14).mean().diff().gt(0).sum() / x.ewm(alpha=1/14).mean().diff().lt(0).sum()))))
+        df['macd'] = df['close'].ewm(span=12).mean() - df['close'].ewm(span=26).mean()
+        df['macd_signal'] = df['macd'].ewm(span=9).mean()
         
         # Volatility
-        df['atr_14'] = df.ta.atr(length=14)
+        df['atr_14'] = df['high'].combine(df['low'], np.maximum) - df['high'].combine(df['low'], np.minimum)
         df['volatility_21'] = df['returns'].rolling(21).std()
         
         # Volume analysis
-        df['volume_ma_21'] = df.ta.sma(length=21, column='volume')
-        df['obv'] = df.ta.obv()
+        df['volume_ma_21'] = df['volume'].rolling(21).mean()
+        df['obv'] = (df['volume'] * (~df['returns'].diff().le(0) * 2 - 1)).cumsum()
         
         # Target engineering
         future_returns = df['close'].pct_change().shift(-HOLD_LOOKAHEAD)
@@ -87,7 +84,6 @@ class TradingModel:
     def __init__(self):
         self.model = None
         self.selected_features = []
-        self.explainer = None
         self.feature_importances = pd.DataFrame()
 
     def optimize_model(self, X: pd.DataFrame, y: pd.Series) -> bool:
@@ -103,23 +99,11 @@ class TradingModel:
             
             if study.best_trial:
                 self._train_final_model(X, y, study.best_params)
-                self._create_explainer(X)
                 return True
             return False
         except Exception as e:
             logging.error(f"Training failed: {str(e)}")
             return False
-
-    def _create_explainer(self, X: pd.DataFrame):
-        try:
-            self.explainer = shap.TreeExplainer(self.model)
-            shap_values = self.explainer.shap_values(X[self.selected_features])
-            self.feature_importances = pd.DataFrame({
-                'feature': X[self.selected_features].columns,
-                'importance': np.abs(shap_values).mean(0)
-            }).sort_values('importance', ascending=False)
-        except Exception as e:
-            logging.error(f"SHAP error: {str(e)}")
 
     def _train_final_model(self, X: pd.DataFrame, y: pd.Series, params: dict):
         try:
@@ -132,6 +116,10 @@ class TradingModel:
             selector.fit(X, y)
             self.selected_features = X.columns[selector.support_].tolist()
             self.model = XGBClassifier(**params).fit(X[self.selected_features], y)
+            self.feature_importances = pd.DataFrame({
+                'feature': self.selected_features,
+                'importance': self.model.feature_importances_
+            }).sort_values('importance', ascending=False)
         except Exception as e:
             logging.error(f"Training error: {str(e)}")
             raise
@@ -162,13 +150,12 @@ class TradingModel:
         
         return np.mean(scores)
 
-    def predict(self, X: pd.DataFrame) -> tuple:
+    def predict(self, X: pd.DataFrame) -> float:
         try:
             proba = self.model.predict_proba(X[self.selected_features])[0]
-            explanation = self.explainer.shap_values(X[self.selected_features])[0]
-            return np.max(proba), explanation
+            return np.max(proba)
         except:
-            return 0.5, None
+            return 0.5
 
 def main():
     st.sidebar.header("Settings")
@@ -199,46 +186,26 @@ def main():
                 st.success("Model trained successfully!")
                 
                 st.subheader("Model Insights")
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.write("Top Features:")
-                    st.dataframe(model.feature_importances.head(10))
-                with col2:
-                    st.write("Model Configuration:")
-                    st.json(model.model.get_params())
+                st.write("Top Features:")
+                st.dataframe(model.feature_importances.head(10))
 
     if st.session_state.model and not processed_data.empty:
         model = st.session_state.model
         latest_data = processed_data.drop(columns=['target']).iloc[[-1]]
         
-        confidence, explanation = model.predict(latest_data)
+        confidence = model.predict(latest_data)
         current_vol = processed_data['volatility_21'].iloc[-1]
         
         st.subheader("Trading Signal")
-        col1, col2 = st.columns(2)
+        buy_thresh = TRADE_THRESHOLD_BUY + (current_vol * 0.15)
+        sell_thresh = TRADE_THRESHOLD_SELL - (current_vol * 0.15)
         
-        with col1:
-            st.metric("Confidence Score", f"{confidence:.2%}")
-            if explanation is not None:
-                st.write("Feature Impact:")
-                fig = px.bar(
-                    x=model.selected_features,
-                    y=explanation,
-                    labels={'x': 'Features', 'y': 'Impact'},
-                    height=300
-                )
-                st.plotly_chart(fig, use_container_width=True)
-        
-        with col2:
-            buy_thresh = TRADE_THRESHOLD_BUY + (current_vol * 0.15)
-            sell_thresh = TRADE_THRESHOLD_SELL - (current_vol * 0.15)
-            
-            if confidence > buy_thresh:
-                st.success("🚀 Strong Buy Signal")
-            elif confidence < sell_thresh:
-                st.error("🔻 Strong Sell Signal")
-            else:
-                st.info("🛑 Hold Position")
+        if confidence > buy_thresh:
+            st.success("🚀 Strong Buy Signal")
+        elif confidence < sell_thresh:
+            st.error("🔻 Strong Sell Signal")
+        else:
+            st.info("🛑 Hold Position")
 
 if __name__ == "__main__":
     main()

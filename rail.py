@@ -71,7 +71,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         # Target engineering with validation
         future_returns = (df['close'].pct_change().shift(-HOLD_LOOKAHEAD)
                         .replace([np.inf, -np.inf], np.nan)
-                        .fillna(0)
+                        .fillna(0))
         future_returns = future_returns.clip(-1, 1)
         df['target'] = pd.qcut(future_returns, q=3, labels=[0, 1, 2], duplicates='drop')
         

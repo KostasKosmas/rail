@@ -239,7 +239,7 @@ class TradingModel:
                 raise ValueError("Missing features for prediction")
                 
             proba = self.model.predict_proba(X[self.selected_features])[0]
-            return max(0.0, min(1.0, np.max(proba))
+            return max(0.0, min(1.0, np.max(proba)))
         except Exception as e:
             logging.error(f"Prediction failed: {str(e)}")
             return 0.5

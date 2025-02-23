@@ -34,11 +34,30 @@ st.title("🚀 Robust Trading System")
 if 'model' not in st.session_state:
     st.session_state.model = None
 
+def clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
+    """Standardize column names from yfinance response"""
+    if isinstance(df.columns, pd.MultiIndex):
+        # Handle multi-index columns (like those from yfinance)
+        df.columns = ['_'.join(col).lower().replace(' ', '_') for col in df.columns]
+    else:
+        # Handle regular columns
+        df.columns = [str(col).lower().replace(' ', '_') for col in df.columns]
+    return df
+
 @st.cache_data(ttl=300, show_spinner="Fetching market data...")
 def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
     try:
-        # Adjust period based on interval
-        period = "60d" if interval in ["15m", "30m", "1h"] else "180d"
+        # Adjust period based on interval to avoid Yahoo Finance limitations
+        period_map = {
+            '1m': '7d',
+            '2m': '60d',
+            '5m': '60d',
+            '15m': '60d',
+            '30m': '60d',
+            '60m': '730d',
+            '1d': '3650d'
+        }
+        period = period_map.get(interval, '60d')
         
         df = yf.download(
             symbol,
@@ -48,18 +67,20 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
             auto_adjust=True
         )
         
-        # Handle column names properly
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = ['_'.join(col).lower() for col in df.columns]
-        else:
-            df.columns = [str(col).lower().replace(' ', '_') for col in df.columns]
-        
-        required_cols = ['open', 'high', 'low', 'close', 'volume']
-        if not all(col in df.columns for col in required_cols):
-            st.error("Missing required columns in data")
+        if df.empty:
+            st.error("No data returned from Yahoo Finance")
             return pd.DataFrame()
             
-        return df[required_cols].ffill().dropna()
+        df = clean_column_names(df)
+        
+        # Ensure required columns exist
+        required_cols = {'open', 'high', 'low', 'close', 'volume'}
+        missing_cols = required_cols - set(df.columns)
+        if missing_cols:
+            st.error(f"Missing columns: {', '.join(missing_cols)}")
+            return pd.DataFrame()
+            
+        return df[list(required_cols)].ffill().dropna()
     
     except Exception as e:
         logging.error(f"Data fetch failed: {str(e)}")
@@ -72,34 +93,26 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
             
         df = df.copy()
         
-        # Check for required columns
-        if 'close' not in df.columns:
-            st.error("Missing 'close' column in data")
-            return pd.DataFrame()
-
-        # Feature calculations with safeguards
+        # Basic features
         df['returns'] = df['close'].pct_change().fillna(0)
+        df['volatility'] = df['returns'].rolling(GARCH_WINDOW).std().fillna(0)
         
-        # Technical indicators with error handling
-        try:
-            df['ema_12'] = df['close'].ewm(span=12, adjust=False).mean()
-            df['ema_26'] = df['close'].ewm(span=26, adjust=False).mean()
-            df['macd'] = df['ema_12'] - df['ema_26']
-            df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
-            
-            df['volatility'] = df['returns'].rolling(GARCH_WINDOW).std().fillna(0)
-            df['volume_ma'] = df['volume'].rolling(14).mean().fillna(0)
-            
-            # Target engineering
-            future_returns = df['close'].pct_change().shift(-HOLD_LOOKAHEAD).fillna(0)
-            df['target'] = pd.qcut(future_returns, q=3, labels=[0, 1, 2], duplicates='drop')
-            
-            return df.dropna()
-            
-        except Exception as e:
-            logging.error(f"Indicator calculation failed: {str(e)}")
-            return pd.DataFrame()
-            
+        # Technical indicators
+        df['ema_12'] = df['close'].ewm(span=12, adjust=False).mean()
+        df['ema_26'] = df['close'].ewm(span=26, adjust=False).mean()
+        df['macd'] = df['ema_12'] - df['ema_26']
+        df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+        
+        # Volume features
+        df['volume_ma'] = df['volume'].rolling(14).mean().fillna(0)
+        df['volume_change'] = df['volume'].pct_change().fillna(0)
+        
+        # Target engineering
+        future_returns = df['close'].pct_change().shift(-HOLD_LOOKAHEAD).fillna(0)
+        df['target'] = pd.qcut(future_returns, q=3, labels=[0, 1, 2], duplicates='drop')
+        
+        return df.dropna().astype(np.float32)
+        
     except Exception as e:
         logging.error(f"Feature engineering failed: {str(e)}")
         return pd.DataFrame()
@@ -193,7 +206,7 @@ class TradingModel:
             
         try:
             proba = self.model.predict_proba(X[self.selected_features])[0]
-            return max(0.0, min(1.0, np.max(proba)))
+            return max(0.0, min(1.0, np.max(proba))
         except Exception as e:
             logging.error(f"Prediction failed: {str(e)}")
             return 0.5
@@ -223,6 +236,8 @@ def main():
             if model.optimize_model(X, y):
                 st.session_state.model = model
                 st.success("Training completed!")
+                st.write("Feature Importances:")
+                st.dataframe(model.feature_importances.reset_index().rename(columns={'index': 'Feature', 0: 'Importance'}))
             else:
                 st.error("Model training failed")
 

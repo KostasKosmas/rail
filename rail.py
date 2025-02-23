@@ -68,15 +68,12 @@ def normalize_columns(symbol: str, columns) -> list:
     processed_cols = []
     
     for col in columns:
-        # Handle multi-index columns
         if isinstance(col, tuple):
             col = '_'.join(map(str, col))
         
-        # Remove ticker prefix and normalize
         col = col.lower().replace('-', '').replace(' ', '_')
         col = col.split(f"{normalized_symbol}_")[-1]
         
-        # Map common variations
         col = {
             'adjclose': 'close',
             'adjusted_close': 'close',
@@ -107,10 +104,8 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
             st.error("No data received from source")
             return pd.DataFrame()
 
-        # Normalize column names
         df.columns = normalize_columns(symbol, df.columns)
         
-        # Validate required columns
         required_cols = ['open', 'high', 'low', 'close', 'volume']
         missing_cols = [col for col in required_cols if col not in df.columns]
         
@@ -119,7 +114,6 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
                      f"Available columns: {', '.join(df.columns)}")
             return pd.DataFrame()
 
-        # Clean data
         df = df[required_cols]
         df = df.replace([np.inf, -np.inf], np.nan)
         df = df.ffill().bfill().dropna()
@@ -131,46 +125,78 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Advanced feature engineering pipeline"""
+    """Enhanced feature engineering pipeline with robust error handling"""
     try:
+        if df.empty:
+            st.error("Empty DataFrame received for feature engineering")
+            return pd.DataFrame()
+
         df = df.copy()
-        
-        # Price dynamics
-        df['returns'] = df['close'].pct_change()
-        df['log_returns'] = np.log1p(df['returns'])
-        
+        required_inputs = ['open', 'high', 'low', 'close', 'volume']
+        missing_inputs = [col for col in required_inputs if col not in df.columns]
+        if missing_inputs:
+            st.error(f"Missing required columns: {', '.join(missing_inputs)}")
+            return pd.DataFrame()
+
+        # Price features
+        df['returns'] = df['close'].pct_change().fillna(0)
+        df['log_returns'] = np.log1p(df['returns']).fillna(0)
+
         # Technical indicators
         for span in [12, 26]:
             df[f'ema_{span}'] = df['close'].ewm(span=span, adjust=False).mean()
         df['macd'] = df['ema_12'] - df['ema_26']
         df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+
+        # Volatility features
+        df['volatility'] = df['returns'].rolling(GARCH_WINDOW).std().fillna(0)
         
-        # Volatility measures
-        df['volatility'] = df['returns'].rolling(GARCH_WINDOW).std()
-        df['atr'] = (
-            df[['high', 'low', 'close']].apply(
-                lambda x: max(x.high - x.low, 
-                             abs(x.high - x.close.shift()), 
-                             abs(x.low - x.close.shift()))
-            ).rolling(14).mean())
-        
-        # Volume analysis
-        df['volume_ma'] = df['volume'].rolling(14).mean()
-        df['volume_change'] = df['volume'].pct_change()
-        
-        # Target engineering
-        future_returns = df['close'].pct_change(HOLD_LOOKAHEAD).shift(-HOLD_LOOKAHEAD)
-        valid_returns = future_returns.dropna()
-        
-        if len(valid_returns) < 100:
-            st.error("Insufficient data for target calculation")
+        # ATR calculation with vectorized operations
+        try:
+            prev_close = df['close'].shift(1).fillna(method='bfill')
+            tr1 = df['high'] - df['low']
+            tr2 = (df['high'] - prev_close).abs()
+            tr3 = (df['low'] - prev_close).abs()
+            true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+            df['atr'] = true_range.rolling(14).mean().fillna(0)
+        except KeyError as e:
+            st.error(f"Missing column for ATR calculation: {str(e)}")
             return pd.DataFrame()
+
+        # Volume analysis
+        df['volume_ma'] = df['volume'].rolling(14).mean().fillna(0)
+        df['volume_change'] = df['volume'].pct_change().fillna(0)
+
+        # Target engineering
+        try:
+            future_returns = df['close'].pct_change(HOLD_LOOKAHEAD).shift(-HOLD_LOOKAHEAD)
+            valid_returns = future_returns.dropna()
             
-        df['target'] = pd.qcut(valid_returns, q=3, labels=[0, 1, 2], duplicates='drop')
-        df = df.dropna()
+            if len(valid_returns) < 100:
+                st.error("Insufficient data points for target calculation")
+                return pd.DataFrame()
+                
+            df['target'] = pd.qcut(valid_returns, q=3, labels=[0, 1, 2], duplicates='drop')
+            df = df.dropna()
+            
+            if df.empty:
+                st.error("No data remaining after target engineering")
+                return pd.DataFrame()
+
+        except Exception as e:
+            st.error(f"Target calculation failed: {str(e)}")
+            return pd.DataFrame()
+
+        # Final cleaning
+        df = df.replace([np.inf, -np.inf], np.nan)
+        df = df.ffill().bfill().dropna()
         
-        return df.replace([np.inf, -np.inf], np.nan).ffill().dropna()
-    
+        if df.empty:
+            st.error("No valid data remaining after feature engineering")
+            return pd.DataFrame()
+
+        return df
+
     except Exception as e:
         st.error(f"Feature engineering failed: {str(e)}")
         return pd.DataFrame()
@@ -260,10 +286,7 @@ class TradingModel:
                 y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
                 
                 model = XGBClassifier(**params, tree_method='hist')
-                model.fit(
-                    X_train.replace([np.inf, -np.inf], np.nan).ffill(),
-                    y_train
-                )
+                model.fit(X_train, y_train)
                 
                 y_proba = model.predict_proba(X_test)
                 scores.append(roc_auc_score(y_test, y_proba, multi_class='ovo'))

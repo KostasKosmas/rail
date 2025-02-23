@@ -42,8 +42,9 @@ def safe_yf_download(symbol: str, **kwargs) -> pd.DataFrame:
     for _ in range(MAX_RETRIES):
         try:
             data = yf.download(
-                symbol, 
-                group_by='ticker',  # Prevent multi-index columns
+                symbol,
+                progress=False,
+                auto_adjust=True,
                 **kwargs
             )
             if not data.empty:
@@ -70,18 +71,15 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
             symbol,
             period=period,
             interval=interval,
-            progress=False,
-            auto_adjust=True
         )
         
         if df.empty:
             st.error("No data returned from Yahoo Finance")
             return pd.DataFrame()
         
-        # Handle multi-index columns and normalize names
+        # Standardize column names
         df.columns = [
-            '_'.join(map(str, col)).lower().replace(' ', '_') 
-            if isinstance(col, tuple) 
+            col[0].lower().replace(' ', '_') if isinstance(col, tuple) 
             else str(col).lower().replace(' ', '_') 
             for col in df.columns
         ]

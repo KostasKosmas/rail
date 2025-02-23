@@ -6,7 +6,6 @@ import yfinance as yf
 import streamlit as st
 import plotly.express as px
 import optuna
-import pandas_ta as ta
 from xgboost import XGBClassifier
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.feature_selection import RFECV
@@ -33,7 +32,7 @@ logging.basicConfig(level=logging.INFO)
 
 # Streamlit UI
 st.set_page_config(page_title="AI Trading System", layout="wide")
-st.title("🚀 Pandas-TA Trading System")
+st.title("🚀 Fixed Trading System")
 
 if 'model' not in st.session_state:
     st.session_state.model = None
@@ -60,25 +59,20 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         
         # Price transformations
         df['returns'] = df['close'].pct_change()
-        df['log_returns'] = np.log(df['close']/df['close'].shift(1))
         
         # Momentum indicators
-        df['rsi_14'] = ta.rsi(df['close'], length=14)
-        macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
+        df['rsi_14'] = df.ta.rsi(length=14)
+        macd = df.ta.macd(fast=12, slow=26, signal=9)
         df['macd'] = macd['MACD_12_26_9']
         df['macd_signal'] = macd['MACDs_12_26_9']
-        df['adx_14'] = ta.adx(df['high'], df['low'], df['close'], length=14)['ADX_14']
         
-        # Volatility features
-        df['atr_14'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+        # Volatility
+        df['atr_14'] = df.ta.atr(length=14)
         df['volatility_21'] = df['returns'].rolling(21).std()
         
         # Volume analysis
-        df['volume_ma_21'] = ta.sma(df['volume'], length=21)
-        df['obv'] = ta.obv(df['close'], df['volume'])
-        
-        # Pattern recognition
-        df['doji'] = ta.cdl_pattern(df['open'], df['high'], df['low'], df['close'], name="doji")
+        df['volume_ma_21'] = df.ta.sma(length=21, column='volume')
+        df['obv'] = df.ta.obv()
         
         # Target engineering
         future_returns = df['close'].pct_change().shift(-HOLD_LOOKAHEAD)

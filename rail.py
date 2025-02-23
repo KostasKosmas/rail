@@ -26,7 +26,6 @@ GARCH_WINDOW = 21
 MIN_FEATURES = 10
 HOLD_LOOKAHEAD = 6
 MAX_RETRIES = 3
-VALIDATION_WINDOW = 21  # New: For time-based validation
 
 warnings.filterwarnings("ignore", category=UserWarning)
 logging.basicConfig(level=logging.INFO)
@@ -37,17 +36,14 @@ st.title("🚀 Robust Crypto Trading System")
 
 if 'model' not in st.session_state:
     st.session_state.model = None
+if 'processed_data' not in st.session_state:
+    st.session_state.processed_data = None
 
 def safe_yf_download(symbol: str, **kwargs) -> pd.DataFrame:
     """Wrapper for yfinance download with error handling"""
     for _ in range(MAX_RETRIES):
         try:
-            data = yf.download(
-                symbol,
-                progress=False,
-                auto_adjust=True,
-                **kwargs
-            )
+            data = yf.download(symbol, **kwargs)
             if not data.empty:
                 return data
         except json.JSONDecodeError:
@@ -72,24 +68,20 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
             symbol,
             period=period,
             interval=interval,
+            progress=False,
+            auto_adjust=True
         )
         
         if df.empty:
             st.error("No data returned from Yahoo Finance")
             return pd.DataFrame()
         
-        # Standardize column names
-        df.columns = [
-            col[0].lower().replace(' ', '_') if isinstance(col, tuple) 
-            else str(col).lower().replace(' ', '_') 
-            for col in df.columns
-        ]
-        
+        # Convert column names to strings before processing
+        df.columns = [str(col).lower().replace(' ', '_') for col in df.columns]
         required_cols = ['open', 'high', 'low', 'close', 'volume']
-        missing_cols = [col for col in required_cols if col not in df.columns]
         
-        if missing_cols:
-            st.error(f"Missing required columns: {', '.join(missing_cols)}")
+        if not all(col in df.columns for col in required_cols):
+            st.error("Missing required columns in data")
             return pd.DataFrame()
             
         return df[required_cols].ffill().dropna()
@@ -99,14 +91,14 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Feature engineering pipeline with data sanitization"""
+    """Feature engineering pipeline"""
     try:
         if df.empty:
             return pd.DataFrame()
             
         df = df.copy()
         
-        # Price features with overflow protection
+        # Price features with NaN handling
         df['returns'] = df['close'].pct_change().replace([np.inf, -np.inf], np.nan).fillna(0)
         df['log_returns'] = np.log1p(df['close'].pct_change()).fillna(0)
         
@@ -119,24 +111,14 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         # Volatility with smoothing
         df['volatility'] = df['returns'].rolling(GARCH_WINDOW).std().fillna(0)
         
-        # Volume features with clipping
+        # Volume features
         df['volume_ma'] = df['volume'].rolling(14).mean().fillna(0)
         df['volume_change'] = df['volume'].pct_change().replace([np.inf, -np.inf], np.nan).fillna(0)
         
         # Target engineering with validation
         future_returns = df['close'].pct_change(HOLD_LOOKAHEAD).shift(-HOLD_LOOKAHEAD)
-        valid_returns = future_returns.replace([np.inf, -np.inf], np.nan).dropna()
-        
-        if len(valid_returns) < 10:
-            return pd.DataFrame()
-            
-        df['target'] = pd.qcut(valid_returns, q=3, labels=[0, 1, 2], duplicates='drop')
-        df['target'] = df['target'].ffill().bfill().astype(int)
-        
-        # Sanitize infinite values
-        df.replace([np.inf, -np.inf], np.nan, inplace=True)
-        df.ffill(inplace=True)
-        df.dropna(inplace=True)
+        df['target'] = pd.qcut(future_returns, q=3, labels=[0, 1, 2], duplicates='drop')
+        df = df.replace([np.inf, -np.inf], np.nan).ffill().dropna()
         
         return df
     
@@ -151,16 +133,15 @@ class TradingModel:
         self.feature_importances = pd.DataFrame()
 
     def optimize_model(self, X: pd.DataFrame, y: pd.Series) -> bool:
-        """Model training pipeline with enhanced validation"""
+        """Model training pipeline"""
         try:
             if X.empty or y.nunique() < 2:
                 st.error("Insufficient data for training")
                 return False
 
-            # Time-based validation split
-            tscv = TimeSeriesSplit(n_splits=3, test_size=VALIDATION_WINDOW)
-            
+            tscv = TimeSeriesSplit(n_splits=3)
             study = optuna.create_study(direction='maximize')
+            
             study.optimize(
                 lambda trial: self._objective(trial, X, y, tscv),
                 n_trials=MAX_TRIALS,
@@ -175,31 +156,21 @@ class TradingModel:
             
         except Exception as e:
             logging.error(f"Training failed: {str(e)}")
+            st.error(f"Model training failed: {str(e)}")
             return False
 
     def _train_final_model(self, X: pd.DataFrame, y: pd.Series, params: dict):
-        """Final model training with data checks"""
+        """Final model training"""
         try:
-            # Add data sanitization
-            X = X.replace([np.inf, -np.inf], np.nan).ffill().bfill()
-            
             selector = RFECV(
-                XGBClassifier(**params, enable_categorical=False),
+                XGBClassifier(**params),
                 step=1,
                 cv=TimeSeriesSplit(3),
                 min_features_to_select=MIN_FEATURES
             )
             selector.fit(X, y)
             self.selected_features = X.columns[selector.support_].tolist()
-            
-            # Add data constraints for XGBoost
-            self.model = XGBClassifier(
-                **params,
-                missing=np.nan,
-                eval_metric='auc',
-                tree_method='hist'  # More stable for financial data
-            ).fit(X[self.selected_features], y)
-            
+            self.model = XGBClassifier(**params).fit(X[self.selected_features], y)
             self.feature_importances = pd.Series(
                 self.model.feature_importances_,
                 index=self.selected_features
@@ -207,10 +178,11 @@ class TradingModel:
             
         except Exception as e:
             logging.error(f"Model training failed: {str(e)}")
+            st.error(f"Model training failed: {str(e)}")
             raise
 
     def _objective(self, trial, X: pd.DataFrame, y: pd.Series, tscv) -> float:
-        """Optuna optimization objective with stability improvements"""
+        """Optuna optimization objective"""
         params = {
             'n_estimators': trial.suggest_int('n_estimators', 100, 500),
             'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
@@ -228,16 +200,8 @@ class TradingModel:
                 X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
                 y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
                 
-                # Remove SMOTE for time-series data
-                model = XGBClassifier(
-                    **params,
-                    missing=np.nan,
-                    tree_method='hist'
-                )
-                model.fit(
-                    X_train.replace([np.inf, -np.inf], np.nan).ffill().bfill(),
-                    y_train
-                )
+                model = XGBClassifier(**params)
+                model.fit(X_train, y_train)
                 
                 y_proba = model.predict_proba(X_test)
                 score = roc_auc_score(y_test, y_proba, multi_class='ovo')
@@ -249,13 +213,13 @@ class TradingModel:
         return np.nanmean(scores)
 
     def predict(self, X: pd.DataFrame) -> float:
-        """Make predictions with data sanitization"""
+        """Make predictions"""
         if not self.model or X.empty:
             return 0.5
             
         try:
-            X_clean = X.replace([np.inf, -np.inf], np.nan).ffill().bfill()
-            proba = self.model.predict_proba(X_clean[self.selected_features])[0]
+            X_clean = X[self.selected_features].replace([np.inf, -np.inf], np.nan).ffill()
+            proba = self.model.predict_proba(X_clean)[0]
             return max(0.0, min(1.0, np.max(proba)))
         except Exception as e:
             logging.error(f"Prediction failed: {str(e)}")
@@ -267,9 +231,14 @@ def main():
     symbol = st.sidebar.text_input("Crypto Symbol", DEFAULT_SYMBOL).upper()
     interval = st.sidebar.selectbox("Interval", INTERVAL_OPTIONS, index=0)
     
+    # Fetch and process data
     raw_data = fetch_data(symbol, interval)
     processed_data = calculate_features(raw_data)
     
+    # Store processed data in session state
+    st.session_state.processed_data = processed_data
+    
+    # Display price chart and metrics
     if not raw_data.empty and not processed_data.empty:
         col1, col2 = st.columns([3, 1])
         with col1:
@@ -280,7 +249,12 @@ def main():
             st.metric("Current Price", f"${raw_data['close'].iloc[-1]:.2f}")
             st.metric("Volatility", f"{processed_data['volatility'].iloc[-1]:.2%}")
 
-    if st.sidebar.button("🚀 Train Model") and not processed_data.empty:
+    # Model training section
+    if st.sidebar.button("🚀 Train Model"):
+        if processed_data.empty:
+            st.error("No processed data available for training")
+            return
+            
         model = TradingModel()
         X = processed_data.drop(columns=['target'])
         y = processed_data['target']
@@ -289,31 +263,44 @@ def main():
             if model.optimize_model(X, y):
                 st.session_state.model = model
                 st.success("Training completed!")
-                st.write("Feature Importances:")
-                st.dataframe(model.feature_importances.reset_index().rename(
-                    columns={'index': 'Feature', 0: 'Importance'}
-                ))
+                
+                # Show feature importances
+                st.subheader("Model Insights")
+                if not model.feature_importances.empty:
+                    st.write("Feature Importances:")
+                    st.dataframe(model.feature_importances.reset_index().rename(
+                        columns={'index': 'Feature', 0: 'Importance'}
+                    ))
+                else:
+                    st.warning("No feature importances available")
 
-    if st.session_state.model and not processed_data.empty:
+    # Trading signal section
+    if st.session_state.model and st.session_state.processed_data is not None:
         model = st.session_state.model
-        latest_data = processed_data.drop(columns=['target']).iloc[[-1]]
+        processed_data = st.session_state.processed_data
         
-        confidence = model.predict(latest_data)
-        current_vol = processed_data['volatility'].iloc[-1]
-        
-        st.subheader("Trading Signal")
-        col1, col2 = st.columns(2)
-        col1.metric("Confidence Score", f"{confidence:.2%}")
-        
-        adj_buy = TRADE_THRESHOLD_BUY + (current_vol * 0.1)
-        adj_sell = TRADE_THRESHOLD_SELL - (current_vol * 0.1)
-        
-        if confidence > adj_buy:
-            col2.success("🚀 Strong Buy Signal")
-        elif confidence < adj_sell:
-            col2.error("🔻 Strong Sell Signal")
-        else:
-            col2.info("🛑 Hold Position")
+        try:
+            latest_data = processed_data.drop(columns=['target']).iloc[[-1]]
+            
+            confidence = model.predict(latest_data)
+            current_vol = processed_data['volatility'].iloc[-1]
+            
+            st.subheader("Trading Signal")
+            col1, col2 = st.columns(2)
+            col1.metric("Confidence Score", f"{confidence:.2%}")
+            
+            adj_buy = TRADE_THRESHOLD_BUY + (current_vol * 0.1)
+            adj_sell = TRADE_THRESHOLD_SELL - (current_vol * 0.1)
+            
+            if confidence > adj_buy:
+                col2.success("🚀 Strong Buy Signal")
+            elif confidence < adj_sell:
+                col2.error("🔻 Strong Sell Signal")
+            else:
+                col2.info("🛑 Hold Position")
+                
+        except Exception as e:
+            st.error(f"Error generating trading signal: {str(e)}")
 
 if __name__ == "__main__":
     main()

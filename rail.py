@@ -23,66 +23,112 @@ MAX_TRIALS = 50
 GARCH_WINDOW = 21
 MIN_FEATURES = 10
 HOLD_LOOKAHEAD = 6
-EPSILON = 1e-6  # Small value to prevent division by zero
+MAX_RETURN = 2.0  # 200% maximum daily return
+EPSILON = 1e-6
 
 warnings.filterwarnings("ignore", category=UserWarning)
 logging.basicConfig(level=logging.INFO)
 
-def clean_data(df: pd.DataFrame) -> pd.DataFrame:
-    """Handle infinite values and data validation"""
-    # Replace infinities with NaNs then fill
+# Streamlit UI Configuration
+st.set_page_config(page_title="AI Trading System", layout="wide")
+st.title("🚀 Cryptocurrency Trading System")
+
+if 'model' not in st.session_state:
+    st.session_state.model = None
+
+# Data Processing Functions
+def clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
+    """Standardize column names from Yahoo Finance response"""
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = ['_'.join(col).lower().replace(' ', '_') for col in df.columns]
+    else:
+        df.columns = [str(col).lower().replace(' ', '_') for col in df.columns]
+    return df
+
+def handle_missing_data(df: pd.DataFrame) -> pd.DataFrame:
+    """Clean and impute missing values"""
     df = df.replace([np.inf, -np.inf], np.nan)
-    
-    # Clip extreme values
     numeric_cols = df.select_dtypes(include=np.number).columns
-    df[numeric_cols] = df[numeric_cols].clip(-1e6, 1e6)
+    df[numeric_cols] = df[numeric_cols].ffill().bfill()
+    return df.dropna()
+
+@st.cache_data(ttl=300, show_spinner="Fetching market data...")
+def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
+    """Fetch and validate market data from Yahoo Finance"""
+    try:
+        period_map = {
+            '1m': '7d', '2m': '60d', '5m': '60d', 
+            '15m': '60d', '30m': '60d', '60m': '730d', '1d': '3650d'
+        }
+        period = period_map.get(interval, '60d')
+        
+        df = yf.download(
+            symbol,
+            period=period,
+            interval=interval,
+            progress=False,
+            auto_adjust=True
+        )
+        
+        if df.empty:
+            st.error("No data returned from Yahoo Finance")
+            return pd.DataFrame()
+            
+        df = clean_column_names(df)
+        required_cols = ['open', 'high', 'low', 'close', 'volume']
+        missing = [col for col in required_cols if col not in df.columns]
+        
+        if missing:
+            st.error(f"Missing columns: {', '.join(missing)}")
+            return pd.DataFrame()
+            
+        return handle_missing_data(df[required_cols])
     
-    return df.ffill().dropna()
+    except Exception as e:
+        logging.error(f"Data fetch failed: {str(e)}")
+        return pd.DataFrame()
 
 def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Feature engineering pipeline with safeguards"""
     try:
         if df.empty:
             return pd.DataFrame()
             
         df = df.copy()
         
-        # Price transformations with safeguards
-        df['returns'] = df['close'].pct_change().replace([np.inf, -np.inf], np.nan).fillna(0)
-        df['returns'] = df['returns'].clip(-1, 1)  # Cap returns at ±100%
+        # Price transformations
+        df['returns'] = df['close'].pct_change()
+        df['returns'] = df['returns'].replace([np.inf, -np.inf], np.nan)
+        df['returns'] = df['returns'].fillna(0).clip(-MAX_RETURN, MAX_RETURN)
         
-        # Volatility with minimum observations
+        # Volatility features
         df['volatility'] = df['returns'].rolling(
             GARCH_WINDOW, min_periods=5
-        ).std().replace([np.inf, -np.inf], np.nan).fillna(0)
+        ).std().fillna(0)
         
-        # Technical indicators with smoothing
+        # Technical indicators
         df['ema_12'] = df['close'].ewm(span=12, adjust=False).mean()
         df['ema_26'] = df['close'].ewm(span=26, adjust=False).mean()
-        df['macd'] = (df['ema_12'] - df['ema_26']).replace([np.inf, -np.inf], np.nan).fillna(0)
+        df['macd'] = df['ema_12'] - df['ema_26']
         df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
         
-        # Volume features with zero protection
+        # Volume features
         df['volume'] = df['volume'].replace(0, EPSILON)
-        df['volume_change'] = (df['volume'].pct_change()
-                              .replace([np.inf, -np.inf], np.nan)
-                              .fillna(0))
         df['volume_ma'] = df['volume'].rolling(14).mean().fillna(EPSILON)
+        df['volume_change'] = df['volume'].pct_change().fillna(0)
         
-        # Target engineering with validation
-        future_returns = (df['close'].pct_change().shift(-HOLD_LOOKAHEAD)
-                        .replace([np.inf, -np.inf], np.nan)
-                        .fillna(0))
-        future_returns = future_returns.clip(-1, 1)
+        # Target engineering
+        future_returns = df['close'].pct_change().shift(-HOLD_LOOKAHEAD)
+        future_returns = future_returns.clip(-MAX_RETURN, MAX_RETURN)
         df['target'] = pd.qcut(future_returns, q=3, labels=[0, 1, 2], duplicates='drop')
         
-        # Final data cleaning
-        df = clean_data(df)
-        return df.dropna()
+        return handle_missing_data(df.dropna())
         
     except Exception as e:
         logging.error(f"Feature engineering failed: {str(e)}")
         return pd.DataFrame()
 
+# Machine Learning Model
 class TradingModel:
     def __init__(self):
         self.model = None
@@ -90,13 +136,10 @@ class TradingModel:
         self.feature_importances = pd.DataFrame()
 
     def optimize_model(self, X: pd.DataFrame, y: pd.Series) -> bool:
+        """Hyperparameter optimization with Optuna"""
         try:
-            # Final data validation
-            X = clean_data(X)
-            y = clean_data(y.to_frame()).squeeze()
-            
-            if X.empty or y.empty:
-                st.error("No valid data available for training")
+            if X.empty or y.empty or len(y.unique()) < 2:
+                st.error("Insufficient data for training")
                 return False
 
             tscv = TimeSeriesSplit(n_splits=3)
@@ -119,9 +162,9 @@ class TradingModel:
             return False
 
     def _train_final_model(self, X: pd.DataFrame, y: pd.Series, params: dict):
+        """Train final model with feature selection"""
         try:
-            # Add missing value handling to XGBoost
-            params['missing'] = np.nan
+            params['missing'] = np.nan  # Handle missing values
             
             selector = RFECV(
                 XGBClassifier(**params),
@@ -150,14 +193,14 @@ class TradingModel:
             raise
 
     def _objective(self, trial, X: pd.DataFrame, y: pd.Series, tscv) -> float:
+        """Optuna objective function for hyperparameter tuning"""
         params = {
             'n_estimators': trial.suggest_int('n_estimators', 100, 500),
             'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
             'max_depth': trial.suggest_int('max_depth', 3, 9),
             'subsample': trial.suggest_float('subsample', 0.5, 1.0),
             'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
-            'gamma': trial.suggest_float('gamma', 0, 0.5),
-            'missing': np.nan  # Explicit NaN handling
+            'gamma': trial.suggest_float('gamma', 0, 0.5)
         }
         
         scores = []
@@ -167,22 +210,15 @@ class TradingModel:
                 X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
                 y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
                 
-                # Final data check before training
-                X_train = clean_data(X_train)
-                X_test = clean_data(X_test)
-                y_train = clean_data(y_train.to_frame()).squeeze()
-                y_test = clean_data(y_test.to_frame()).squeeze()
+                if len(y_train.unique()) < 2:
+                    scores.append(0.0)
+                    continue
                 
                 sm = SMOTE(random_state=42)
                 X_res, y_res = sm.fit_resample(X_train, y_train)
                 
-                model = XGBClassifier(**params)
-                model.fit(
-                    X_res, y_res,
-                    eval_set=[(X_test, y_test)],
-                    early_stopping_rounds=10,
-                    verbose=False
-                )
+                model = XGBClassifier(**params, missing=np.nan)
+                model.fit(X_res, y_res)
                 
                 y_proba = model.predict_proba(X_test)
                 score = roc_auc_score(y_test, y_proba, multi_class='ovo')
@@ -191,34 +227,45 @@ class TradingModel:
             except Exception as e:
                 scores.append(0.0)
         
-        return np.mean(scores)
+        return np.nanmean(scores)
 
     def predict(self, X: pd.DataFrame) -> float:
+        """Make prediction with confidence score"""
         if not self.model or X.empty:
             return 0.5
             
         try:
+            if not all(feat in X.columns for feat in self.selected_features):
+                raise ValueError("Missing features for prediction")
+                
             proba = self.model.predict_proba(X[self.selected_features])[0]
-            return max(0.0, min(1.0, np.max(proba)))
+            return max(0.0, min(1.0, np.max(proba))
         except Exception as e:
             logging.error(f"Prediction failed: {str(e)}")
             return 0.5
 
+# Main Application
 def main():
+    """Streamlit main application interface"""
     st.sidebar.header("Settings")
     symbol = st.sidebar.text_input("Crypto Symbol", DEFAULT_SYMBOL).upper()
+    interval = st.sidebar.selectbox("Interval", ["15m", "30m", "1h", "1d"], index=0)
     
-    raw_data = fetch_data(symbol, PRIMARY_INTERVAL)
-    processed_data = calculate_features(raw_data)
+    with st.spinner("Loading market data..."):
+        raw_data = fetch_data(symbol, interval)
+        processed_data = calculate_features(raw_data)
     
     if not raw_data.empty and not processed_data.empty:
         col1, col2 = st.columns([3, 1])
         with col1:
             st.subheader(f"{symbol} Price Chart")
-            st.line_chart(raw_data['close'])
+            fig = px.line(raw_data, x=raw_data.index, y='close')
+            st.plotly_chart(fig, use_container_width=True)
+            
         with col2:
             st.metric("Current Price", f"${raw_data['close'].iloc[-1]:.2f}")
-            st.metric("Volatility", f"{processed_data['volatility'].iloc[-1]:.2%}")
+            st.metric("24h Volatility", f"{processed_data['volatility'].iloc[-1]:.2%}")
+            st.metric("Volume", f"{raw_data['volume'].iloc[-1]:,.2f}")
 
     if st.sidebar.button("🚀 Train Model") and not processed_data.empty:
         model = TradingModel()
@@ -228,11 +275,18 @@ def main():
         with st.spinner("Training AI Model..."):
             if model.optimize_model(X, y):
                 st.session_state.model = model
-                st.success("Training completed!")
-                st.write("Feature Importances:")
-                st.dataframe(model.feature_importances.reset_index().rename(columns={'index': 'Feature', 0: 'Importance'}))
+                st.success("Model training completed!")
+                
+                st.subheader("Model Insights")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.write("Top Predictive Features:")
+                    st.dataframe(model.feature_importances.head(10))
+                with col2:
+                    st.write("Model Configuration:")
+                    st.json(model.model.get_params())
             else:
-                st.error("Model training failed")
+                st.error("Model training failed. Check data quality.")
 
     if st.session_state.model and not processed_data.empty:
         model = st.session_state.model
@@ -243,10 +297,10 @@ def main():
         
         st.subheader("Trading Signal")
         col1, col2 = st.columns(2)
-        col1.metric("Confidence Score", f"{confidence:.2%}")
+        col1.metric("Model Confidence", f"{confidence:.2%}")
         
-        adj_buy = TRADE_THRESHOLD_BUY + (current_vol * 0.1)
-        adj_sell = TRADE_THRESHOLD_SELL - (current_vol * 0.1)
+        adj_buy = TRADE_THRESHOLD_BUY + (current_vol * 0.15)
+        adj_sell = TRADE_THRESHOLD_SELL - (current_vol * 0.15)
         
         if confidence > adj_buy:
             col2.success("🚀 Strong Buy Signal")

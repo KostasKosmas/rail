@@ -50,15 +50,11 @@ def safe_yf_download(symbol: str, **kwargs) -> pd.DataFrame:
                 auto_adjust=True,
                 **kwargs
             )
-            if not data.empty:
-                return data
-            st.warning(f"No data found for {symbol}")
-            return pd.DataFrame()
-        except (json.JSONDecodeError, requests.exceptions.RequestException) as e:
-            logging.warning(f"Retryable error ({type(e).__name__}): {str(e)}")
+            return data if not data.empty else pd.DataFrame()
+        except (json.JSONDecodeError, requests.exceptions.RequestException):
             continue
         except Exception as e:
-            logging.error(f"Critical error: {str(e)}")
+            logging.error(f"Download error: {str(e)}")
             break
     return pd.DataFrame()
 
@@ -88,57 +84,34 @@ def normalize_columns(symbol: str, columns) -> list:
 def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
     """Data fetcher with comprehensive preprocessing"""
     try:
-        period_map = {
-            '15m': '60d', '30m': '60d', 
-            '1h': '730d', '1d': 'max'
-        }
-        period = period_map.get(interval, '60d')
-        
-        df = safe_yf_download(
-            symbol,
-            period=period,
-            interval=interval,
-        )
+        period_map = {'15m': '60d', '30m': '60d', '1h': '730d', '1d': 'max'}
+        df = safe_yf_download(symbol, period=period_map.get(interval, '60d'), interval=interval)
         
         if df.empty:
             st.error("No data received from source")
             return pd.DataFrame()
 
         df.columns = normalize_columns(symbol, df.columns)
-        
         required_cols = ['open', 'high', 'low', 'close', 'volume']
-        missing_cols = [col for col in required_cols if col not in df.columns]
         
-        if missing_cols:
-            st.error(f"Missing columns: {', '.join(missing_cols)}\n"
-                     f"Available columns: {', '.join(df.columns)}")
+        if missing := [col for col in required_cols if col not in df.columns]:
+            st.error(f"Missing columns: {', '.join(missing)}")
             return pd.DataFrame()
 
-        df = df[required_cols]
-        df = df.replace([np.inf, -np.inf], np.nan)
-        df = df.ffill().bfill().dropna()
-        
-        return df if not df.empty else pd.DataFrame()
+        return df[required_cols].ffill().bfill().dropna()
     
     except Exception as e:
         st.error(f"Data fetch failed: {str(e)}")
         return pd.DataFrame()
 
 def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Enhanced feature engineering pipeline with robust error handling"""
+    """Enhanced feature engineering pipeline"""
     try:
-        if df.empty:
-            st.error("Empty DataFrame received for feature engineering")
+        required_cols = ['open', 'high', 'low', 'close', 'volume']
+        if df.empty or any(col not in df.columns for col in required_cols):
             return pd.DataFrame()
 
         df = df.copy()
-        required_inputs = ['open', 'high', 'low', 'close', 'volume']
-        missing_inputs = [col for col in required_inputs if col not in df.columns]
-        if missing_inputs:
-            st.error(f"Missing required columns: {', '.join(missing_inputs)}")
-            return pd.DataFrame()
-
-        # Price features
         df['returns'] = df['close'].pct_change().fillna(0)
         df['log_returns'] = np.log1p(df['returns']).fillna(0)
 
@@ -151,51 +124,26 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         # Volatility features
         df['volatility'] = df['returns'].rolling(GARCH_WINDOW).std().fillna(0)
         
-        # ATR calculation with vectorized operations
-        try:
-            prev_close = df['close'].shift(1).fillna(method='bfill')
-            tr1 = df['high'] - df['low']
-            tr2 = (df['high'] - prev_close).abs()
-            tr3 = (df['low'] - prev_close).abs()
-            true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-            df['atr'] = true_range.rolling(14).mean().fillna(0)
-        except KeyError as e:
-            st.error(f"Missing column for ATR calculation: {str(e)}")
-            return pd.DataFrame()
+        # ATR calculation
+        prev_close = df['close'].shift(1).bfill()
+        tr = pd.DataFrame({
+            'tr1': df['high'] - df['low'],
+            'tr2': (df['high'] - prev_close).abs(),
+            'tr3': (df['low'] - prev_close).abs()
+        }).max(axis=1)
+        df['atr'] = tr.rolling(14).mean().fillna(0)
 
-        # Volume analysis
+        # Volume features
         df['volume_ma'] = df['volume'].rolling(14).mean().fillna(0)
         df['volume_change'] = df['volume'].pct_change().fillna(0)
 
         # Target engineering
-        try:
-            future_returns = df['close'].pct_change(HOLD_LOOKAHEAD).shift(-HOLD_LOOKAHEAD)
-            valid_returns = future_returns.dropna()
-            
-            if len(valid_returns) < 100:
-                st.error("Insufficient data points for target calculation")
-                return pd.DataFrame()
-                
-            df['target'] = pd.qcut(valid_returns, q=3, labels=[0, 1, 2], duplicates='drop')
-            df = df.dropna()
-            
-            if df.empty:
-                st.error("No data remaining after target engineering")
-                return pd.DataFrame()
-
-        except Exception as e:
-            st.error(f"Target calculation failed: {str(e)}")
+        future_returns = df['close'].pct_change(HOLD_LOOKAHEAD).shift(-HOLD_LOOKAHEAD)
+        if (valid_returns := future_returns.dropna()).empty:
             return pd.DataFrame()
-
-        # Final cleaning
-        df = df.replace([np.inf, -np.inf], np.nan)
-        df = df.ffill().bfill().dropna()
-        
-        if df.empty:
-            st.error("No valid data remaining after feature engineering")
-            return pd.DataFrame()
-
-        return df
+            
+        df['target'] = pd.qcut(valid_returns, q=3, labels=[0, 1, 2], duplicates='drop')
+        return df.dropna().replace([np.inf, -np.inf], np.nan).ffill().bfill().dropna()
 
     except Exception as e:
         st.error(f"Feature engineering failed: {str(e)}")
@@ -208,10 +156,9 @@ class TradingModel:
         self.feature_importances = pd.DataFrame()
 
     def optimize_model(self, X: pd.DataFrame, y: pd.Series) -> bool:
-        """Advanced model optimization pipeline"""
+        """Model optimization pipeline"""
         try:
             if X.empty or y.nunique() < 2:
-                st.error("Insufficient training data")
                 return False
 
             tscv = TimeSeriesSplit(n_splits=3, test_size=VALIDATION_WINDOW)
@@ -225,21 +172,19 @@ class TradingModel:
             )
             
             if study.best_trial:
-                self._train_final_model(X, y, study.best_params)
-                return True
+                return self._train_final_model(X, y, study.best_params)
             return False
             
         except Exception as e:
             st.error(f"Training failed: {str(e)}")
             return False
 
-    def _train_final_model(self, X: pd.DataFrame, y: pd.Series, params: dict):
-        """Final model training with enhanced validation"""
+    def _train_final_model(self, X: pd.DataFrame, y: pd.Series, params: dict) -> bool:
+        """Final model training"""
         try:
-            X = X.replace([np.inf, -np.inf], np.nan).ffill().bfill()
-            
+            X = X.ffill().bfill()
             selector = RFECV(
-                XGBClassifier(**params, enable_categorical=False),
+                XGBClassifier(**params),
                 step=1,
                 cv=TimeSeriesSplit(3),
                 min_features_to_select=MIN_FEATURES
@@ -247,12 +192,8 @@ class TradingModel:
             selector.fit(X, y)
             self.selected_features = X.columns[selector.support_]
             
-            if len(self.selected_features) < MIN_FEATURES:
-                raise ValueError("Insufficient features selected")
-                
             self.model = XGBClassifier(
                 **params,
-                missing=np.nan,
                 tree_method='hist',
                 eval_metric='auc'
             ).fit(X[self.selected_features], y)
@@ -261,13 +202,14 @@ class TradingModel:
                 self.model.feature_importances_,
                 index=self.selected_features
             ).sort_values(ascending=False)
+            return True
 
         except Exception as e:
             st.error(f"Model training error: {str(e)}")
-            raise
+            return False
 
     def _objective(self, trial, X: pd.DataFrame, y: pd.Series, tscv) -> float:
-        """Optimization objective with stability enhancements"""
+        """Optimization objective function"""
         params = {
             'n_estimators': trial.suggest_int('n_estimators', 100, 500),
             'learning_rate': trial.suggest_float('learning_rate', 1e-3, 0.3, log=True),
@@ -281,32 +223,26 @@ class TradingModel:
         
         scores = []
         for train_idx, test_idx in tscv.split(X):
+            X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+            y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+            
             try:
-                X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
-                y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
-                
                 model = XGBClassifier(**params, tree_method='hist')
-                model.fit(X_train, y_train)
-                
-                y_proba = model.predict_proba(X_test)
-                scores.append(roc_auc_score(y_test, y_proba, multi_class='ovo'))
-                
-            except Exception as e:
+                model.fit(X_train.ffill().bfill(), y_train)
+                scores.append(roc_auc_score(y_test, model.predict_proba(X_test), multi_class='ovo'))
+            except:
                 scores.append(0.0)
         
         return np.mean(scores)
 
     def predict(self, X: pd.DataFrame) -> float:
         """Robust prediction method"""
-        if not self.model or X.empty:
-            return 0.5
-            
         try:
-            X_clean = X[self.selected_features].ffill().bfill()
-            proba = self.model.predict_proba(X_clean)[0]
-            return np.clip(np.max(proba), 0.0, 1.0)
-        except Exception as e:
-            logging.error(f"Prediction error: {str(e)}")
+            if self.model and not X.empty:
+                X_clean = X[self.selected_features].ffill().bfill()
+                return np.clip(np.max(self.model.predict_proba(X_clean)[0]), 0.0, 1.0)
+            return 0.5
+        except:
             return 0.5
 
 def main():
@@ -321,31 +257,21 @@ def main():
         processed_data = calculate_features(raw_data)
         st.session_state.processed_data = processed_data if not processed_data.empty else None
 
-    # Market overview section
+    # Market overview
     if not raw_data.empty:
         col1, col2 = st.columns([3, 1])
         with col1:
             st.subheader(f"{symbol} Price Action")
-            fig = px.line(raw_data, x=raw_data.index, y='close', 
-                        title=f"{symbol} Price Chart ({interval})")
+            fig = px.line(raw_data, x=raw_data.index, y='close')
             st.plotly_chart(fig, use_container_width=True)
         
         with col2:
-            st.metric("Current Price", 
-                     f"${raw_data['close'].iloc[-1]:.2f}" if not raw_data.empty else "N/A",
-                     delta=f"{raw_data['close'].pct_change().iloc[-1]:.2%} 24h" if not raw_data.empty else "")
-            
-            if processed_data is not None and not processed_data.empty:
-                st.metric("Market Volatility", 
-                         f"{processed_data['volatility'].iloc[-1]:.2%}",
-                         help="21-period rolling volatility")
+            st.metric("Current Price", f"${raw_data['close'].iloc[-1]:.2f}")
+            if processed_data is not None:
+                st.metric("Volatility", f"{processed_data['volatility'].iloc[-1]:.2%}")
 
-    # Model training section
-    if st.sidebar.button("🚀 Train Trading Model"):
-        if processed_data is None or processed_data.empty:
-            st.error("No valid data for training")
-            return
-            
+    # Model training
+    if st.sidebar.button("🚀 Train Trading Model") and processed_data is not None:
         model = TradingModel()
         X = processed_data.drop(columns=['target'])
         y = processed_data['target']
@@ -355,62 +281,42 @@ def main():
                 st.session_state.model = model
                 st.success("Model training completed!")
                 
-                # Display model insights
-                st.subheader("Model Diagnostics")
                 if not model.feature_importances.empty:
-                    st.write("**Feature Importance**")
+                    st.subheader("Feature Importance")
                     st.dataframe(
                         model.feature_importances.reset_index().rename(
                             columns={'index': 'Feature', 0: 'Importance'}
                         ).style.format({'Importance': '{:.2%}'}),
-                        height=400,
-                        use_container_width=True
+                        height=400
                     )
-                else:
-                    st.warning("Feature importance data unavailable")
 
-    # Trading signals section
+    # Trading signals
     if st.session_state.model and st.session_state.processed_data is not None:
-        processed_data = st.session_state.processed_data
-        model = st.session_state.model
-        
         try:
+            processed_data = st.session_state.processed_data
+            model = st.session_state.model
             latest_data = processed_data.drop(columns=['target']).iloc[[-1]]
             confidence = model.predict(latest_data)
-            current_vol = processed_data['volatility'].iloc[-1] if 'volatility' in processed_data.columns else 0
+            current_vol = processed_data['volatility'].iloc[-1]
+            
+            adj_buy = TRADE_THRESHOLD_BUY + (current_vol * 0.15)
+            adj_sell = TRADE_THRESHOLD_SELL - (current_vol * 0.15)
             
             st.subheader("Trading Advisory")
-            col1, col2, col3 = st.columns([1,2,1])
+            col1, col2 = st.columns(2)
+            col1.metric("Model Confidence", f"{confidence:.2%}")
             
-            with col2:
-                st.metric("Model Confidence", 
-                         f"{confidence:.2%}",
-                         help="Algorithm's confidence in current signal")
+            if confidence > adj_buy:
+                col2.success("🚀 Strong Buy Signal")
+            elif confidence < adj_sell:
+                col2.error("🔻 Strong Sell Signal")
+            else:
+                col2.info("🛑 Market Neutral")
                 
-                # Dynamic signal display
-                adj_buy = TRADE_THRESHOLD_BUY + (current_vol * 0.15)
-                adj_sell = TRADE_THRESHOLD_SELL - (current_vol * 0.15)
-                
-                if confidence > adj_buy:
-                    st.success("""
-                    **🚀 Strong Buy Signal**  
-                    *Recommended Action: Accumulate position*
-                    """)
-                elif confidence < adj_sell:
-                    st.error("""
-                    **🔻 Strong Sell Signal**  
-                    *Recommended Action: Reduce exposure*
-                    """)
-                else:
-                    st.info("""
-                    **🛑 Market Neutral**  
-                    *Recommended Action: Maintain current position*
-                    """)
-                
-                st.caption(f"Volatility-adjusted thresholds: Buy >{adj_buy:.0%}, Sell <{adj_sell:.0%}")
+            st.caption(f"Volatility-adjusted thresholds: Buy >{adj_buy:.0%}, Sell <{adj_sell:.0%}")
 
         except Exception as e:
-            st.error(f"Signal generation error: {str(e)}")
+            st.error(f"Signal error: {str(e)}")
 
 if __name__ == "__main__":
     main()

@@ -23,68 +23,21 @@ MAX_TRIALS = 50
 GARCH_WINDOW = 21
 MIN_FEATURES = 10
 HOLD_LOOKAHEAD = 6
+EPSILON = 1e-6  # Small value to prevent division by zero
 
 warnings.filterwarnings("ignore", category=UserWarning)
 logging.basicConfig(level=logging.INFO)
 
-# Streamlit UI
-st.set_page_config(page_title="AI Trading System", layout="wide")
-st.title("🚀 Final Trading System")
-
-if 'model' not in st.session_state:
-    st.session_state.model = None
-
-def clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
-    """Properly handle Yahoo Finance column names"""
-    if isinstance(df.columns, pd.MultiIndex):
-        # Extract just the metric names (Open, High, Low, Close, Volume)
-        df.columns = df.columns.get_level_values(0).str.lower()
-    else:
-        df.columns = df.columns.str.lower()
-    return df
-
-@st.cache_data(ttl=300, show_spinner="Fetching market data...")
-def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
-    try:
-        # Adjust period based on interval
-        period_map = {
-            '1m': '7d',
-            '2m': '60d',
-            '5m': '60d',
-            '15m': '60d',
-            '30m': '60d',
-            '60m': '730d',
-            '1d': '3650d'
-        }
-        period = period_map.get(interval, '60d')
-        
-        df = yf.download(
-            symbol,
-            period=period,
-            interval=interval,
-            progress=False,
-            auto_adjust=True
-        )
-        
-        if df.empty:
-            st.error("No data returned from Yahoo Finance")
-            return pd.DataFrame()
-            
-        df = clean_column_names(df)
-        
-        # Verify required columns
-        required_cols = ['open', 'high', 'low', 'close', 'volume']
-        missing = [col for col in required_cols if col not in df.columns]
-        
-        if missing:
-            st.error(f"Missing columns: {', '.join(missing)}")
-            return pd.DataFrame()
-            
-        return df[required_cols].ffill().dropna()
+def clean_data(df: pd.DataFrame) -> pd.DataFrame:
+    """Handle infinite values and data validation"""
+    # Replace infinities with NaNs then fill
+    df = df.replace([np.inf, -np.inf], np.nan)
     
-    except Exception as e:
-        logging.error(f"Data fetch failed: {str(e)}")
-        return pd.DataFrame()
+    # Clip extreme values
+    numeric_cols = df.select_dtypes(include=np.number).columns
+    df[numeric_cols] = df[numeric_cols].clip(-1e6, 1e6)
+    
+    return df.ffill().dropna()
 
 def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     try:
@@ -93,24 +46,37 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
             
         df = df.copy()
         
-        # Basic features
-        df['returns'] = df['close'].pct_change().fillna(0)
-        df['volatility'] = df['returns'].rolling(GARCH_WINDOW).std().fillna(0)
+        # Price transformations with safeguards
+        df['returns'] = df['close'].pct_change().replace([np.inf, -np.inf], np.nan).fillna(0)
+        df['returns'] = df['returns'].clip(-1, 1)  # Cap returns at ±100%
         
-        # Technical indicators
+        # Volatility with minimum observations
+        df['volatility'] = df['returns'].rolling(
+            GARCH_WINDOW, min_periods=5
+        ).std().replace([np.inf, -np.inf], np.nan).fillna(0)
+        
+        # Technical indicators with smoothing
         df['ema_12'] = df['close'].ewm(span=12, adjust=False).mean()
         df['ema_26'] = df['close'].ewm(span=26, adjust=False).mean()
-        df['macd'] = df['ema_12'] - df['ema_26']
+        df['macd'] = (df['ema_12'] - df['ema_26']).replace([np.inf, -np.inf], np.nan).fillna(0)
         df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
         
-        # Volume features
-        df['volume_ma'] = df['volume'].rolling(14).mean().fillna(0)
-        df['volume_change'] = df['volume'].pct_change().fillna(0)
+        # Volume features with zero protection
+        df['volume'] = df['volume'].replace(0, EPSILON)
+        df['volume_change'] = (df['volume'].pct_change()
+                              .replace([np.inf, -np.inf], np.nan)
+                              .fillna(0)
+        df['volume_ma'] = df['volume'].rolling(14).mean().fillna(EPSILON)
         
-        # Target engineering
-        future_returns = df['close'].pct_change().shift(-HOLD_LOOKAHEAD).fillna(0)
+        # Target engineering with validation
+        future_returns = (df['close'].pct_change().shift(-HOLD_LOOKAHEAD)
+                        .replace([np.inf, -np.inf], np.nan)
+                        .fillna(0)
+        future_returns = future_returns.clip(-1, 1)
         df['target'] = pd.qcut(future_returns, q=3, labels=[0, 1, 2], duplicates='drop')
         
+        # Final data cleaning
+        df = clean_data(df)
         return df.dropna()
         
     except Exception as e:
@@ -125,8 +91,12 @@ class TradingModel:
 
     def optimize_model(self, X: pd.DataFrame, y: pd.Series) -> bool:
         try:
+            # Final data validation
+            X = clean_data(X)
+            y = clean_data(y.to_frame()).squeeze()
+            
             if X.empty or y.empty:
-                st.error("No data available for training")
+                st.error("No valid data available for training")
                 return False
 
             tscv = TimeSeriesSplit(n_splits=3)
@@ -150,6 +120,9 @@ class TradingModel:
 
     def _train_final_model(self, X: pd.DataFrame, y: pd.Series, params: dict):
         try:
+            # Add missing value handling to XGBoost
+            params['missing'] = np.nan
+            
             selector = RFECV(
                 XGBClassifier(**params),
                 step=1,
@@ -158,7 +131,15 @@ class TradingModel:
             )
             selector.fit(X, y)
             self.selected_features = X.columns[selector.support_].tolist()
-            self.model = XGBClassifier(**params).fit(X[self.selected_features], y)
+            
+            self.model = XGBClassifier(**params).fit(
+                X[self.selected_features], 
+                y,
+                eval_set=[(X[self.selected_features], y)],
+                early_stopping_rounds=10,
+                verbose=False
+            )
+            
             self.feature_importances = pd.Series(
                 self.model.feature_importances_,
                 index=self.selected_features
@@ -175,7 +156,8 @@ class TradingModel:
             'max_depth': trial.suggest_int('max_depth', 3, 9),
             'subsample': trial.suggest_float('subsample', 0.5, 1.0),
             'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
-            'gamma': trial.suggest_float('gamma', 0, 0.5)
+            'gamma': trial.suggest_float('gamma', 0, 0.5),
+            'missing': np.nan  # Explicit NaN handling
         }
         
         scores = []
@@ -185,11 +167,22 @@ class TradingModel:
                 X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
                 y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
                 
+                # Final data check before training
+                X_train = clean_data(X_train)
+                X_test = clean_data(X_test)
+                y_train = clean_data(y_train.to_frame()).squeeze()
+                y_test = clean_data(y_test.to_frame()).squeeze()
+                
                 sm = SMOTE(random_state=42)
                 X_res, y_res = sm.fit_resample(X_train, y_train)
                 
                 model = XGBClassifier(**params)
-                model.fit(X_res, y_res)
+                model.fit(
+                    X_res, y_res,
+                    eval_set=[(X_test, y_test)],
+                    early_stopping_rounds=10,
+                    verbose=False
+                )
                 
                 y_proba = model.predict_proba(X_test)
                 score = roc_auc_score(y_test, y_proba, multi_class='ovo')

@@ -33,18 +33,19 @@ logging.basicConfig(level=logging.INFO)
 st.set_page_config(page_title="AI Trading System", layout="wide")
 st.title("🚀 Smart Crypto Trading Assistant")
 
-# Session State Management
+# Session State Management - Initialize all required keys
 if 'model' not in st.session_state:
-    st.session_state.update({
-        'model': None,
-        'processed_data': None,
-        'training_progress': {
-            'completed': 0,
-            'current_score': 0.0,
-            'best_score': 0.0
-        },
-        'data_loaded': False
-    })
+    st.session_state.model = None
+if 'processed_data' not in st.session_state:
+    st.session_state.processed_data = None
+if 'data_loaded' not in st.session_state:
+    st.session_state.data_loaded = False
+if 'training_progress' not in st.session_state:  # Add initialization here
+    st.session_state.training_progress = {
+        'completed': 0,
+        'current_score': 0.0,
+        'best_score': 0.0
+    }
 
 def safe_yf_download(symbol: str, **kwargs) -> pd.DataFrame:
     """Robust data downloader with error handling and retries"""
@@ -343,6 +344,14 @@ class TradingModel:
 
 def main():
     """Main application interface"""
+    # Initialize session state keys if they don't exist
+    if 'training_progress' not in st.session_state:
+        st.session_state.training_progress = {
+            'completed': 0,
+            'current_score': 0.0,
+            'best_score': 0.0
+        }
+    
     st.sidebar.header("Configuration")
     symbol = st.sidebar.text_input("Asset Symbol", DEFAULT_SYMBOL).upper().strip()
     interval = st.sidebar.selectbox("Time Interval", INTERVAL_OPTIONS, index=2)
@@ -374,7 +383,7 @@ def main():
                          f"{st.session_state.processed_data['volatility'].iloc[-1]:.2%}",
                          help="21-day rolling volatility")
 
-    # Training progress display
+    # Training progress display - Now safe due to initialization
     if st.session_state.training_progress['completed'] > 0:
         st.subheader("Training Progress")
         prog = st.session_state.training_progress
@@ -393,7 +402,12 @@ def main():
         X = st.session_state.processed_data.drop(columns=['target'])
         y = st.session_state.processed_data['target']
         
-        st.session_state.training_progress = {'completed': 0, 'current_score': 0.0, 'best_score': 0.0}
+        # Initialize progress tracking
+        st.session_state.training_progress = {
+            'completed': 0,
+            'current_score': 0.0,
+            'best_score': 0.0
+        }
         
         with st.spinner("Optimizing trading strategy..."):
             if model.optimize_model(X, y):

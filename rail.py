@@ -65,7 +65,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         df['volume'] = df['volume'].replace(0, EPSILON)
         df['volume_change'] = (df['volume'].pct_change()
                               .replace([np.inf, -np.inf], np.nan)
-                              .fillna(0)
+                              .fillna(0))
         df['volume_ma'] = df['volume'].rolling(14).mean().fillna(EPSILON)
         
         # Target engineering with validation

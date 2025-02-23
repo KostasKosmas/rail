@@ -41,7 +41,11 @@ def safe_yf_download(symbol: str, **kwargs) -> pd.DataFrame:
     """Wrapper for yfinance download with error handling"""
     for _ in range(MAX_RETRIES):
         try:
-            data = yf.download(symbol, **kwargs)
+            data = yf.download(
+                symbol, 
+                group_by='ticker',  # Prevent multi-index columns
+                **kwargs
+            )
             if not data.empty:
                 return data
         except json.JSONDecodeError:
@@ -74,12 +78,19 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
             st.error("No data returned from Yahoo Finance")
             return pd.DataFrame()
         
-        # Convert column names to strings before processing
-        df.columns = [str(col).lower().replace(' ', '_') for col in df.columns]  # FIXED
-        required_cols = ['open', 'high', 'low', 'close', 'volume']
+        # Handle multi-index columns and normalize names
+        df.columns = [
+            '_'.join(map(str, col)).lower().replace(' ', '_') 
+            if isinstance(col, tuple) 
+            else str(col).lower().replace(' ', '_') 
+            for col in df.columns
+        ]
         
-        if not all(col in df.columns for col in required_cols):
-            st.error("Missing required columns in data")
+        required_cols = ['open', 'high', 'low', 'close', 'volume']
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        
+        if missing_cols:
+            st.error(f"Missing required columns: {', '.join(missing_cols)}")
             return pd.DataFrame()
             
         return df[required_cols].ffill().dropna()

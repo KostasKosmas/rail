@@ -25,6 +25,7 @@ MIN_FEATURES = 10
 HOLD_LOOKAHEAD = 6
 MAX_RETRIES = 3
 VALIDATION_WINDOW = 21
+MIN_CLASS_SAMPLES = 100  # Minimum samples per class
 
 warnings.filterwarnings("ignore", category=UserWarning)
 logging.basicConfig(level=logging.INFO)
@@ -182,23 +183,31 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         df['volume_ma'] = df['volume'].rolling(14).mean().fillna(0)
         df['volume_change'] = df['volume'].pct_change().fillna(0)
 
-        # Target engineering
+        # Target engineering with class validation
         try:
             future_returns = df['close'].pct_change(HOLD_LOOKAHEAD).shift(-HOLD_LOOKAHEAD)
             valid_returns = future_returns.dropna()
             
-            if len(valid_returns) < 100:
+            if len(valid_returns) < MIN_CLASS_SAMPLES * 3:
                 st.error("Insufficient data for target calculation")
                 return pd.DataFrame()
                 
-            df['target'] = pd.qcut(valid_returns, q=3, labels=[0, 1, 2], duplicates='drop')
-            df = df.dropna()
+            # Create quantile-based classes with minimum samples
+            df['target'], bins = pd.qcut(
+                valid_returns, 
+                q=3, 
+                labels=[0, 1, 2], 
+                retbins=True,
+                duplicates='drop'
+            )
             
-            if df.empty:
-                st.error("No data remaining after target engineering")
+            # Validate class distribution
+            class_counts = df['target'].value_counts()
+            if len(class_counts) < 3 or any(class_counts < MIN_CLASS_SAMPLES):
+                st.error("Insufficient samples in some classes")
                 return pd.DataFrame()
-
-            return df.replace([np.inf, -np.inf], np.nan).ffill().bfill().dropna()
+                
+            return df.dropna().replace([np.inf, -np.inf], np.nan).ffill().bfill()
         
         except Exception as e:
             st.error(f"Target calculation failed: {str(e)}")
@@ -221,7 +230,7 @@ class TradingModel:
             'current_score': current_score,
             'best_score': best_score
         }
-        st.rerun()  # Updated method
+        st.rerun()
 
     def optimize_model(self, X: pd.DataFrame, y: pd.Series) -> bool:
         """Optimization pipeline with real-time progress tracking"""
@@ -249,7 +258,7 @@ class TradingModel:
             self.study.optimize(
                 lambda trial: self._objective(trial, X, y, tscv),
                 n_trials=MAX_TRIALS,
-                n_jobs=1,  # Single job for better UI updates
+                n_jobs=1,
                 callbacks=[ProgressTracker(self)],
                 show_progress_bar=False
             )
@@ -271,7 +280,8 @@ class TradingModel:
                 XGBClassifier(**params),
                 step=1,
                 cv=TimeSeriesSplit(3),
-                min_features_to_select=MIN_FEATURES
+                min_features_to_select=MIN_FEATURES,
+                scoring='accuracy'
             )
             selector.fit(X, y)
             self.selected_features = X.columns[selector.support_]
@@ -282,7 +292,7 @@ class TradingModel:
             self.model = XGBClassifier(
                 **params,
                 tree_method='hist',
-                eval_metric='auc',
+                eval_metric='logloss',
                 enable_categorical=False
             ).fit(X[self.selected_features], y)
             
@@ -316,15 +326,30 @@ class TradingModel:
             y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
             
             try:
+                # Check for minimum class samples in test set
+                if y_test.nunique() < 2:
+                    continue
+                
                 model = XGBClassifier(**params)
                 model.fit(X_train, y_train)
                 y_proba = model.predict_proba(X_test)
-                scores.append(roc_auc_score(y_test, y_proba, multi_class='ovo'))
+                
+                # Handle class mismatch between y_test and y_proba
+                present_classes = np.unique(y_test)
+                if y_proba.shape[1] != len(present_classes):
+                    continue
+                
+                scores.append(roc_auc_score(
+                    y_test, 
+                    y_proba, 
+                    multi_class='ovo',
+                    labels=present_classes
+                ))
             except Exception as e:
                 scores.append(0.0)
                 logging.warning(f"Trial failed: {str(e)}")
         
-        return np.mean(scores)
+        return np.mean(scores) if scores else 0.0  # Return 0 if all folds failed
 
     def predict(self, X: pd.DataFrame) -> float:
         """Generate prediction with confidence score"""
@@ -355,7 +380,7 @@ def main():
             processed_data = calculate_features(raw_data)
             st.session_state.processed_data = processed_data if not processed_data.empty else None
             st.session_state.data_loaded = True
-            st.rerun()  # Updated method
+            st.rerun()
 
     # Display market data
     if st.session_state.get('data_loaded', False):

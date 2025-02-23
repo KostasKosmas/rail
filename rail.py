@@ -33,14 +33,14 @@ logging.basicConfig(level=logging.INFO)
 st.set_page_config(page_title="AI Trading System", layout="wide")
 st.title("🚀 Smart Crypto Trading Assistant")
 
-# Session State Management - Initialize all required keys
+# Session State Management
 if 'model' not in st.session_state:
     st.session_state.model = None
 if 'processed_data' not in st.session_state:
     st.session_state.processed_data = None
 if 'data_loaded' not in st.session_state:
     st.session_state.data_loaded = False
-if 'training_progress' not in st.session_state:  # Add initialization here
+if 'training_progress' not in st.session_state:
     st.session_state.training_progress = {
         'completed': 0,
         'current_score': 0.0,
@@ -221,7 +221,7 @@ class TradingModel:
             'current_score': current_score,
             'best_score': best_score
         }
-        st.experimental_rerun()
+        st.rerun()  # Updated method
 
     def optimize_model(self, X: pd.DataFrame, y: pd.Series) -> bool:
         """Optimization pipeline with real-time progress tracking"""
@@ -344,14 +344,6 @@ class TradingModel:
 
 def main():
     """Main application interface"""
-    # Initialize session state keys if they don't exist
-    if 'training_progress' not in st.session_state:
-        st.session_state.training_progress = {
-            'completed': 0,
-            'current_score': 0.0,
-            'best_score': 0.0
-        }
-    
     st.sidebar.header("Configuration")
     symbol = st.sidebar.text_input("Asset Symbol", DEFAULT_SYMBOL).upper().strip()
     interval = st.sidebar.selectbox("Time Interval", INTERVAL_OPTIONS, index=2)
@@ -363,7 +355,7 @@ def main():
             processed_data = calculate_features(raw_data)
             st.session_state.processed_data = processed_data if not processed_data.empty else None
             st.session_state.data_loaded = True
-            st.experimental_rerun()
+            st.rerun()  # Updated method
 
     # Display market data
     if st.session_state.get('data_loaded', False):
@@ -383,7 +375,7 @@ def main():
                          f"{st.session_state.processed_data['volatility'].iloc[-1]:.2%}",
                          help="21-day rolling volatility")
 
-    # Training progress display - Now safe due to initialization
+    # Training progress display
     if st.session_state.training_progress['completed'] > 0:
         st.subheader("Training Progress")
         prog = st.session_state.training_progress
@@ -402,7 +394,6 @@ def main():
         X = st.session_state.processed_data.drop(columns=['target'])
         y = st.session_state.processed_data['target']
         
-        # Initialize progress tracking
         st.session_state.training_progress = {
             'completed': 0,
             'current_score': 0.0,

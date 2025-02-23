@@ -9,8 +9,7 @@ import optuna
 import requests
 from xgboost import XGBClassifier
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.feature_selection import RFECV
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, balanced_accuracy_score
 import warnings
 import json
 
@@ -25,7 +24,7 @@ MIN_FEATURES = 10
 HOLD_LOOKAHEAD = 6
 MAX_RETRIES = 3
 VALIDATION_WINDOW = 21
-MIN_CLASS_SAMPLES = 100
+MIN_CLASS_RATIO = 0.3  # Minimum class ratio for minority class
 
 warnings.filterwarnings("ignore", category=UserWarning)
 logging.basicConfig(level=logging.INFO)
@@ -136,7 +135,7 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Comprehensive feature engineering pipeline"""
+    """Improved feature engineering with better target formulation"""
     try:
         if df.empty:
             st.error("Empty DataFrame received for feature engineering")
@@ -149,7 +148,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
 
         df = df.copy()
         
-        # Price dynamics
+        # Price dynamics features
         df['returns'] = df['close'].pct_change().fillna(0)
         df['log_returns'] = np.log1p(df['returns']).fillna(0)
 
@@ -159,10 +158,10 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
         df['macd'] = df['ema_12'] - df['ema_26']
         df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
 
-        # Volatility
+        # Volatility metrics
         df['volatility'] = df['returns'].rolling(GARCH_WINDOW).std().fillna(0)
         
-        # ATR
+        # ATR calculation
         try:
             prev_close = df['close'].shift(1).bfill()
             tr = pd.DataFrame({
@@ -175,33 +174,23 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
             st.error(f"Missing column for ATR calculation: {str(e)}")
             return pd.DataFrame()
 
-        # Volume
+        # Volume analysis
         df['volume_ma'] = df['volume'].rolling(14).mean().fillna(0)
         df['volume_change'] = df['volume'].pct_change().fillna(0)
 
-        # Target
+        # Improved target formulation (binary classification)
         try:
             future_returns = df['close'].pct_change(HOLD_LOOKAHEAD).shift(-HOLD_LOOKAHEAD)
-            valid_returns = future_returns.dropna()
+            df['target'] = (future_returns > 0).astype(int)
+            df = df.dropna()
             
-            if len(valid_returns) < MIN_CLASS_SAMPLES * 3:
-                st.error("Insufficient data for target calculation")
+            # Validate class balance
+            class_ratio = df['target'].value_counts(normalize=True)
+            if abs(class_ratio[0] - class_ratio[1]) > (1 - 2*MIN_CLASS_RATIO):
+                st.error(f"Class imbalance exceeds threshold. Ratio: {class_ratio.to_dict()}")
                 return pd.DataFrame()
                 
-            df['target'], bins = pd.qcut(
-                valid_returns, 
-                q=3, 
-                labels=[0, 1, 2], 
-                retbins=True,
-                duplicates='drop'
-            )
-            
-            class_counts = df['target'].value_counts()
-            if len(class_counts) < 3 or any(class_counts < MIN_CLASS_SAMPLES):
-                st.error("Insufficient samples in some classes")
-                return pd.DataFrame()
-                
-            return df.dropna().replace([np.inf, -np.inf], np.nan).ffill().bfill()
+            return df.replace([np.inf, -np.inf], np.nan).ffill().bfill()
         
         except Exception as e:
             st.error(f"Target calculation failed: {str(e)}")
@@ -214,7 +203,6 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
 class TradingModel:
     def __init__(self):
         self.model = None
-        self.selected_features = []
         self.feature_importances = pd.DataFrame()
         self.study = None
 
@@ -227,10 +215,10 @@ class TradingModel:
         st.rerun()
 
     def optimize_model(self, X: pd.DataFrame, y: pd.Series) -> bool:
-        """Optimization pipeline with validation checks"""
+        """Optimization pipeline with enhanced validation"""
         try:
-            if X.empty or y.nunique() < 2:
-                st.error("Insufficient training data")
+            if X.empty or y.nunique() != 2:
+                st.error("Invalid training data for binary classification")
                 return False
 
             class ProgressTracker:
@@ -264,10 +252,10 @@ class TradingModel:
             return False
 
     def _train_final_model(self, X: pd.DataFrame, y: pd.Series, params: dict) -> bool:
-        """Final model training with proper validation split"""
+        """Final model training with proper validation"""
         try:
             tscv = TimeSeriesSplit(n_splits=3)
-            train_idx, val_idx = list(tscv.split(X))[-1]  # Use last split
+            train_idx, val_idx = list(tscv.split(X))[-1]  # Use most recent split
             
             X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
             y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
@@ -290,8 +278,6 @@ class TradingModel:
                 self.model.feature_importances_,
                 index=X.columns
             ).sort_values(ascending=False)
-            
-            self.selected_features = self.feature_importances.nlargest(MIN_FEATURES).index.tolist()
 
             return True
 
@@ -300,16 +286,16 @@ class TradingModel:
             return False
 
     def _objective(self, trial, X: pd.DataFrame, y: pd.Series) -> float:
-        """Objective function with enhanced validation"""
+        """Objective function with robust validation handling"""
         params = {
-            'n_estimators': trial.suggest_int('n_estimators', 100, 300),
+            'n_estimators': trial.suggest_int('n_estimators', 50, 300),
             'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
-            'max_depth': trial.suggest_int('max_depth', 3, 6),
+            'max_depth': trial.suggest_int('max_depth', 3, 7),
             'subsample': trial.suggest_float('subsample', 0.6, 1.0),
             'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
-            'gamma': trial.suggest_float('gamma', 0, 0.3),
-            'reg_alpha': trial.suggest_float('reg_alpha', 0, 0.5),
-            'reg_lambda': trial.suggest_float('reg_lambda', 0, 0.5),
+            'gamma': trial.suggest_float('gamma', 0, 0.5),
+            'reg_alpha': trial.suggest_float('reg_alpha', 0, 1),
+            'reg_lambda': trial.suggest_float('reg_lambda', 0, 1),
             'tree_method': 'hist'
         }
         
@@ -321,19 +307,16 @@ class TradingModel:
             y_train, y_val = y.iloc[train_idx], y.iloc[test_idx]
             
             try:
-                if y_val.nunique() < 2:
+                # Skip invalid splits
+                if y_val.nunique() < 2 or len(y_val) < 20:
                     continue
                     
                 model = XGBClassifier(**params)
-                model.fit(
-                    X_train, y_train,
-                    eval_set=[(X_val, y_val)],
-                    early_stopping_rounds=10,
-                    verbose=False
-                )
+                model.fit(X_train, y_train)
                 
-                y_proba = model.predict_proba(X_val)
-                scores.append(roc_auc_score(y_val, y_proba, multi_class='ovo'))
+                y_proba = model.predict_proba(X_val)[:, 1]
+                scores.append(roc_auc_score(y_val, y_proba))
+                
             except Exception as e:
                 continue
         
@@ -345,9 +328,9 @@ class TradingModel:
             if not self.model or X.empty:
                 return 0.5
                 
-            X_clean = X[self.selected_features].ffill().bfill()
-            proba = self.model.predict_proba(X_clean)[0]
-            return np.clip(np.max(proba), 0.0, 1.0)
+            X_clean = X[self.feature_importances.index[:MIN_FEATURES]].ffill().bfill()
+            proba = self.model.predict_proba(X_clean)[0][1]
+            return np.clip(proba, 0.0, 1.0)
         except Exception as e:
             logging.error(f"Prediction failed: {str(e)}")
             return 0.5

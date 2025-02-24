@@ -49,6 +49,8 @@ if 'training_progress' not in st.session_state:
     }
 if 'study' not in st.session_state:
     st.session_state.study = None
+if 'optimization_running' not in st.session_state:  # New state flag
+    st.session_state.optimization_running = False
 
 def safe_yf_download(symbol: str, **kwargs) -> pd.DataFrame:
     """Robust data downloader with error handling and retries"""
@@ -138,7 +140,7 @@ def fetch_data(symbol: str, interval: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 def calculate_features(df: pd.DataFrame, interval: str) -> pd.DataFrame:
-    """Robust feature engineering with strict lookback periods"""
+    """Feature engineering with strict temporal validation"""
     try:
         if df.empty:
             st.error("Empty DataFrame received for feature engineering")
@@ -155,7 +157,7 @@ def calculate_features(df: pd.DataFrame, interval: str) -> pd.DataFrame:
         df['returns'] = df['close'].pct_change().fillna(0)
         df['log_returns'] = np.log1p(df['returns']).fillna(0)
 
-        # Technical indicators (using lookback only)
+        # Technical indicators
         for span in [12, 26]:
             df[f'ema_{span}'] = df['close'].ewm(span=span, adjust=False).mean()
         df['macd'] = df['ema_12'] - df['ema_26']
@@ -181,28 +183,26 @@ def calculate_features(df: pd.DataFrame, interval: str) -> pd.DataFrame:
         df['volume_ma'] = df['volume'].rolling(14).mean().fillna(0)
         df['volume_change'] = df['volume'].pct_change().fillna(0)
 
-        # Conservative target formulation
+        # Target formulation
         try:
-            # Adaptive hold period with forward shift
             hold_period = max(1, HOLD_LOOKAHEAD // (24 if "d" in interval else 1))
-            future_prices = df['close'].shift(-hold_period)
-            df['target'] = (future_prices > df['close']).astype(int)
+            future_returns = df['close'].pct_change(hold_period).shift(-hold_period)
+            df['target'] = (future_returns > 0).astype(int)
+            df = df.dropna()
             
             # Remove lookahead bias
             df = df.iloc[:-hold_period] if hold_period > 0 else df
             
-            # Validate dataset
             if len(df) < MIN_TRAIN_SAMPLES:
                 st.error("Insufficient data after feature engineering")
                 return pd.DataFrame()
                 
-            # Class balance check
             class_ratio = df['target'].value_counts(normalize=True)
             if min(class_ratio) < MIN_CLASS_RATIO:
                 st.error(f"Class imbalance: {class_ratio.to_dict()}")
                 return pd.DataFrame()
                 
-            return df.replace([np.inf, -np.inf], np.nan).ffill().bfill().dropna()
+            return df.replace([np.inf, -np.inf], np.nan).ffill().bfill()
         
         except Exception as e:
             st.error(f"Target calculation failed: {str(e)}")
@@ -226,38 +226,35 @@ class TradingModel:
         st.rerun()
 
     def optimize_model(self, X: pd.DataFrame, y: pd.Series) -> bool:
-        """Optimization pipeline with robust validation"""
+        """Optimization pipeline with proper study management"""
         try:
             if X.empty or y.nunique() != 2:
                 st.error("Invalid training data for binary classification")
                 return False
 
-            class ProgressTracker:
-                def __init__(self, outer):
-                    self.outer = outer
-                    self.trial_count = 0
-
-                def __call__(self, study, trial):
-                    self.trial_count += 1
-                    self.outer._update_progress(
-                        self.trial_count,
-                        trial.value if trial.value else 0.0,
-                        study.best_value
-                    )
-
-            # Reset study for new data
+            # Reset study when starting new optimization
             st.session_state.study = optuna.create_study(direction='maximize')
-            
+            st.session_state.optimization_running = True
+
+            def optimization_callback(study, trial):
+                self._update_progress(
+                    trial.number + 1,
+                    trial.value if trial.value else 0.0,
+                    study.best_value
+                )
+
             st.session_state.study.optimize(
                 lambda trial: self._objective(trial, X, y),
                 n_trials=MAX_TRIALS,
-                callbacks=[ProgressTracker(self)],
+                callbacks=[optimization_callback],
                 show_progress_bar=False,
-                catch=(ValueError,))
+                catch=(ValueError,)
             
+            st.session_state.optimization_running = False
             return self._train_final_model(X, y, st.session_state.study.best_params)
             
         except Exception as e:
+            st.session_state.optimization_running = False
             st.error(f"Training process failed: {str(e)}")
             return False
 
@@ -288,7 +285,6 @@ class TradingModel:
                 verbose=False
             )
             
-            # Feature importance
             self.feature_importances = pd.Series(
                 self.model.feature_importances_,
                 index=X.columns
@@ -301,7 +297,7 @@ class TradingModel:
             return False
 
     def _objective(self, trial, X: pd.DataFrame, y: pd.Series) -> float:
-        """Objective function with realistic constraints"""
+        """Objective function with proper trial handling"""
         params = {
             'n_estimators': trial.suggest_int('n_estimators', 50, 200),
             'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.2, log=True),
@@ -325,8 +321,7 @@ class TradingModel:
                 X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
                 y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
 
-                # Class balance check
-                if y_train.mean() < 0.25 or y_train.mean() > 0.75:
+                if y_train.mean() < 0.3 or y_train.mean() > 0.7:
                     continue
 
                 model = XGBClassifier(**params)
@@ -335,8 +330,7 @@ class TradingModel:
                 y_proba = model.predict_proba(X_val)[:, 1]
                 score = roc_auc_score(y_val, y_proba)
                 
-                # Prevent overfitting to single split
-                if score < 0.5:
+                if not np.isfinite(score) or score < 0.5:
                     continue
                     
                 scores.append(score)
@@ -347,7 +341,7 @@ class TradingModel:
             return float('nan')
 
     def predict(self, X: pd.DataFrame) -> float:
-        """Conservative prediction with sanity checks"""
+        """Robust prediction with sanity checks"""
         try:
             if not self.model or X.empty:
                 return 0.5
@@ -357,7 +351,7 @@ class TradingModel:
                 return 0.5
                 
             proba = self.model.predict_proba(X_clean)[0][1]
-            return np.clip(proba, 0.3, 0.7)  # Conservative clipping
+            return np.clip(proba, 0.4, 0.6)  # Conservative range
         except Exception as e:
             logging.error(f"Prediction failed: {str(e)}")
             return 0.5
@@ -375,10 +369,10 @@ def main():
             
             if processed_data is not None:
                 if len(processed_data) < MIN_TRAIN_SAMPLES:
-                    st.error(f"Need at least {MIN_TRAIN_SAMPLES} samples after processing")
+                    st.error(f"Need at least {MIN_TRAIN_SAMPLES} samples")
                     st.session_state.data_loaded = False
                 elif processed_data['target'].nunique() == 1:
-                    st.error("No price movement detected in selected timeframe")
+                    st.error("No price movement detected")
                     st.session_state.data_loaded = False
                 else:
                     st.session_state.processed_data = processed_data
@@ -453,18 +447,17 @@ def main():
             col1, col2 = st.columns(2)
             col1.metric("Model Confidence", f"{confidence:.2%}")
             
-            # Conservative thresholds
-            adj_buy = TRADE_THRESHOLD_BUY + (current_vol * 0.1)
-            adj_sell = TRADE_THRESHOLD_SELL - (current_vol * 0.1)
+            adj_buy = TRADE_THRESHOLD_BUY + (current_vol * 0.05)
+            adj_sell = TRADE_THRESHOLD_SELL - (current_vol * 0.05)
             
             if confidence > adj_buy:
-                col2.success("🚀 Buy Signal")
+                col2.success("🚀 Cautious Buy Signal")
             elif confidence < adj_sell:
-                col2.error("🔻 Sell Signal")
+                col2.error("🔻 Conservative Sell Signal")
             else:
-                col2.info("🛑 Neutral")
+                col2.info("🛑 Neutral Position")
             
-            st.caption(f"Dynamic thresholds: Buy >{adj_buy:.0%}, Sell <{adj_sell:.0%}")
+            st.caption(f"Risk-adjusted thresholds: Buy >{adj_buy:.0%}, Sell <{adj_sell:.0%}")
 
         except Exception as e:
             st.error(f"Signal generation error: {str(e)}")

@@ -12,6 +12,7 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import roc_auc_score
 import warnings
 import json
+from functools import partial
 
 # Configuration
 DEFAULT_SYMBOL = 'BTC-USD'
@@ -223,7 +224,8 @@ class TradingModel:
             'current_score': current_score,
             'best_score': best_score
         }
-        st.rerun()
+        if trial_number % 5 == 0:  # Reduce rerun frequency
+            st.rerun()
 
     def optimize_model(self, X: pd.DataFrame, y: pd.Series) -> bool:
         """Optimization pipeline with proper study management"""
@@ -232,8 +234,10 @@ class TradingModel:
                 st.error("Invalid training data for binary classification")
                 return False
 
-            # Reset study when starting new optimization
-            st.session_state.study = optuna.create_study(direction='maximize')
+            # Study management
+            if st.session_state.study is None:
+                st.session_state.study = optuna.create_study(direction='maximize')
+            
             st.session_state.optimization_running = True
 
             def optimization_callback(study, trial):
@@ -243,13 +247,13 @@ class TradingModel:
                     study.best_value
                 )
 
+            # Continue existing study
             st.session_state.study.optimize(
-                lambda trial: self._objective(trial, X, y),
-                n_trials=MAX_TRIALS,
+                partial(self._objective, X=X, y=y),
+                n_trials=MAX_TRIALS - st.session_state.study.trials.__len__(),
                 callbacks=[optimization_callback],
                 show_progress_bar=False,
                 catch=(ValueError,)
-            )
             
             st.session_state.optimization_running = False
             return self._train_final_model(X, y, st.session_state.study.best_params)
@@ -276,7 +280,8 @@ class TradingModel:
                 'early_stopping_rounds': 20,
                 'eval_metric': 'auc',
                 'tree_method': 'hist',
-                'random_state': 42
+                'random_state': 42,
+                'scale_pos_weight': len(y_train[y_train==0])/len(y_train[y_train==1])
             })
 
             self.model = XGBClassifier(**params)
@@ -322,24 +327,21 @@ class TradingModel:
                 X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
                 y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
 
-                if y_train.mean() < 0.3 or y_train.mean() > 0.7:
-                    continue
-
                 model = XGBClassifier(**params)
                 model.fit(X_train, y_train)
                 
                 y_proba = model.predict_proba(X_val)[:, 1]
                 score = roc_auc_score(y_val, y_proba)
                 
-                if not np.isfinite(score) or score < 0.5:
-                    continue
+                if not np.isfinite(score):
+                    score = 0.5  # Neutral score for invalid results
                     
                 scores.append(score)
 
-            return np.mean(scores) if scores else float('nan')
+            return np.mean(scores)
         
         except Exception as e:
-            return float('nan')
+            return 0.5  # Return neutral score on failure
 
     def predict(self, X: pd.DataFrame) -> float:
         """Robust prediction with sanity checks"""
@@ -352,7 +354,8 @@ class TradingModel:
                 return 0.5
                 
             proba = self.model.predict_proba(X_clean)[0][1]
-            return proba  # Removed conservative clipping for accurate readings
+            return np.clip(proba, 0.45, 0.55)  # Conservative prediction range
+            
         except Exception as e:
             logging.error(f"Prediction failed: {str(e)}")
             return 0.5
@@ -378,7 +381,7 @@ def main():
                 else:
                     st.session_state.processed_data = processed_data
                     st.session_state.data_loaded = True
-                    st.session_state.study = None
+                    st.session_state.study = None  # Reset study on new data
             st.rerun()
 
     if st.session_state.get('data_loaded', False):
@@ -448,8 +451,9 @@ def main():
             col1, col2 = st.columns(2)
             col1.metric("Model Confidence", f"{confidence:.2%}")
             
-            adj_buy = TRADE_THRESHOLD_BUY + (current_vol * 0.05)
-            adj_sell = TRADE_THRESHOLD_SELL - (current_vol * 0.05)
+            # Dynamic threshold adjustment
+            adj_buy = TRADE_THRESHOLD_BUY - (current_vol * 0.15)
+            adj_sell = TRADE_THRESHOLD_SELL + (current_vol * 0.15)
             
             if confidence > adj_buy:
                 col2.success("🚀 Cautious Buy Signal")
@@ -458,7 +462,7 @@ def main():
             else:
                 col2.info("🛑 Neutral Position")
             
-            st.caption(f"Risk-adjusted thresholds: Buy >{adj_buy:.0%}, Sell <{adj_sell:.0%}")
+            st.caption(f"Volatility-adjusted thresholds: Buy >{adj_buy:.0%}, Sell <{adj_sell:.0%}")
 
         except Exception as e:
             st.error(f"Signal generation error: {str(e)}")

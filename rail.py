@@ -130,7 +130,7 @@ class LeakageAwareSplitter:
             train_end = test_start - self.leakage_buffer
             if train_end < MIN_TRAIN_SAMPLES:
                 continue
-            yield (np.arange(0, train_end), np.arange(test_start, test_end)
+            yield (np.arange(0, train_end), np.arange(test_start, test_end))
 
 class TradingModel:
     def __init__(self):

@@ -224,8 +224,8 @@ class TradingModel:
             'current_score': current_score,
             'best_score': best_score
         }
-        # Update progress without forced rerun
-        st.experimental_rerun()
+        if trial_number % 5 == 0:  # Reduce UI updates
+            st.rerun()
 
     def optimize_model(self, X: pd.DataFrame, y: pd.Series) -> bool:
         """Optimization pipeline with proper study management"""
@@ -234,9 +234,13 @@ class TradingModel:
                 st.error("Invalid training data for binary classification")
                 return False
 
-            # Create new study if none exists
-            if st.session_state.study is None:
-                st.session_state.study = optuna.create_study(direction='maximize')
+            # Reset study when starting new optimization
+            if st.session_state.study is not None:
+                optuna.delete_study(study_name="trading_study", storage=None)
+            st.session_state.study = optuna.create_study(
+                direction='maximize',
+                study_name="trading_study"
+            )
             
             st.session_state.optimization_running = True
 
@@ -247,16 +251,13 @@ class TradingModel:
                     study.best_value
                 )
 
-            # Calculate remaining trials
-            remaining_trials = MAX_TRIALS - len(st.session_state.study.trials)
-            
-            if remaining_trials > 0:
-                st.session_state.study.optimize(
-                    partial(self._objective, X=X, y=y),
-                    n_trials=remaining_trials,
-                    callbacks=[optimization_callback],
-                    show_progress_bar=False,
-                    catch=(ValueError,))
+            st.session_state.study.optimize(
+                partial(self._objective, X=X, y=y),
+                n_trials=MAX_TRIALS,
+                callbacks=[optimization_callback],
+                show_progress_bar=False,
+                catch=(ValueError, RuntimeError, optuna.exceptions.TrialPruned)
+            )
             
             st.session_state.optimization_running = False
             return self._train_final_model(X, y, st.session_state.study.best_params)
@@ -284,9 +285,7 @@ class TradingModel:
                 'eval_metric': 'auc',
                 'tree_method': 'hist',
                 'random_state': 42,
-                'scale_pos_weight': len(y_train[y_train==0])/len(y_train[y_train==1]),
-                'max_depth': 3,
-                'learning_rate': 0.05
+                'scale_pos_weight': len(y_train[y_train==0])/len(y_train[y_train==1])
             })
 
             self.model = XGBClassifier(**params)
@@ -308,16 +307,16 @@ class TradingModel:
             return False
 
     def _objective(self, trial, X: pd.DataFrame, y: pd.Series) -> float:
-        """Objective function with proper trial handling"""
+        """Consistent parameter distributions across trials"""
         params = {
             'n_estimators': trial.suggest_int('n_estimators', 50, 300),
-            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.1),
-            'max_depth': trial.suggest_int('max_depth', 2, 4),
-            'subsample': trial.suggest_float('subsample', 0.6, 0.9),
-            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 0.9),
+            'learning_rate': trial.suggest_float('learning_rate', 1e-3, 0.2, log=True),
+            'max_depth': trial.suggest_int('max_depth', 2, 5),
+            'subsample': trial.suggest_float('subsample', 0.6, 0.95),
+            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 0.95),
             'gamma': trial.suggest_float('gamma', 0, 0.3),
-            'reg_alpha': trial.suggest_float('reg_alpha', 0.1, 1),
-            'reg_lambda': trial.suggest_float('reg_lambda', 0.1, 1),
+            'reg_alpha': trial.suggest_float('reg_alpha', 0, 1),
+            'reg_lambda': trial.suggest_float('reg_lambda', 0, 1),
             'tree_method': 'hist'
         }
         
@@ -343,14 +342,13 @@ class TradingModel:
                     
                 scores.append(score)
 
-            final_score = np.mean(scores) if scores else 0.5
-            return min(max(final_score, 0.45), 0.65)  # Constrained performance range
-            
+            return np.clip(np.mean(scores), 0.45, 0.65)  # Constrained performance
+        
         except Exception as e:
-            return 0.5
+            return 0.5  # Neutral score on failure
 
     def predict(self, X: pd.DataFrame) -> float:
-        """Robust prediction with sanity checks"""
+        """Conservative prediction with sanity checks"""
         try:
             if not self.model or X.empty:
                 return 0.5
@@ -360,7 +358,7 @@ class TradingModel:
                 return 0.5
                 
             proba = self.model.predict_proba(X_clean)[0][1]
-            return np.clip(proba, 0.45, 0.55)  # Conservative range
+            return np.clip(proba, 0.45, 0.55)  # Realistic range
             
         except Exception as e:
             logging.error(f"Prediction failed: {str(e)}")
@@ -387,8 +385,8 @@ def main():
                 else:
                     st.session_state.processed_data = processed_data
                     st.session_state.data_loaded = True
-                    st.session_state.study = None  # Reset study on new data
-            st.experimental_rerun()
+                    st.session_state.study = None  # Force new study
+            st.rerun()
 
     if st.session_state.get('data_loaded', False):
         if st.session_state.processed_data is not None:
@@ -457,9 +455,9 @@ def main():
             col1, col2 = st.columns(2)
             col1.metric("Model Confidence", f"{confidence:.2%}")
             
-            # Dynamic threshold adjustment
-            adj_buy = TRADE_THRESHOLD_BUY - (current_vol * 0.25)
-            adj_sell = TRADE_THRESHOLD_SELL + (current_vol * 0.25)
+            # Volatility-based threshold adjustment
+            adj_buy = TRADE_THRESHOLD_BUY - (current_vol * 0.3)
+            adj_sell = TRADE_THRESHOLD_SELL + (current_vol * 0.3)
             
             if confidence > adj_buy:
                 col2.success("🚀 Cautious Buy Signal")

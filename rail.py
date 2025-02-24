@@ -224,9 +224,8 @@ class TradingModel:
             'current_score': current_score,
             'best_score': best_score
         }
-        # Only rerun every 2 trials to reduce UI flickering
-        if trial_number % 2 == 0:
-            st.rerun()
+        # Update progress without forced rerun
+        st.experimental_rerun()
 
     def optimize_model(self, X: pd.DataFrame, y: pd.Series) -> bool:
         """Optimization pipeline with proper study management"""
@@ -235,7 +234,7 @@ class TradingModel:
                 st.error("Invalid training data for binary classification")
                 return False
 
-            # Create new study if none exists or data changed
+            # Create new study if none exists
             if st.session_state.study is None:
                 st.session_state.study = optuna.create_study(direction='maximize')
             
@@ -253,11 +252,11 @@ class TradingModel:
             
             if remaining_trials > 0:
                 st.session_state.study.optimize(
-                    lambda trial: self._objective(trial, X, y),
+                    partial(self._objective, X=X, y=y),
                     n_trials=remaining_trials,
                     callbacks=[optimization_callback],
                     show_progress_bar=False,
-                    catch=(ValueError,))
+                    catch=(ValueError,)
             
             st.session_state.optimization_running = False
             return self._train_final_model(X, y, st.session_state.study.best_params)
@@ -286,9 +285,8 @@ class TradingModel:
                 'tree_method': 'hist',
                 'random_state': 42,
                 'scale_pos_weight': len(y_train[y_train==0])/len(y_train[y_train==1]),
-                'max_bin': 256,
-                'reg_alpha': 0.5,
-                'reg_lambda': 0.5
+                'max_depth': 3,
+                'learning_rate': 0.05
             })
 
             self.model = XGBClassifier(**params)
@@ -313,13 +311,13 @@ class TradingModel:
         """Objective function with proper trial handling"""
         params = {
             'n_estimators': trial.suggest_int('n_estimators', 50, 300),
-            'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.2, log=True),
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.1),
             'max_depth': trial.suggest_int('max_depth', 2, 4),
             'subsample': trial.suggest_float('subsample', 0.6, 0.9),
             'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 0.9),
             'gamma': trial.suggest_float('gamma', 0, 0.3),
-            'reg_alpha': trial.suggest_float('reg_alpha', 0, 1),
-            'reg_lambda': trial.suggest_float('reg_lambda', 0, 1),
+            'reg_alpha': trial.suggest_float('reg_alpha', 0.1, 1),
+            'reg_lambda': trial.suggest_float('reg_lambda', 0.1, 1),
             'tree_method': 'hist'
         }
         
@@ -341,15 +339,15 @@ class TradingModel:
                 score = roc_auc_score(y_val, y_proba)
                 
                 if not np.isfinite(score):
-                    score = 0.5  # Neutral score for invalid results
+                    score = 0.5
                     
                 scores.append(score)
 
             final_score = np.mean(scores) if scores else 0.5
-            return min(max(final_score, 0.45), 0.65)  # Constrain realistic performance
+            return min(max(final_score, 0.45), 0.65)  # Constrained performance range
             
         except Exception as e:
-            return 0.5  # Return neutral score on failure
+            return 0.5
 
     def predict(self, X: pd.DataFrame) -> float:
         """Robust prediction with sanity checks"""
@@ -362,7 +360,7 @@ class TradingModel:
                 return 0.5
                 
             proba = self.model.predict_proba(X_clean)[0][1]
-            return np.clip(proba, 0.4, 0.6)  # Conservative prediction range
+            return np.clip(proba, 0.45, 0.55)  # Conservative range
             
         except Exception as e:
             logging.error(f"Prediction failed: {str(e)}")
@@ -390,7 +388,7 @@ def main():
                     st.session_state.processed_data = processed_data
                     st.session_state.data_loaded = True
                     st.session_state.study = None  # Reset study on new data
-            st.rerun()
+            st.experimental_rerun()
 
     if st.session_state.get('data_loaded', False):
         if st.session_state.processed_data is not None:
@@ -460,8 +458,8 @@ def main():
             col1.metric("Model Confidence", f"{confidence:.2%}")
             
             # Dynamic threshold adjustment
-            adj_buy = TRADE_THRESHOLD_BUY - (current_vol * 0.2)
-            adj_sell = TRADE_THRESHOLD_SELL + (current_vol * 0.2)
+            adj_buy = TRADE_THRESHOLD_BUY - (current_vol * 0.25)
+            adj_sell = TRADE_THRESHOLD_SELL + (current_vol * 0.25)
             
             if confidence > adj_buy:
                 col2.success("🚀 Cautious Buy Signal")

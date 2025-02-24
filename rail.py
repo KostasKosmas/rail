@@ -224,7 +224,7 @@ class TradingModel:
             'current_score': current_score,
             'best_score': best_score
         }
-        if trial_number % 5 == 0:  # Reduce UI updates
+        if trial_number % 5 == 0:
             st.rerun()
 
     def optimize_model(self, X: pd.DataFrame, y: pd.Series) -> bool:
@@ -234,12 +234,19 @@ class TradingModel:
                 st.error("Invalid training data for binary classification")
                 return False
 
-            # Reset study when starting new optimization
-            if st.session_state.study is not None:
-                optuna.delete_study(study_name="trading_study", storage=None)
+            # Study management
+            storage = optuna.storages.InMemoryStorage()
+            
+            try:
+                if "trading_study" in optuna.get_all_study_names(storage=storage):
+                    optuna.delete_study(study_name="trading_study", storage=storage)
+            except KeyError:
+                pass
+
             st.session_state.study = optuna.create_study(
                 direction='maximize',
-                study_name="trading_study"
+                study_name="trading_study",
+                storage=storage
             )
             
             st.session_state.optimization_running = True
@@ -307,7 +314,7 @@ class TradingModel:
             return False
 
     def _objective(self, trial, X: pd.DataFrame, y: pd.Series) -> float:
-        """Consistent parameter distributions across trials"""
+        """Objective function with proper trial handling"""
         params = {
             'n_estimators': trial.suggest_int('n_estimators', 50, 300),
             'learning_rate': trial.suggest_float('learning_rate', 1e-3, 0.2, log=True),
@@ -342,10 +349,10 @@ class TradingModel:
                     
                 scores.append(score)
 
-            return np.clip(np.mean(scores), 0.45, 0.65)  # Constrained performance
+            return np.clip(np.mean(scores), 0.45, 0.65)
         
         except Exception as e:
-            return 0.5  # Neutral score on failure
+            return 0.5
 
     def predict(self, X: pd.DataFrame) -> float:
         """Robust prediction with sanity checks"""
@@ -358,7 +365,7 @@ class TradingModel:
                 return 0.5
                 
             proba = self.model.predict_proba(X_clean)[0][1]
-            return proba  # Return actual prediction
+            return proba
             
         except Exception as e:
             logging.error(f"Prediction failed: {str(e)}")
@@ -385,7 +392,7 @@ def main():
                 else:
                     st.session_state.processed_data = processed_data
                     st.session_state.data_loaded = True
-                    st.session_state.study = None  # Force new study
+                    st.session_state.study = None
             st.rerun()
 
     if st.session_state.get('data_loaded', False):
@@ -447,7 +454,6 @@ def main():
             col1, col2 = st.columns(2)
             col1.metric("Model Confidence", f"{confidence:.2%}")
             
-            # Dynamic threshold adjustment
             adj_buy = TRADE_THRESHOLD_BUY - (current_vol * 0.15)
             adj_sell = TRADE_THRESHOLD_SELL + (current_vol * 0.15)
             

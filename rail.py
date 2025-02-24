@@ -248,7 +248,7 @@ class TradingModel:
                 n_trials=MAX_TRIALS,
                 callbacks=[optimization_callback],
                 show_progress_bar=False,
-                catch=(ValueError,)
+                catch=(ValueError,))
             
             st.session_state.optimization_running = False
             return self._train_final_model(X, y, st.session_state.study.best_params)

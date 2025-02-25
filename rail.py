@@ -7,6 +7,8 @@ import streamlit as st
 import plotly.express as px
 import optuna
 import requests
+import sqlite3
+import os
 from xgboost import XGBClassifier
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import roc_auc_score
@@ -49,6 +51,8 @@ if 'training_progress' not in st.session_state:
     }
 if 'study' not in st.session_state:
     st.session_state.study = None
+if 'training_in_progress' not in st.session_state:
+    st.session_state.training_in_progress = False
 
 def safe_yf_download(symbol: str, **kwargs) -> pd.DataFrame:
     """Robust data downloader with error handling and retries"""
@@ -223,39 +227,56 @@ class TradingModel:
             'current_score': current_score,
             'best_score': best_score
         }
-        st.rerun()
 
-    def optimize_model(self, X: pd.DataFrame, y: pd.Series) -> bool:
+    def optimize_model(self, X: pd.DataFrame, y: pd.Series, symbol: str, interval: str) -> bool:
         """Optimization pipeline with robust validation"""
         try:
             if X.empty or y.nunique() != 2:
                 st.error("Invalid training data for binary classification")
                 return False
 
-            class ProgressTracker:
-                def __init__(self, outer):
-                    self.outer = outer
-                    self.trial_count = 0
+            study_name = f"{symbol}_{interval}_study"
+            storage_name = "sqlite:///optuna_studies.db"
 
-                def __call__(self, study, trial):
-                    self.trial_count += 1
-                    self.outer._update_progress(
-                        self.trial_count,
-                        trial.value if trial.value else 0.0,
-                        study.best_value
-                    )
+            # Create directory if needed
+            os.makedirs(os.path.dirname(storage_name), exist_ok=True)
 
-            # Reset study for new data
-            st.session_state.study = optuna.create_study(direction='maximize')
-            
-            st.session_state.study.optimize(
-                lambda trial: self._objective(trial, X, y),
-                n_trials=MAX_TRIALS,
-                callbacks=[ProgressTracker(self)],
-                show_progress_bar=False,
-                catch=(ValueError,))
-            
-            return self._train_final_model(X, y, st.session_state.study.best_params)
+            # Initialize or load study
+            try:
+                study = optuna.load_study(
+                    study_name=study_name,
+                    storage=storage_name
+                )
+            except (KeyError, sqlite3.OperationalError):
+                study = optuna.create_study(
+                    study_name=study_name,
+                    storage=storage_name,
+                    direction='maximize',
+                    load_if_exists=True
+                )
+
+            st.session_state.study = study
+
+            # Progress tracking callback
+            def progress_callback(study, trial):
+                self._update_progress(
+                    len(study.trials),
+                    trial.value if trial.value else 0.0,
+                    study.best_value
+                )
+
+            # Continue optimization until reaching max trials
+            remaining_trials = MAX_TRIALS - len(study.trials)
+            if remaining_trials > 0:
+                study.optimize(
+                    lambda trial: self._objective(trial, X, y),
+                    n_trials=remaining_trials,
+                    callbacks=[progress_callback],
+                    show_progress_bar=False,
+                    catch=(ValueError,)
+                )
+
+            return self._train_final_model(X, y, study.best_params)
             
         except Exception as e:
             st.error(f"Training process failed: {str(e)}")
@@ -424,10 +445,12 @@ def main():
             'current_score': 0.0,
             'best_score': 0.0
         }
+        st.session_state.training_in_progress = True
         
         with st.spinner("Optimizing trading strategy..."):
-            if model.optimize_model(X, y):
+            if model.optimize_model(X, y, symbol, interval):
                 st.session_state.model = model
+                st.session_state.training_in_progress = False
                 st.success("Model training completed!")
                 
                 if not model.feature_importances.empty:

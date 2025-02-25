@@ -59,7 +59,6 @@ def safe_yf_download(symbol: str, **kwargs) -> pd.DataFrame:
         try:
             data = yf.download(symbol, progress=False, auto_adjust=True, **kwargs)
             if not data.empty and data['Volume'].mean() > 0:
-                # Convert column names to lowercase
                 data.columns = [col.lower() for col in data.columns]
                 return data
         except (requests.exceptions.RequestException, json.JSONDecodeError):
@@ -72,33 +71,43 @@ def safe_yf_download(symbol: str, **kwargs) -> pd.DataFrame:
 
 def calculate_features(df: pd.DataFrame, interval: str) -> pd.DataFrame:
     """Advanced feature engineering with leakage prevention"""
-    df = df.copy()
+    try:
+        df = df.copy()
+        
+        # Price transformations
+        df['returns'] = df['close'].pct_change()
+        df['log_returns'] = np.log1p(df['returns'])
+        
+        # Volatility features with validation
+        for window in [7, 21, 63]:
+            col_name = f'volatility_{window}'
+            df[col_name] = df['returns'].rolling(window).std()
+            if df[col_name].isnull().all():
+                raise ValueError(f"Could not calculate {col_name}")
+        
+        # Validate volatility calculations
+        required_vol_cols = [f'volatility_{w}' for w in [7, 21, 63]]
+        missing_vol = [col for col in required_vol_cols if col not in df.columns]
+        if missing_vol:
+            raise ValueError(f"Missing volatility columns: {missing_vol}")
+        
+        # Target formulation
+        hold_period = max(1, HOLD_LOOKAHEAD // (24 if "d" in interval else 1))
+        future_returns = df['close'].pct_change(hold_period).shift(-hold_period)
+        df['target'] = (future_returns > 0).astype(int)
+        
+        # Remove lookahead bias
+        df = df.dropna().iloc[:-hold_period-3]
+        
+        if len(df) < MIN_TRAIN_SAMPLES or df['target'].nunique() == 1:
+            st.error("Insufficient data or no price movement detected")
+            return pd.DataFrame()
+            
+        return df.replace([np.inf, -np.inf], np.nan).ffill().bfill()
     
-    # Price transformations
-    df['log_price'] = np.log(df['close'])
-    df['returns'] = df['close'].pct_change()
-    df['log_returns'] = np.log1p(df['returns'])
-    
-    # Volatility features
-    for window in [7, 21, 63]:
-        df[f'volatility_{window}'] = df['returns'].rolling(window).std()
-    
-    # Volume features
-    df['volume_zscore'] = (df['volume'] - df['volume'].rolling(21).mean()) / df['volume'].rolling(21).std()
-    
-    # Target formulation with lookahead protection
-    hold_period = max(1, HOLD_LOOKAHEAD // (24 if "d" in interval else 1))
-    future_returns = df['close'].pct_change(hold_period).shift(-hold_period)
-    df['target'] = (future_returns > 0).astype(int)
-    
-    # Remove lookahead bias and leakage buffer
-    df = df.dropna().iloc[:-hold_period-3]
-    
-    if len(df) < MIN_TRAIN_SAMPLES or df['target'].nunique() == 1:
-        st.error("Insufficient data or no price movement detected")
+    except Exception as e:
+        st.error(f"Feature engineering failed: {str(e)}")
         return pd.DataFrame()
-    
-    return df.replace([np.inf, -np.inf], np.nan).ffill().bfill()
 
 class TradingModel:
     def __init__(self):
@@ -107,7 +116,6 @@ class TradingModel:
         self.storage = InMemoryStorage()
 
     def _update_progress(self, trial_number: int, current_score: float, best_score: float):
-        """Update training progress with atomic state management"""
         st.session_state.training_progress = {
             'completed': trial_number,
             'current_score': current_score,
@@ -117,23 +125,14 @@ class TradingModel:
         st.experimental_rerun()
 
     def optimize_model(self, X: pd.DataFrame, y: pd.Series) -> bool:
-        """Persistent optimization with proper state management"""
         try:
-            # Initialize study if not active
             if not st.session_state.training_progress.get('active', False):
                 self._init_study()
 
-            study = optuna.load_study(
-                study_name="trading_study",
-                storage=self.storage
-            )
+            study = optuna.load_study(study_name="trading_study", storage=self.storage)
 
             def optimization_callback(study, trial):
-                self._update_progress(
-                    trial.number + 1,
-                    trial.value if trial.value else 0.0,
-                    study.best_value
-                )
+                self._update_progress(trial.number + 1, trial.value or 0.0, study.best_value)
 
             remaining_trials = MAX_TRIALS - len(study.trials)
             if remaining_trials > 0:
@@ -151,13 +150,11 @@ class TradingModel:
                 st.experimental_rerun()
             
             return True
-            
         except Exception as e:
             st.error(f"Optimization error: {str(e)}")
             return False
 
     def _init_study(self):
-        """Initialize new study with proper cleanup"""
         try:
             optuna.delete_study(study_name="trading_study", storage=self.storage)
         except KeyError:
@@ -175,66 +172,42 @@ class TradingModel:
         }
 
     def _train_final_model(self, X: pd.DataFrame, y: pd.Series, params: dict) -> bool:
-        """Final model training with full dataset"""
         try:
-            self.model = XGBClassifier(
-                **params,
-                tree_method='hist',
-                random_state=42,
-                enable_categorical=False
-            )
+            self.model = XGBClassifier(**params, tree_method='hist', random_state=42)
             self.model.fit(X, y)
-            
             self.feature_importances = pd.Series(
                 self.model.feature_importances_,
                 index=X.columns
             ).sort_values(ascending=False)
-            
             return True
         except Exception as e:
-            st.error(f"Final training failed: {str(e)}")
+            st.error(f"Training failed: {str(e)}")
             return False
 
     def _objective(self, trial, X: pd.DataFrame, y: pd.Series) -> float:
-        """Optimization objective with realistic parameters"""
         params = {
             'n_estimators': trial.suggest_int('n_estimators', 100, 1000),
             'learning_rate': trial.suggest_float('learning_rate', 1e-4, 0.3, log=True),
             'max_depth': trial.suggest_int('max_depth', 3, 9),
             'subsample': trial.suggest_float('subsample', 0.5, 0.95),
-            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 0.95),
-            'gamma': trial.suggest_float('gamma', 0, 1.0),
             'reg_alpha': trial.suggest_float('reg_alpha', 0, 2.0),
-            'reg_lambda': trial.suggest_float('reg_lambda', 0, 2.0)
         }
-        
         try:
             tscv = TimeSeriesSplit(n_splits=3, test_size=VALIDATION_WINDOW)
             scores = []
-            
             for train_idx, test_idx in tscv.split(X):
-                if len(train_idx) < MIN_TRAIN_SAMPLES or len(test_idx) < VALIDATION_WINDOW:
-                    continue
-                    
-                X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
-                y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
-                
+                if len(train_idx) < MIN_TRAIN_SAMPLES: continue
                 model = XGBClassifier(**params)
-                model.fit(X_train, y_train)
-                
-                y_proba = model.predict_proba(X_test)[:, 1]
-                scores.append(roc_auc_score(y_test, y_proba))
-            
+                model.fit(X.iloc[train_idx], y.iloc[train_idx])
+                y_proba = model.predict_proba(X.iloc[test_idx])[:, 1]
+                scores.append(roc_auc_score(y.iloc[test_idx], y_proba))
             return np.mean(scores) if scores else 0.5
-        except Exception as e:
+        except Exception:
             return 0.5
 
     def predict(self, X: pd.DataFrame) -> float:
-        """Unrestricted prediction with validation"""
         try:
-            if self.model is None or X.empty:
-                return 0.5
-                
+            if not self.model or X.empty: return 0.5
             X_clean = X[self.feature_importances.index[:MIN_FEATURES]].ffill().bfill()
             return self.model.predict_proba(X_clean)[0][1]
         except Exception as e:
@@ -250,11 +223,9 @@ def main():
         with st.spinner("Building dataset..."):
             data = safe_yf_download(symbol, period='max', interval=interval)
             processed_data = calculate_features(data, interval)
-            
             if not processed_data.empty:
                 st.session_state.processed_data = processed_data
                 st.session_state.data_loaded = True
-                st.session_state.model = None
                 st.success(f"Processed {len(processed_data)} samples")
             else:
                 st.error("Data processing failed")
@@ -263,19 +234,7 @@ def main():
     if st.session_state.get('data_loaded', False):
         df = st.session_state.processed_data
         
-        # Real-time progress display
-        if st.session_state.training_progress.get('active', False):
-            progress = st.progress(
-                st.session_state.training_progress['completed'] / MAX_TRIALS,
-                text=f"Completed {st.session_state.training_progress['completed']}/{MAX_TRIALS} trials"
-            )
-            cols = st.columns(2)
-            cols[0].metric("Current Score", 
-                          f"{st.session_state.training_progress['current_score']:.2%}")
-            cols[1].metric("Best Score", 
-                          f"{st.session_state.training_progress['best_score']:.2%}")
-        
-        # Market overview
+        # Market Overview
         col1, col2 = st.columns([3, 1])
         with col1:
             st.plotly_chart(px.line(df, x=df.index, y='close', 
@@ -283,7 +242,10 @@ def main():
                               use_container_width=True)
         with col2:
             st.metric("Current Price", f"${df['close'].iloc[-1]:.2f}")
-            st.metric("Market Volatility", f"{df['volatility_21'].iloc[-1]:.2%}")
+            if 'volatility_21' in df.columns:
+                st.metric("Market Volatility", f"{df['volatility_21'].iloc[-1]:.2%}")
+            else:
+                st.warning("Volatility data unavailable")
 
     if st.sidebar.button("🚀 Start Training") and st.session_state.data_loaded:
         df = st.session_state.processed_data
@@ -294,30 +256,16 @@ def main():
     if st.session_state.model and st.session_state.data_loaded:
         df = st.session_state.processed_data
         latest_data = df.drop(columns=['target']).iloc[[-1]]
-        
         confidence = st.session_state.model.predict(latest_data)
         
-        # Trading signal display
         st.subheader("Live Trading Signal")
         col1, col2 = st.columns([1, 2])
-        col1.metric("Prediction Confidence", f"{confidence:.2%}")
+        col1.metric("Confidence", f"{confidence:.2%}")
         
-        # Visual threshold analysis
-        fig = px.bar(x=['Buy Threshold', 'Current', 'Sell Threshold'],
+        fig = px.bar(x=['Buy', 'Current', 'Sell'],
                     y=[TRADE_THRESHOLD_BUY, confidence, TRADE_THRESHOLD_SELL],
                     text_auto='.2%')
-        fig.update_layout(title="Decision Threshold Analysis")
         col2.plotly_chart(fig, use_container_width=True)
-        
-        # Feature importance
-        if not st.session_state.model.feature_importances.empty:
-            with st.expander("Feature Importance Analysis"):
-                st.dataframe(
-                    st.session_state.model.feature_importances.reset_index().rename(
-                        columns={'index': 'Feature', 0: 'Importance'}
-                    ).style.format({'Importance': '{:.2%}'}),
-                    height=400
-                )
 
 if __name__ == "__main__":
     main()

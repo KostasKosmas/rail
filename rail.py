@@ -59,6 +59,8 @@ def safe_yf_download(symbol: str, **kwargs) -> pd.DataFrame:
         try:
             data = yf.download(symbol, progress=False, auto_adjust=True, **kwargs)
             if not data.empty and data['Volume'].mean() > 0:
+                # Convert column names to lowercase
+                data.columns = [col.lower() for col in data.columns]
                 return data
         except (requests.exceptions.RequestException, json.JSONDecodeError):
             continue
@@ -73,8 +75,8 @@ def calculate_features(df: pd.DataFrame, interval: str) -> pd.DataFrame:
     df = df.copy()
     
     # Price transformations
-    df['log_price'] = np.log(df['Close'])
-    df['returns'] = df['Close'].pct_change()
+    df['log_price'] = np.log(df['close'])
+    df['returns'] = df['close'].pct_change()
     df['log_returns'] = np.log1p(df['returns'])
     
     # Volatility features
@@ -82,11 +84,11 @@ def calculate_features(df: pd.DataFrame, interval: str) -> pd.DataFrame:
         df[f'volatility_{window}'] = df['returns'].rolling(window).std()
     
     # Volume features
-    df['volume_zscore'] = (df['Volume'] - df['Volume'].rolling(21).mean()) / df['Volume'].rolling(21).std()
+    df['volume_zscore'] = (df['volume'] - df['volume'].rolling(21).mean()) / df['volume'].rolling(21).std()
     
     # Target formulation with lookahead protection
     hold_period = max(1, HOLD_LOOKAHEAD // (24 if "d" in interval else 1))
-    future_returns = df['Close'].pct_change(hold_period).shift(-hold_period)
+    future_returns = df['close'].pct_change(hold_period).shift(-hold_period)
     df['target'] = (future_returns > 0).astype(int)
     
     # Remove lookahead bias and leakage buffer
@@ -276,11 +278,11 @@ def main():
         # Market overview
         col1, col2 = st.columns([3, 1])
         with col1:
-            st.plotly_chart(px.line(df, x=df.index, y='Close', 
+            st.plotly_chart(px.line(df, x=df.index, y='close', 
                               title=f"{symbol} Price History"), 
                               use_container_width=True)
         with col2:
-            st.metric("Current Price", f"${df['Close'].iloc[-1]:.2f}")
+            st.metric("Current Price", f"${df['close'].iloc[-1]:.2f}")
             st.metric("Market Volatility", f"{df['volatility_21'].iloc[-1]:.2%}")
 
     if st.sidebar.button("🚀 Start Training") and st.session_state.data_loaded:

@@ -25,7 +25,7 @@ GARCH_WINDOW = 21
 MIN_FEATURES = 15
 HOLD_LOOKAHEAD = 6
 MAX_RETRIES = 3
-VALIDATION_WINDOW = 63  # 3 months of daily data
+VALIDATION_WINDOW = 63
 MIN_CLASS_RATIO = 0.3
 MIN_TRAIN_SAMPLES = 500
 
@@ -36,7 +36,7 @@ logging.basicConfig(level=logging.INFO)
 st.set_page_config(page_title="AI Trading System", layout="wide")
 st.title("🚀 Smart Crypto Trading Assistant")
 
-# Session State Management
+# Session State Initialization
 if 'model' not in st.session_state:
     st.session_state.model = None
 if 'processed_data' not in st.session_state:
@@ -52,10 +52,6 @@ if 'training_progress' not in st.session_state:
     }
 if 'study' not in st.session_state:
     st.session_state.study = None
-
-# --------------------------
-# Core Data Functions
-# --------------------------
 
 def safe_yf_download(symbol: str, **kwargs) -> pd.DataFrame:
     """Robust data downloader with retries and validation"""
@@ -88,9 +84,6 @@ def calculate_features(df: pd.DataFrame, interval: str) -> pd.DataFrame:
     # Volume features
     df['volume_zscore'] = (df['Volume'] - df['Volume'].rolling(21).mean()) / df['Volume'].rolling(21).std()
     
-    # Price dynamics
-    df['trend_strength'] = df['Close'].rolling(14).apply(lambda x: np.polyfit(np.arange(len(x)), x, 1)[0])
-    
     # Target formulation with lookahead protection
     hold_period = max(1, HOLD_LOOKAHEAD // (24 if "d" in interval else 1))
     future_returns = df['Close'].pct_change(hold_period).shift(-hold_period)
@@ -105,10 +98,6 @@ def calculate_features(df: pd.DataFrame, interval: str) -> pd.DataFrame:
     
     return df.replace([np.inf, -np.inf], np.nan).ffill().bfill()
 
-# --------------------------
-# Modeling Components
-# --------------------------
-
 class TradingModel:
     def __init__(self):
         self.model = None
@@ -116,6 +105,7 @@ class TradingModel:
         self.storage = InMemoryStorage()
 
     def _update_progress(self, trial_number: int, current_score: float, best_score: float):
+        """Update training progress with atomic state management"""
         st.session_state.training_progress = {
             'completed': trial_number,
             'current_score': current_score,
@@ -127,7 +117,8 @@ class TradingModel:
     def optimize_model(self, X: pd.DataFrame, y: pd.Series) -> bool:
         """Persistent optimization with proper state management"""
         try:
-            if not st.session_state.training_progress['active']:
+            # Initialize study if not active
+            if not st.session_state.training_progress.get('active', False):
                 self._init_study()
 
             study = optuna.load_study(
@@ -149,8 +140,9 @@ class TradingModel:
                     n_trials=remaining_trials,
                     callbacks=[optimization_callback],
                     show_progress_bar=False,
-                    catch=(Exception,))
-            
+                    catch=(Exception,)
+                )
+
             if len(study.trials) >= MAX_TRIALS:
                 self._train_final_model(X, y, study.best_params)
                 st.session_state.training_progress['active'] = False
@@ -219,6 +211,9 @@ class TradingModel:
             scores = []
             
             for train_idx, test_idx in tscv.split(X):
+                if len(train_idx) < MIN_TRAIN_SAMPLES or len(test_idx) < VALIDATION_WINDOW:
+                    continue
+                    
                 X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
                 y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
                 
@@ -228,7 +223,7 @@ class TradingModel:
                 y_proba = model.predict_proba(X_test)[:, 1]
                 scores.append(roc_auc_score(y_test, y_proba))
             
-            return np.mean(scores)
+            return np.mean(scores) if scores else 0.5
         except Exception as e:
             return 0.5
 
@@ -243,10 +238,6 @@ class TradingModel:
         except Exception as e:
             logging.error(f"Prediction error: {str(e)}")
             return 0.5
-
-# --------------------------
-# Streamlit Interface
-# --------------------------
 
 def main():
     st.sidebar.header("Configuration")
@@ -265,12 +256,13 @@ def main():
                 st.success(f"Processed {len(processed_data)} samples")
             else:
                 st.error("Data processing failed")
+            st.experimental_rerun()
 
     if st.session_state.get('data_loaded', False):
         df = st.session_state.processed_data
         
         # Real-time progress display
-        if st.session_state.training_progress['active']:
+        if st.session_state.training_progress.get('active', False):
             progress = st.progress(
                 st.session_state.training_progress['completed'] / MAX_TRIALS,
                 text=f"Completed {st.session_state.training_progress['completed']}/{MAX_TRIALS} trials"
@@ -294,8 +286,6 @@ def main():
     if st.sidebar.button("🚀 Start Training") and st.session_state.data_loaded:
         df = st.session_state.processed_data
         model = TradingModel()
-        if not st.session_state.training_progress['active']:
-            st.session_state.model = None
         st.session_state.model = model
         model.optimize_model(df.drop(columns=['target']), df['target'])
 

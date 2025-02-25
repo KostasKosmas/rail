@@ -149,7 +149,7 @@ class TradingModel:
                     n_trials=remaining_trials,
                     callbacks=[optimization_callback],
                     show_progress_bar=False,
-                    catch=(Exception,)
+                    catch=(Exception,))
             
             if len(study.trials) >= MAX_TRIALS:
                 self._train_final_model(X, y, study.best_params)
